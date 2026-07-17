@@ -22,8 +22,8 @@ class SAM3ProcessorAdapter:
     def initialize_masks(
         self, t1_image: np.ndarray, t2_image: np.ndarray, query: str
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        t1_mask, t1_evidence = self._text_segment(t1_image, query)
-        t2_mask, t2_evidence = self._text_segment(t2_image, query)
+        t1_mask, t1_evidence = self.segment_text(t1_image, query)
+        t2_mask, t2_evidence = self.segment_text(t2_image, query)
         evidence = {
             "sam3_t1": t1_evidence,
             "sam3_t2": t2_evidence,
@@ -33,6 +33,13 @@ class SAM3ProcessorAdapter:
         if confidence1 is not None and confidence2 is not None:
             evidence["change_confidence"] = np.maximum(confidence1, confidence2)
         return t1_mask, t2_mask, evidence
+
+    def segment_text(
+        self, image: np.ndarray, query: str
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """Run one public text-prompt pass for staged/low-memory runtimes."""
+
+        return self._text_segment(image, query)
 
     def segment_box(
         self,
@@ -103,4 +110,3 @@ class SAM3ProcessorAdapter:
                 array = array * 255
             array = np.clip(array, 0, 255).astype(np.uint8)
         return Image.fromarray(array)
-

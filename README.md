@@ -68,6 +68,28 @@ PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
 `tools/collect_runtime_manifest.py` at the start of real runs to capture the commit,
 software, model path, split, seed, and CUDA state.
 
+Real local-weight adapter checks are isolated by dependency stack:
+
+```bash
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/sam3_smoke.py --device cpu --resolution 1008
+PYTHONPATH=/Data/wyh/CD-SegAgent/change_agent:/Data/wyh/CD-SegAgent/SegAgent:/Data/wyh/CD-SegAgent/SegAgent/third_party/SimpleClick \
+  /Data/wyh/CD-SegAgent/segagent-env/bin/python \
+  tools/simpleclick_smoke.py --device cpu
+```
+
+Prepare real offline Verifier samples and run a bounded training smoke:
+
+```bash
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/build_verifier_samples.py \
+  --dataset-root /Data/wyh/CD-SegAgent/OmniOVCD/dataset/LEVIR-CD/test_256 \
+  --max-samples 2 --output outputs/verifier_levir_smoke.npz
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/train_verifier.py --samples outputs/verifier_levir_smoke.npz \
+  --epochs 1 --batch-size 1 --output outputs/verifier_levir_smoke.pt
+```
+
 ## Environment isolation
 
 Do not upgrade the legacy SegAgent environment (`transformers==4.31.0`). Install the
@@ -118,6 +140,11 @@ features hidden from the Agent.
 `SimpleClickAdapter` wraps SegAgent's segmentation model and passes the current target
 view mask as the SimpleClick `prev_mask`. Every tool result is checked for shape before
 it can update Environment state.
+
+The upstream OmniOVCD checkout contains three CPU-compatibility fixes used by the
+adapter smoke: device-aware SAM3 decoder coordinate caches, CPU-safe positional
+encoding precomputation, and a non-pinned CPU geometry scale path. These are committed
+in that checkout only; model weights remain outside Git.
 
 ## Safety boundary
 

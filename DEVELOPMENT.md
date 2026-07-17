@@ -20,10 +20,8 @@ two-round trajectory smoke passed
 SegAgent external prev_mask forwarding smoke passed
 ```
 
-Not yet validated: real Qwen3-VL generation, real OmniOVCD initialization, real SAM3
-box prompting, real SimpleClick refinement quality, learned Verifier training, and
-dataset-level metrics/ablations. These require the corresponding GPU environments and
-weights.
+The model-level checks below are now validated with local weights. They are kept in
+separate processes because SAM3 and SimpleClick use incompatible dependency stacks.
 
 ## 2026-07-17 — training/rollout/server smoke preparation
 
@@ -75,3 +73,19 @@ Verifier-accepted `finish`; the trajectory was saved under
 `CUDA_VISIBLE_DEVICES=0` currently reports no usable CUDA device, so no GPU was
 allocated. When the driver is repaired, use one visible GPU and `device_map=auto` for
 the same script; do not expose all GPUs for this smoke.
+
+Real-weight adapter and Verifier checks:
+
+```text
+SAM3 text + geometric prompt (CPU): 50.949 s, peak RSS ~7,493 MB,
+  models/sam3/sam3.pt, text masks 0, box masks 1
+SimpleClick ViT-L external-mask point (CPU): 10.807 s, peak RSS ~3,124 MB,
+  models/SimpleClick/cocolvis_vit_large.pth, output 256x256
+LEVIR-CD verifier sample builder: 2 paired samples, 10 feature channels
+LEVIR-CD verifier head: 1 epoch, loss 5.6379 -> 5.6904, peak RSS ~864 MB
+```
+
+The SAM3 and SimpleClick commands intentionally run independently; loading both
+large checkpoints together is outside the bounded smoke-test memory budget. The
+Qwen-to-Environment smoke remains the supported full Agent rollout, while the two
+segmentation adapters are validated at their real model boundaries.
