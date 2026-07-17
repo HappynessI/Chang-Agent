@@ -1,0 +1,12 @@
+{
+  "environment": "omniovcd-env",
+  "agent_model": "/Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct",
+  "cuda_visible_devices": "7",
+  "device_map": "auto",
+  "inference_only": true,
+  "max_steps": 3,
+  "dataset_split": "synthetic-smoke",
+  "seed": 42,
+  "memory_policy": "single-GPU; do not expose all GPUs for smoke tests",
+  "notes": "Use an execution context with /dev/nvidia* mounted; sandbox-only probes can report false CUDA availability."
+}

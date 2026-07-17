@@ -55,6 +55,13 @@ def main() -> None:
     result_mask = SimpleClickAdapter(segmentation_model).refine(
         image, initial_mask, (128, 128), True
     )
+    cuda_stats = {"cuda_available": bool(torch.cuda.is_available())}
+    if torch.cuda.is_available():
+        cuda_stats.update(
+            allocated_mb=round(torch.cuda.memory_allocated() / 2**20, 2),
+            reserved_mb=round(torch.cuda.memory_reserved() / 2**20, 2),
+            peak_allocated_mb=round(torch.cuda.max_memory_allocated() / 2**20, 2),
+        )
     result = {
         "checkpoint": args.checkpoint,
         "device": args.device,
@@ -63,6 +70,7 @@ def main() -> None:
         "rss_peak_mb": round(rss_mb(), 2),
         "mask_shape": list(result_mask.shape),
         "mask_pixels": int(result_mask.sum()),
+        "cuda": cuda_stats,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")

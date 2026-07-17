@@ -49,6 +49,8 @@ def main() -> None:
 
     model.to(args.device)
     model._device = torch.device(args.device)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     processor = Sam3Processor(model, resolution=args.resolution, device=args.device)
     image = Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8))
     state = processor.set_image(image)
@@ -70,6 +72,12 @@ def main() -> None:
         "text_mask_count": text_count,
         "box_mask_count": box_count,
     }
+    if torch.cuda.is_available():
+        result["cuda"] = {
+            "allocated_mb": round(torch.cuda.memory_allocated() / 2**20, 2),
+            "reserved_mb": round(torch.cuda.memory_reserved() / 2**20, 2),
+            "peak_allocated_mb": round(torch.cuda.max_memory_allocated() / 2**20, 2),
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))

@@ -49,7 +49,7 @@ def main() -> None:
     parser.add_argument(
         "--device-map",
         default="cpu",
-        help="Use cpu in this container; use auto on a CUDA server.",
+        help="Use cpu for fallback or auto to place the model on visible CUDA devices.",
     )
     args = parser.parse_args()
     model_path = Path(args.model_path).resolve()
@@ -92,4 +92,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

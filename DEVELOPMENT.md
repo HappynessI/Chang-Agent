@@ -89,3 +89,19 @@ The SAM3 and SimpleClick commands intentionally run independently; loading both
 large checkpoints together is outside the bounded smoke-test memory budget. The
 Qwen-to-Environment smoke remains the supported full Agent rollout, while the two
 segmentation adapters are validated at their real model boundaries.
+
+GPU validation (one visible L20, `CUDA_VISIBLE_DEVICES=7`):
+
+```text
+Qwen3-VL smoke: CUDA allocated ~4,067 MB, peak ~4,147 MB, load 6.893 s
+Qwen3-VL → Environment rollout: CUDA allocated ~4,067 MB, peak ~4,147 MB,
+  1 step, 14.188 s
+SAM3 text + box smoke: CUDA allocated ~3,525 MB, peak ~3,909 MB, 13.540 s
+SimpleClick point smoke: CUDA allocated ~1,249 MB, reserved ~1,450 MB,
+  peak ~1,390 MB, 7.167 s
+```
+
+The earlier false “CUDA unavailable” result came from running Python inside the
+restricted sandbox, which does not expose `/dev/nvidia*`; `nvidia-smi` and the same
+commands in the device-enabled context see eight NVIDIA L20 GPUs with driver
+595.58.03.

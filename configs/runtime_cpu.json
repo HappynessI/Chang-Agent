@@ -6,6 +6,5 @@
   "max_steps": 3,
   "dataset_split": "synthetic-smoke",
   "seed": 42,
-  "notes": "Fallback for hosts without an NVIDIA driver; use device_map=auto on GPU servers."
+  "notes": "Fallback profile; use runtime_gpu_l20.json in a device-enabled execution context."
 }
-

@@ -68,6 +68,21 @@ PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
 `tools/collect_runtime_manifest.py` at the start of real runs to capture the commit,
 software, model path, split, seed, and CUDA state.
 
+On this host, GPU access requires an execution context with `/dev/nvidia*` mounted.
+The validated low-occupancy profile is one L20 only:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/rollout_smoke.py --agent qwen3vl --device-map auto \
+  --model-path /Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct
+```
+
+Use [`configs/runtime_gpu_l20.json`](configs/runtime_gpu_l20.json) as the corresponding
+runtime manifest. A shell launched only inside the restricted filesystem sandbox can
+still report `cuda.is_available() == false`; verify with `nvidia-smi` in the device-
+enabled execution context.
+
 Real local-weight adapter checks are isolated by dependency stack:
 
 ```bash

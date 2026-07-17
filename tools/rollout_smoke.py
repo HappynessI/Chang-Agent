@@ -26,6 +26,23 @@ def rss_mb() -> float:
     return value / 1024.0 if value > 10_000 else value / (1024.0 * 1024.0)
 
 
+def cuda_memory() -> dict[str, object]:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {"cuda_available": False}
+        return {
+            "cuda_available": True,
+            "device_count": torch.cuda.device_count(),
+            "allocated_mb": round(torch.cuda.memory_allocated() / 2**20, 2),
+            "reserved_mb": round(torch.cuda.memory_reserved() / 2**20, 2),
+            "peak_allocated_mb": round(torch.cuda.max_memory_allocated() / 2**20, 2),
+        }
+    except Exception as error:
+        return {"cuda_available": False, "error": repr(error)}
+
+
 class MockPointBackend:
     def refine(self, image, initial_mask, coordinate, is_positive):
         result = initial_mask.copy()
@@ -100,7 +117,7 @@ def main() -> None:
         "best_change_pixels": int(best.change_mask.sum()),
         "elapsed_seconds": round(time.monotonic() - start, 3),
         "rss_peak_mb": round(rss_mb(), 2),
-        "cuda_available": False,
+        "cuda": cuda_memory(),
         "agent": agent_details,
         "trajectory": str(trajectory_path),
     }
