@@ -20,12 +20,16 @@ class GroundingModelQwen3VL:
         model_path: str = DEFAULT_MODEL,
         *,
         max_new_tokens: int = 160,
+        device_map: str | None = "auto",
+        dtype: str = "auto",
         model: Any | None = None,
         processor: Any | None = None,
         action_parser: ActionParser | None = None,
     ):
         self.model_path = model_path
         self.max_new_tokens = max_new_tokens
+        self.device_map = device_map
+        self.dtype = dtype
         self.action_parser = action_parser or ActionParser()
         if (model is None) != (processor is None):
             raise ValueError("model and processor must be supplied together")
@@ -37,8 +41,13 @@ class GroundingModelQwen3VL:
                     "Qwen3-VL requires the isolated qwen3vl dependencies "
                     "(transformers>=4.57.0 and accelerate)."
                 ) from error
+            load_kwargs: dict[str, Any] = {"dtype": dtype}
+            # Transformers accepts ``device_map='auto'`` for CUDA placement, while
+            # a CPU-only smoke should use the ordinary single-process loader.
+            if device_map != "cpu":
+                load_kwargs["device_map"] = device_map
             model = Qwen3VLForConditionalGeneration.from_pretrained(
-                model_path, dtype="auto", device_map="auto"
+                model_path, **load_kwargs
             ).eval()
             processor = AutoProcessor.from_pretrained(model_path)
         self.model = model
@@ -114,4 +123,3 @@ class GroundingModelQwen3VL:
             f"Verifier feedback: {json.dumps(feedback, ensure_ascii=False)}\n"
             f"History summary: {observation.history_summary or 'none'}"
         )
-

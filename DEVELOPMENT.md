@@ -25,3 +25,26 @@ box prompting, real SimpleClick refinement quality, learned Verifier training, a
 dataset-level metrics/ablations. These require the corresponding GPU environments and
 weights.
 
+## 2026-07-17 — training/rollout/server smoke preparation
+
+- Added a deterministic `train_verifier.py --smoke` path. It exercises the trainable
+  head, quality/error-map/classification losses, optimizer update, checkpoint writing,
+  and memory telemetry.
+- Added `rollout_smoke.py`, which uses the real `OmniOVCDAdapter` boundary and mock
+  tool callbacks to exercise two feedback-loop steps without GT.
+- Added `qwen3vl_smoke.py` and `download_qwen3vl.py`; the latter keeps model files
+  under `models/`, outside the Git repository.
+- Added `collect_runtime_manifest.py` and `configs/runtime_cpu.json` for reproducible
+  local/server runs.
+
+Smoke results on the current host:
+
+```text
+Verifier: 2 epochs, loss 5.3406 -> 5.3378, RSS ~630 MB, CUDA unavailable
+Adapter rollout: 2 steps, RSS ~38 MB, CUDA unavailable
+```
+
+The current host reports no NVIDIA driver (`nvidia-smi` cannot communicate with the
+driver), so real GPU VRAM and CUDA model generation remain pending. Qwen3-VL download
+is being performed from the official Hugging Face endpoint in tmux; its completion
+status and artifact path are recorded in `logs/qwen3vl_download_official.log`.

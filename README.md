@@ -28,6 +28,42 @@ Real OmniOVCD, SAM3, SimpleClick, and Qwen3-VL weight-level GPU integration rema
 server validation task. The rule Verifier is a baseline, not the research-result
 trained Verifier.
 
+## Local smoke commands
+
+The isolated `omniovcd-env` can prepare the Qwen3-VL dependency set without changing
+the legacy SegAgent environment:
+
+```bash
+/Data/wyh/CD-SegAgent/omniovcd-env/bin/pip install \
+  'accelerate>=0.26' 'qwen-vl-utils>=0.0.8'
+HF_ENDPOINT=https://huggingface.co \
+  /Data/wyh/CD-SegAgent/omniovcd-env/bin/python tools/download_qwen3vl.py
+```
+
+On a host without a working NVIDIA driver, load and generate on CPU:
+
+```bash
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/qwen3vl_smoke.py --device-map cpu
+```
+
+The smoke report records load time, process RSS, CUDA availability, raw JSON, and the
+parsed Action. On a CUDA server use `--device-map auto`; the report then includes
+PyTorch allocated/reserved VRAM.
+
+Verifier and adapter-loop smoke tests do not need model weights:
+
+```bash
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/train_verifier.py --smoke
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/rollout_smoke.py
+```
+
+`configs/runtime_cpu.json` documents the no-GPU fallback. Use
+`tools/collect_runtime_manifest.py` at the start of real runs to capture the commit,
+software, model path, split, seed, and CUDA state.
+
 ## Environment isolation
 
 Do not upgrade the legacy SegAgent environment (`transformers==4.31.0`). Install the
@@ -79,4 +115,3 @@ it can update Environment state.
 Runtime `ChangeAgentEnvironment` only accepts `inference_only=True`; `reset` has no GT
 parameter. GT-derived perturbations and labels live in `perturbations.py`, which is an
 offline training utility and is never imported by the Environment.
-

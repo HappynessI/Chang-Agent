@@ -17,10 +17,10 @@ dependencies = [
 qwen3vl = [
   "accelerate>=0.26",
   "transformers>=4.57.0",
+  "qwen-vl-utils>=0.0.8",
 ]
 train = ["torch>=2.1"]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 include = ["change_agent*"]
-

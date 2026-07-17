@@ -1,0 +1,11 @@
+{
+  "environment": "omniovcd-env",
+  "agent_model": "/Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct",
+  "device_map": "cpu",
+  "inference_only": true,
+  "max_steps": 3,
+  "dataset_split": "synthetic-smoke",
+  "seed": 42,
+  "notes": "Fallback for hosts without an NVIDIA driver; use device_map=auto on GPU servers."
+}
+
