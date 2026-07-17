@@ -32,6 +32,8 @@ weights.
   and memory telemetry.
 - Added `rollout_smoke.py`, which uses the real `OmniOVCDAdapter` boundary and mock
   tool callbacks to exercise two feedback-loop steps without GT.
+- Added `SAM3ProcessorAdapter` for concrete `set_image`, `set_text_prompt`, and
+  `add_geometric_prompt` integration, with a fake-processor regression test.
 - Added `qwen3vl_smoke.py` and `download_qwen3vl.py`; the latter keeps model files
   under `models/`, outside the Git repository.
 - Added `collect_runtime_manifest.py` and `configs/runtime_cpu.json` for reproducible

@@ -106,6 +106,11 @@ runs should additionally pass config/checkpoint/GPU/software metadata through
 2. `segment_box_callback(image, normalized_cxcywh, query)` executes SAM3 geometric
    prompting.
 
+`SAM3ProcessorAdapter` provides those callbacks directly from OmniOVCD's public
+`SAM3ImageProcessor` API. It uses text prompts to initialize both temporal masks and
+`add_geometric_prompt` for normalized box actions, while keeping processor state and
+features hidden from the Agent.
+
 `SimpleClickAdapter` wraps SegAgent's segmentation model and passes the current target
 view mask as the SimpleClick `prev_mask`. Every tool result is checked for shape before
 it can update Environment state.
