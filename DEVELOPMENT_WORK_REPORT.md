@@ -402,3 +402,52 @@ Git 忽略规则确保以下大文件不进入仓库：
 4. 在固定 GPU、固定随机种子和正式数据 split 下生成最终实验报告。
 
 当前推荐策略是继续使用单卡 `GPU 7` 做短 smoke，正式大规模训练前再根据显存余量决定是否切换到多卡或服务化部署。
+
+## 9. OmniOVCD 三样本可视化推理
+
+按检查需求，从 LEVIR-CD `test_256` 中选择三个正样本：
+
+```text
+test_85_16.png：GT positive pixels 1535
+test_20_15.png：GT positive pixels 5031
+test_78_13.png：GT positive pixels 11936
+```
+
+使用单张 L20（`CUDA_VISIBLE_DEVICES=7`）运行 OmniOVCD/SAM3，模型可视化和 MMSeg visualization hook 同时开启。为了让每次推理的产物独立保存，`OmniOVCD/eval.py` 增加了：
+
+- `--work-dir`：指定 config snapshot、runner log 和 results.txt 目录。
+- 可用的 `--show_dir`：实际启用 `SegVisualizationHook` 并设置 visualizer save directory。
+- `--wait-time`：补齐 `--show` 需要的显示等待参数。
+
+OmniOVCD 本地提交：
+
+```text
+5d8830b feat: support isolated visualization output directories
+```
+
+推理结果：
+
+```text
+样本数：3
+aAcc：96.08
+mIoU：82.70
+mAcc：95.98
+mFscore：89.97
+building IoU：69.70
+```
+
+每样本 building IoU：
+
+```text
+test_20_15.png：0.852889
+test_78_13.png：0.760079
+test_85_16.png：0.301231
+```
+
+完整产物目录：
+
+```text
+/Data/wyh/CD-SegAgent/outputs/omniovcd_levir_3sample_vis_20260717_145327
+```
+
+该目录保存了输入 T1/T2、GT、最终预测、T1/T2 semantic mask、change mask、MMSeg 合成可视化、resolved config、源码快照、runner log、完整 stdout/stderr、metrics、GPU 状态、artifact inventory 和 SHA-256 校验和。
