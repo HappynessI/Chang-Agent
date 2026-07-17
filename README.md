@@ -1,0 +1,82 @@
+# Change-Agent
+
+Change-Agent is a GT-free iterative change-detection research framework built around
+the existing `SegAgent` and `OmniOVCD` repositories. The runtime loop keeps T1/T2
+semantic masks, instances, matching, and model evidence inside the Environment. The
+Agent receives only T1, T2, the query, the current change mask, structured Verifier
+feedback, and a compact history.
+
+The implementation follows [`../CHANGE_AGENT_DEVELOPMENT_SPEC.md`](../CHANGE_AGENT_DEVELOPMENT_SPEC.md).
+
+## Current milestone
+
+The current code implements the v0–v3 research skeleton:
+
+- strict `State`, `Action`, and `VerifierOutput` protocols;
+- JSON extraction plus view/action/coordinate/box validation;
+- a Qwen3-VL-2B Adapter using `AutoProcessor`, `apply_chat_template`, and
+  `Qwen3VLForConditionalGeneration`;
+- an inference-only Environment with no GT argument or label state;
+- SimpleClick point and SAM3 box boundaries;
+- per-step instance extraction, one-to-one matching, and change-mask reconstruction;
+- a transparent rule Verifier baseline and a trainable frozen-feature Verifier head;
+- offline GT perturbations for Verifier supervision;
+- feedback-driven iteration, finish rejection, complete trajectory artifacts, and
+  history-best state selection.
+
+Real OmniOVCD, SAM3, SimpleClick, and Qwen3-VL weight-level GPU integration remains a
+server validation task. The rule Verifier is a baseline, not the research-result
+trained Verifier.
+
+## Environment isolation
+
+Do not upgrade the legacy SegAgent environment (`transformers==4.31.0`). Install the
+new Agent branch in a separate environment:
+
+```bash
+python -m pip install -e '.[qwen3vl]'
+```
+
+Install training dependencies separately when training the Verifier:
+
+```bash
+python -m pip install -e '.[train]'
+```
+
+OmniOVCD/SAM3 and SimpleClick should remain in their existing isolated environments.
+Their adapters accept injected callbacks/wrappers so incompatible CUDA and
+Transformers stacks do not need to share one process.
+
+## Run tests and smoke loop
+
+The test suite only requires NumPy and Pillow:
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests -v
+PYTHONPATH=. python tools/smoke_loop.py --output outputs/smoke
+```
+
+The smoke output includes `trajectory.json` and one `.npy` change mask per step. Run
+metadata records the Git commit, Python/platform, seed, and dataset split. Production
+runs should additionally pass config/checkpoint/GPU/software metadata through
+`ChangeAgentEnvironment(run_metadata=...)`.
+
+## Adapter contract
+
+`OmniOVCDAdapter` receives two injected callbacks:
+
+1. `initialize_masks(t1_image, t2_image, query)` returns T1/T2 masks plus optional
+   no-GT model evidence.
+2. `segment_box_callback(image, normalized_cxcywh, query)` executes SAM3 geometric
+   prompting.
+
+`SimpleClickAdapter` wraps SegAgent's segmentation model and passes the current target
+view mask as the SimpleClick `prev_mask`. Every tool result is checked for shape before
+it can update Environment state.
+
+## Safety boundary
+
+Runtime `ChangeAgentEnvironment` only accepts `inference_only=True`; `reset` has no GT
+parameter. GT-derived perturbations and labels live in `perturbations.py`, which is an
+offline training utility and is never imported by the Environment.
+
