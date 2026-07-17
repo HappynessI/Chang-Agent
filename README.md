@@ -58,6 +58,10 @@ PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
   tools/train_verifier.py --smoke
 PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
   tools/rollout_smoke.py
+PYTHONPATH=. /Data/wyh/CD-SegAgent/omniovcd-env/bin/python \
+  tools/rollout_smoke.py --agent qwen3vl \
+  --model-path /Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct \
+  --device-map cpu
 ```
 
 `configs/runtime_cpu.json` documents the no-GPU fallback. Use

@@ -67,3 +67,11 @@ The smoke process reported a transient CUDA probe inconsistency (one process saw
 devices, while an independent probe and `nvidia-smi` could not initialize NVML). Since
 the run used `device_map=cpu` and allocated/reserved 0 MB VRAM, no GPU memory claim is
 made until the server driver is healthy.
+
+The Qwen3-VL-to-Environment rollout smoke also passed. The generated raw response was
+accepted by the ActionParser, executed as an Environment step, and followed by a
+Verifier-accepted `finish`; the trajectory was saved under
+`/tmp/change_agent_qwen_rollout_smoke2/trajectory.json`. A single-GPU probe with
+`CUDA_VISIBLE_DEVICES=0` currently reports no usable CUDA device, so no GPU was
+allocated. When the driver is repaired, use one visible GPU and `device_map=auto` for
+the same script; do not expose all GPUs for this smoke.

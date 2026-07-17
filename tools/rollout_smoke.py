@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from change_agent.adapters.omniovcd_adapter import OmniOVCDAdapter
+from change_agent.adapters.qwen3vl_adapter import GroundingModelQwen3VL
 from change_agent.agent import ScriptedAgent
 from change_agent.environment import ChangeAgentEnvironment
 from change_agent.executor import ActionExecutor
@@ -53,6 +54,13 @@ def segment_box(image, box_cxcywh, query):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("/tmp/change_agent_rollout_smoke"))
+    parser.add_argument("--agent", choices=("scripted", "qwen3vl"), default="scripted")
+    parser.add_argument(
+        "--model-path",
+        default="/Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct",
+    )
+    parser.add_argument("--device-map", default="cpu")
+    parser.add_argument("--max-new-tokens", type=int, default=32)
     args = parser.parse_args()
     start = time.monotonic()
     backend = OmniOVCDAdapter(initialize_masks, segment_box)
@@ -65,10 +73,26 @@ def main() -> None:
     )
     image = np.zeros((32, 32, 3), dtype=np.uint8)
     observation = environment.reset(image, image.copy(), "building change")
-    agent = ScriptedAgent(
-        [AgentAction("t2", "box", box=(5, 5, 13, 13)), AgentAction("t2", "finish")]
-    )
-    best = ChangeAgentRunner(environment, agent).run(observation)
+    agent_details = {"type": args.agent}
+    if args.agent == "qwen3vl":
+        qwen = GroundingModelQwen3VL(
+            args.model_path,
+            device_map=args.device_map,
+            max_new_tokens=args.max_new_tokens,
+        )
+        agent_details["rss_after_load_mb"] = round(rss_mb(), 2)
+        raw, _ = qwen.act(observation)
+        observation, done = environment.step(raw)
+        agent_details["raw_response"] = raw
+        if not done:
+            observation, done = environment.step(AgentAction("t2", "finish"))
+        agent_details["done"] = done
+    else:
+        agent = ScriptedAgent(
+            [AgentAction("t2", "box", box=(5, 5, 13, 13)), AgentAction("t2", "finish")]
+        )
+        best = ChangeAgentRunner(environment, agent).run(observation)
+    best = environment.best_state
     trajectory_path = environment.trajectory.save(args.output)
     result = {
         "steps": len(environment.trajectory.entries) - 1,
@@ -77,6 +101,7 @@ def main() -> None:
         "elapsed_seconds": round(time.monotonic() - start, 3),
         "rss_peak_mb": round(rss_mb(), 2),
         "cuda_available": False,
+        "agent": agent_details,
         "trajectory": str(trajectory_path),
     }
     print(json.dumps(result, indent=2))
@@ -84,4 +109,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
