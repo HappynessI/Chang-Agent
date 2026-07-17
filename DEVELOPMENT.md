@@ -50,3 +50,20 @@ The current host reports no NVIDIA driver (`nvidia-smi` cannot communicate with 
 driver), so real GPU VRAM and CUDA model generation remain pending. Qwen3-VL download
 is being performed from the official Hugging Face endpoint in tmux; its completion
 status and artifact path are recorded in `logs/qwen3vl_download_official.log`.
+
+The local Qwen3-VL checkpoint subsequently downloaded successfully to
+`/Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct` (4,255,140,312-byte
+`model.safetensors`). The real CPU generation smoke passed:
+
+```text
+load_seconds: 5.115
+RSS: 37.87 MB -> 981.57 MB (delta 943.70 MB)
+raw JSON: {"target_view":"t1","action":"positive_point","coordinate":[500,100]}
+parsed pixel coordinate: [32, 6]
+transformers: 4.57.3
+```
+
+The smoke process reported a transient CUDA probe inconsistency (one process saw 8
+devices, while an independent probe and `nvidia-smi` could not initialize NVML). Since
+the run used `device_map=cpu` and allocated/reserved 0 MB VRAM, no GPU memory claim is
+made until the server driver is healthy.
