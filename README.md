@@ -8,6 +8,8 @@ feedback, and a compact history.
 
 The implementation follows [`../CHANGE_AGENT_DEVELOPMENT_SPEC.md`](../CHANGE_AGENT_DEVELOPMENT_SPEC.md).
 
+本轮完整开发记录见：[DEVELOPMENT_WORK_REPORT.md](DEVELOPMENT_WORK_REPORT.md)。
+
 ## Current milestone
 
 The current code implements the v0–v3 research skeleton:
