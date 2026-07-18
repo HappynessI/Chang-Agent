@@ -26,6 +26,8 @@ from change_agent.adapters.subprocess_adapters import (
 )
 from change_agent.environment import ChangeAgentEnvironment
 from change_agent.executor import ActionExecutor
+from change_agent.coordinates import pixel_box_to_normalized
+from change_agent.state import AgentObservation
 from change_agent.verifier import RuleBasedVerifier
 
 
@@ -164,6 +166,7 @@ def main() -> None:
         )
         observation = environment.reset(image1, image2, args.query)
         invalid_outputs: list[dict[str, str]] = []
+        fallback_actions: list[dict[str, Any]] = []
         while not environment.done:
             validation_error = None
             for attempt in range(args.action_retries):
@@ -175,7 +178,16 @@ def main() -> None:
                     invalid_outputs.append({"raw_agent_output": raw, "error": str(error)})
                     validation_error = str(error)
                     if attempt + 1 == args.action_retries:
-                        raise
+                        fallback_raw = _fallback_box_action(observation)
+                        invalid_outputs.append({
+                            "raw_agent_output": fallback_raw,
+                            "error": "safety fallback after action retry exhaustion",
+                        })
+                        observation, _ = environment.step(fallback_raw)
+                        fallback_actions.append({
+                            "reason": "action_retry_exhaustion",
+                            "action": json.loads(fallback_raw),
+                        })
         tool_steps = [entry for entry in environment.trajectory.entries if entry.execution.get("tool")]
         if not tool_steps:
             raise RuntimeError(f"{sample_file}: Qwen produced no executable segmentation action")
@@ -218,6 +230,8 @@ def main() -> None:
             "best_step": environment.trajectory.best_entry.step_index,
             "verifier_best_step": environment.trajectory.verifier_best_entry.step_index,
             "tool_action_count": len(tool_steps),
+            "fallback_action_count": len(fallback_actions),
+            "fallback_actions": fallback_actions,
             "raw_actions": [entry.raw_action for entry in environment.trajectory.entries[1:]],
         }
 
@@ -257,6 +271,41 @@ def _build_verifier(args: argparse.Namespace, qwen: GroundingModelQwen3VL):
         accept_threshold=args.verifier_accept_threshold,
         max_retries=args.verifier_retries,
     )
+
+
+def _fallback_box_action(observation: AgentObservation) -> str:
+    """Return an auditable box action when the model exhausts invalid retries.
+
+    This does not reinterpret a malformed model response. It is a bounded safety
+    action derived only from the currently visible change mask so the episode can
+    continue and expose the rest of the closed loop; the fallback is recorded in
+    ``invalid_agent_outputs.json`` and the rollout record.
+    """
+
+    mask = np.asarray(observation.change_mask, dtype=bool)
+    height, width = mask.shape
+    ys, xs = np.where(mask)
+    if len(xs):
+        x1 = max(0, int(xs.min()) - 4)
+        y1 = max(0, int(ys.min()) - 4)
+        x2 = min(width - 1, int(xs.max()) + 4)
+        y2 = min(height - 1, int(ys.max()) + 4)
+    else:
+        x1, y1 = width // 4, height // 4
+        x2, y2 = max(x1 + 1, (3 * width) // 4), max(y1 + 1, (3 * height) // 4)
+        x2, y2 = min(width - 1, x2), min(height - 1, y2)
+    if x2 <= x1:
+        x1, x2 = max(0, x1 - 1), min(width - 1, x2 + 1)
+    if y2 <= y1:
+        y1, y2 = max(0, y1 - 1), min(height - 1, y2 + 1)
+    normalized = pixel_box_to_normalized((x1, y1, x2, y2), (width, height))
+    target_view = observation.feedback.target_view if observation.feedback else "t2"
+    return json.dumps({
+        "target_view": target_view,
+        "action": "box",
+        "box": list(normalized),
+        "coordinate_frame": "normalized_1000_xy",
+    })
 
 
 def evaluate_after_rollout(

@@ -33,6 +33,11 @@
 finish，耗尽三步但没有工具动作。Environment 现已在首个真实分割动作之前强制
 拒绝 finish，并将具体 validation error 注入下一次 Qwen retry Prompt。
 
+第三次启动确认当前 Qwen zero-shot 仍可能忽略三次 retry 提示。为避免闭环在
+首个样本直接终止，runner 增加了明确标记的安全兜底：从当前可见 change mask
+计算一个有边界的 T1/T2 SAM3 box，所有模型原始输出和 fallback 都写入轨迹旁的
+`invalid_agent_outputs.json` 与 rollout record，不把 fallback 伪装成模型动作。
+
 ## 2026-07-17：Matching 决策落地与三样本完整闭环入口
 
 本轮将默认 matching 从确定性一对一 greedy 改为 OmniOVCD 原始的双向

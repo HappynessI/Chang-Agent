@@ -30,6 +30,9 @@
 - Enforced the first-tool requirement at the Environment boundary after a live retry
   showed that prompt-only guidance allowed three consecutive `finish` actions. Agent
   retries now include the exact validation error, including missing coordinate frames.
+- Added an explicitly logged, mask-bounded SAM3 box safety fallback after all action
+  retries are rejected, so a zero-shot episode can finish without treating `finish` as
+  an executable segmentation decision.
 - Kept `RuleBasedVerifier` only as the explicit `--verifier rule` ablation; the real
   runner defaults to `qwen_zero_shot`.
 - Renamed offline report fields to `verifier_selected_step` and
