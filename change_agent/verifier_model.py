@@ -11,7 +11,6 @@ class VerifierPredictions:
     quality: Any
     error_map_logits: Any
     error_type_logits: Any
-    target_view_logits: Any
     action_logits: Any
 
 
@@ -42,7 +41,6 @@ def build_verifier_head(
             self.pool = nn.AdaptiveAvgPool2d(1)
             self.quality = nn.Sequential(nn.Linear(hidden_channels, 1), nn.Sigmoid())
             self.error_type = nn.Linear(hidden_channels, error_types)
-            self.target_view = nn.Linear(hidden_channels, 2)
             self.action = nn.Linear(hidden_channels, actions)
 
         def forward(self, frozen_features: Any) -> VerifierPredictions:
@@ -52,7 +50,6 @@ def build_verifier_head(
                 quality=self.quality(pooled).squeeze(1),
                 error_map_logits=self.error_map(features),
                 error_type_logits=self.error_type(pooled),
-                target_view_logits=self.target_view(pooled),
                 action_logits=self.action(pooled),
             )
 
@@ -76,8 +73,6 @@ def verifier_loss(predictions: VerifierPredictions, targets: dict[str, Any]) -> 
     )).mean()
     classification = (
         functional.cross_entropy(predictions.error_type_logits, targets["error_type"])
-        + functional.cross_entropy(predictions.target_view_logits, targets["target_view"])
         + functional.cross_entropy(predictions.action_logits, targets["action"])
     )
     return quality_loss + bce + dice_loss + classification
-

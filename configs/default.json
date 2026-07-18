@@ -3,12 +3,15 @@
   "max_steps": 8,
   "agent_model": "Qwen/Qwen3-VL-2B-Instruct",
   "agent_max_new_tokens": 160,
+  "coordinate_protocol": "public_normalized_0_1000_internal_pixel_xy",
+  "initialization": "fresh_sam3_dual_view_text_prompt",
   "matching_mode": "overlap_presence",
   "instance_overlap_threshold": 0.25,
   "t12_min_instance_area": 0,
   "cd_min_instance_area": 0,
   "verifier": {
-    "type": "rule",
+    "type": "qwen3vl_zero_shot",
+    "shared_agent_weights": true,
     "accept_threshold": 0.82
   },
   "seed": 42

@@ -29,7 +29,7 @@ def rss_mb() -> float:
 def make_synthetic_samples(count: int, seed: int) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(seed)
     features, quality, error_map = [], [], []
-    error_type, target_view, action = [], [], []
+    error_type, action = [], []
     type_ids = {"none": 0, "false_positive_change": 1, "false_negative": 2}
     action_ids = {"finish": 0, "positive_point": 1, "negative_point": 2, "box": 3}
     for index in range(count):
@@ -48,7 +48,6 @@ def make_synthetic_samples(count: int, seed: int) -> dict[str, np.ndarray]:
         quality.append(target.quality)
         error_map.append((target.false_positive_map | target.false_negative_map)[None])
         error_type.append(type_ids[target.error_type])
-        target_view.append(index % 2)
         action.append(
             action_ids[
                 "negative_point"
@@ -63,7 +62,6 @@ def make_synthetic_samples(count: int, seed: int) -> dict[str, np.ndarray]:
         "quality": np.asarray(quality, dtype=np.float32),
         "error_map": np.stack(error_map).astype(np.float32),
         "error_type": np.asarray(error_type, dtype=np.int64),
-        "target_view": np.asarray(target_view, dtype=np.int64),
         "action": np.asarray(action, dtype=np.int64),
     }
 
@@ -72,7 +70,7 @@ def load_samples(path: Path | None, count: int, seed: int) -> dict[str, np.ndarr
     if path is None:
         return make_synthetic_samples(count, seed)
     with np.load(path) as data:
-        required = {"features", "quality", "error_map", "error_type", "target_view", "action"}
+        required = {"features", "quality", "error_map", "error_type", "action"}
         missing = required - set(data.files)
         if missing:
             raise ValueError(f"sample file is missing keys: {sorted(missing)}")
@@ -116,7 +114,15 @@ def main() -> None:
             optimizer.step()
             losses.append(float(loss.detach()))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "seed": args.seed}, args.output)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "seed": args.seed,
+            "schema_version": 2,
+            "target_view_supervision": "omitted",
+        },
+        args.output,
+    )
     result = {
         "mode": "smoke" if args.smoke else "dataset",
         "samples": int(tensors["features"].shape[0]),
@@ -134,4 +140,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

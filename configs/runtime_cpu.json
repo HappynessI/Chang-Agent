@@ -3,6 +3,9 @@
   "agent_model": "/Data/wyh/CD-SegAgent/models/Qwen3-VL-2B-Instruct",
   "device_map": "cpu",
   "inference_only": true,
+  "coordinate_protocol": "public_normalized_0_1000_internal_pixel_xy",
+  "initialization": "fresh_sam3_dual_view_text_prompt",
+  "verifier": "qwen3vl_zero_shot_shared_weights",
   "matching_mode": "overlap_presence",
   "instance_overlap_threshold": 0.25,
   "t12_min_instance_area": 0,
@@ -10,5 +13,5 @@
   "max_steps": 3,
   "dataset_split": "synthetic-smoke",
   "seed": 42,
-  "notes": "Fallback profile; use runtime_gpu_l20.json in a device-enabled execution context."
+  "notes": "Fallback profile for bounded smokes; fresh SAM3 initialization is expensive on CPU."
 }

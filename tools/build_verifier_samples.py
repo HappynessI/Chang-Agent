@@ -43,7 +43,7 @@ def main() -> None:
         raise SystemExit(f"no label_cvt PNG files found under {root}")
 
     features, quality, error_map = [], [], []
-    error_type, target_view, action = [], [], []
+    error_type, action = [], []
     type_ids = {"none": 0, "false_positive_change": 1, "false_negative": 2}
     action_ids = {"finish": 0, "positive_point": 1, "negative_point": 2, "box": 3}
     for index, label_path in enumerate(labels):
@@ -61,7 +61,6 @@ def main() -> None:
         quality.append(target.quality)
         error_map.append((target.false_positive_map | target.false_negative_map)[None])
         error_type.append(type_ids[target.error_type])
-        target_view.append(index % 2)
         action.append(action_ids["negative_point" if target.error_type == "false_positive_change" else "positive_point" if target.error_type == "false_negative" else "finish"])
     if not features:
         raise SystemExit("no complete A/B/label triplets found")
@@ -70,12 +69,18 @@ def main() -> None:
         "quality": np.asarray(quality, dtype=np.float32),
         "error_map": np.stack(error_map).astype(np.float32),
         "error_type": np.asarray(error_type, dtype=np.int64),
-        "target_view": np.asarray(target_view, dtype=np.int64),
         "action": np.asarray(action, dtype=np.int64),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(args.output, **arrays)
-    metadata = {"dataset_root": str(root), "samples": len(features), "feature_channels": int(arrays["features"].shape[1]), "seed": args.seed}
+    metadata = {
+        "dataset_root": str(root),
+        "samples": len(features),
+        "feature_channels": int(arrays["features"].shape[1]),
+        "seed": args.seed,
+        "target_view_supervision": "omitted; no real target-view labels are available",
+        "schema_version": 2,
+    }
     args.output.with_suffix(".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(json.dumps(metadata, indent=2))
 

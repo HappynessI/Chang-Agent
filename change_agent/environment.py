@@ -71,10 +71,11 @@ class ChangeAgentEnvironment:
             step_index=0,
         )
         self.feedback = self.verifier.verify(self.state, None, None)
+        execution = self._with_verifier_evidence({"event": "reset"})
         self.done = False
         self.trajectory = Trajectory(self.trajectory.run_metadata)
         self.trajectory.append(
-            TrajectoryEntry(0, None, None, self.feedback, self.state.clone(), {"event": "reset"})
+            TrajectoryEntry(0, None, None, self.feedback, self.state.clone(), execution)
         )
         return self.observation()
 
@@ -141,6 +142,7 @@ class ChangeAgentEnvironment:
         verifier_output = self.verifier.verify(
             candidate, self.feedback.quality_score, action
         )
+        execution = self._with_verifier_evidence(execution)
         self.state = candidate
         self.feedback = verifier_output
         self.done = (
@@ -158,6 +160,13 @@ class ChangeAgentEnvironment:
             )
         )
         return self.observation(), self.done
+
+    def _with_verifier_evidence(self, execution: dict[str, Any]) -> dict[str, Any]:
+        result = dict(execution)
+        evidence = getattr(self.verifier, "last_evidence", None)
+        if evidence:
+            result["verifier_evidence"] = evidence
+        return result
 
     @property
     def best_state(self) -> ChangeState:

@@ -18,9 +18,11 @@ from PIL import Image
 from change_agent.action_parser import ActionValidationError
 from change_agent.adapters.omniovcd_adapter import MaskPairProcessor, OmniOVCDAdapter
 from change_agent.adapters.qwen3vl_adapter import GroundingModelQwen3VL
+from change_agent.adapters.qwen3vl_verifier import Qwen3VLZeroShotVerifier
 from change_agent.adapters.subprocess_adapters import (
     SubprocessBoxBackend,
     SubprocessPointBackend,
+    SubprocessSAM3Initializer,
 )
 from change_agent.environment import ChangeAgentEnvironment
 from change_agent.executor import ActionExecutor
@@ -38,11 +40,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=root / "outputs/omniovcd_levir_3sample_vis_20260717_145327/input_subset",
     )
-    parser.add_argument(
-        "--initial-mask-root",
-        type=Path,
-        default=root / "outputs/omniovcd_levir_3sample_vis_20260717_145327/model_visualizations",
-    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--query", default="building")
     parser.add_argument("--max-steps", type=int, default=3)
@@ -52,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cd-min-instance-area", type=int, default=0)
     parser.add_argument("--model-path", default=str(root / "models/Qwen3-VL-2B-Instruct"))
     parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument(
+        "--verifier", choices=("qwen_zero_shot", "rule"), default="qwen_zero_shot"
+    )
+    parser.add_argument("--verifier-max-new-tokens", type=int, default=256)
+    parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
+    parser.add_argument("--verifier-retries", type=int, default=2)
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--tool-device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -82,6 +85,7 @@ def main() -> None:
         device_map=args.device_map,
         max_new_tokens=args.max_new_tokens,
     )
+    verifier = _build_verifier(args, qwen)
     rollout_records: dict[str, dict[str, Any]] = {}
     for sample_file in SAMPLES:
         sample = Path(sample_file).stem
@@ -110,24 +114,37 @@ def main() -> None:
             pythonpath=(Path(__file__).parents[1], Path(__file__).parents[2] / "OmniOVCD"),
             device=args.tool_device,
         )
+        initializer = SubprocessSAM3Initializer(
+            args.omniovcd_python,
+            Path(__file__).with_name("segmentation_worker.py"),
+            tool_root / "sam3_initialization",
+            checkpoint=args.sam3_checkpoint,
+            bpe=args.sam3_bpe,
+            resolution=args.sam3_resolution,
+            pythonpath=(Path(__file__).parents[1], Path(__file__).parents[2] / "OmniOVCD"),
+            device=args.tool_device,
+            timeout_seconds=900,
+        )
         processor = MaskPairProcessor(
             overlap_threshold=args.overlap_threshold,
             matching_mode=args.matching_mode,
             t12_min_instance_area=args.t12_min_instance_area,
             cd_min_instance_area=args.cd_min_instance_area,
         )
-        initializer = _cached_initializer(args, sample_file)
-        backend = OmniOVCDAdapter(initializer, box_backend.segment_box, processor)
+        backend = OmniOVCDAdapter(
+            initializer.initialize_masks, box_backend.segment_box, processor
+        )
         environment = ChangeAgentEnvironment(
             backend,
             ActionExecutor(point_backend, box_backend),
-            RuleBasedVerifier(),
+            verifier,
             max_steps=args.max_steps,
             run_metadata={
                 "sample": sample_file,
                 "query": args.query,
                 "agent": "Qwen3-VL-2B-Instruct",
-                "verifier": "RuleBasedVerifier",
+                "verifier": args.verifier,
+                "coordinate_protocol": "public normalized_0_1000; environment pixel_xy",
                 "matching_mode": args.matching_mode,
                 "overlap_threshold": args.overlap_threshold,
                 "gt_available_during_rollout": False,
@@ -203,24 +220,16 @@ def main() -> None:
     print(json.dumps({"status": "success", "output": str(args.output), **metrics["aggregate"]}, indent=2))
 
 
-def _cached_initializer(args: argparse.Namespace, sample_file: str):
-    t1_path = args.initial_mask_root / "t1" / sample_file
-    t2_path = args.initial_mask_root / "t2" / sample_file
-
-    def initialize(t1_image: np.ndarray, t2_image: np.ndarray, query: str):
-        t1_mask = np.asarray(Image.open(t1_path)) > 0
-        t2_mask = np.asarray(Image.open(t2_path)) > 0
-        if t1_mask.shape != t1_image.shape[:2] or t2_mask.shape != t2_image.shape[:2]:
-            raise ValueError("cached OmniOVCD masks do not match input image size")
-        return t1_mask, t2_mask, {
-            "initializer": "OmniOVCDAdapter.cached_real_omniovcd_masks",
-            "initial_t1_mask": str(t1_path),
-            "initial_t2_mask": str(t2_path),
-            "query": query,
-            "target_view_hint": "t2",
-        }
-
-    return initialize
+def _build_verifier(args: argparse.Namespace, qwen: GroundingModelQwen3VL):
+    if args.verifier == "rule":
+        return RuleBasedVerifier(accept_threshold=args.verifier_accept_threshold)
+    return Qwen3VLZeroShotVerifier(
+        model=qwen.model,
+        processor=qwen.processor,
+        max_new_tokens=args.verifier_max_new_tokens,
+        accept_threshold=args.verifier_accept_threshold,
+        max_retries=args.verifier_retries,
+    )
 
 
 def evaluate_after_rollout(
@@ -246,11 +255,11 @@ def evaluate_after_rollout(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         samples[sample] = {
-            "best_step": payload["best_step"],
+            "verifier_selected_step": payload["best_step"],
             "tool_action_count": record["tool_action_count"],
             "steps": step_metrics,
             "initial": step_metrics[0],
-            "best": {"step_index": payload["best_step"], **best_metrics},
+            "verifier_selected": {"step_index": payload["best_step"], **best_metrics},
         }
     aggregate, _ = _metrics_from_counts(aggregate_counts)
     return {"samples": samples, "aggregate": aggregate}
@@ -292,8 +301,7 @@ def _validate_inputs(args: argparse.Namespace) -> None:
         files.extend([
             args.input_root / "A" / sample,
             args.input_root / "B" / sample,
-            args.initial_mask_root / "t1" / sample,
-            args.initial_mask_root / "t2" / sample,
+            args.input_root / "label_cvt" / sample,
         ])
     missing = [str(path) for path in files if not path.exists()]
     if missing:
@@ -307,12 +315,15 @@ def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "samples": list(SAMPLES),
         "query": args.query,
         "input_root": str(args.input_root),
-        "initial_mask_root": str(args.initial_mask_root),
-        "initialization": "cached masks from prior real OmniOVCD/SAM3 inference, loaded through OmniOVCDAdapter",
+        "initialization": "fresh dual-view SAM3 text prompting for every sample; no cached masks",
+        "initialization_artifacts": str(args.output / "tool_runs" / "<sample>" / "sam3_initialization"),
         "agent_model": args.model_path,
         "point_executor": f"SimpleClick {args.simpleclick_checkpoint}",
         "box_executor": f"SAM3 {args.sam3_checkpoint}",
-        "verifier": "RuleBasedVerifier",
+        "verifier": args.verifier,
+        "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
+        "coordinate_protocol": "Agent/Verifier normalized_0_1000; Environment pixel_xy",
+        "target_view_policy": "zero-shot visual inference; no alternating pseudo-label",
         "matching_mode": args.matching_mode,
         "overlap_threshold": args.overlap_threshold,
         "t12_min_instance_area": args.t12_min_instance_area,
@@ -327,7 +338,7 @@ def _render_manifest(manifest: dict[str, Any], metrics: dict[str, Any] | None = 
     lines = ["# LEVIR-CD three-sample full Change-Agent run", ""]
     lines.extend(f"- {key}: `{value}`" for key, value in manifest.items())
     if metrics:
-        lines.extend(["", "## Aggregate best-mask metrics", ""])
+        lines.extend(["", "## Aggregate verifier-selected metrics", ""])
         lines.extend(f"- {key}: `{value}`" for key, value in metrics["aggregate"].items())
     lines.extend([
         "",
@@ -335,7 +346,9 @@ def _render_manifest(manifest: dict[str, Any], metrics: dict[str, Any] | None = 
         "",
         "The final entry point is `tools/run_levir_change_agent.py`, not OmniOVCD/eval.py. ",
         "Each sample executes Environment.reset, Qwen action generation, ActionParser, a real ",
-        "SimpleClick or SAM3 worker, Environment.step/rebuild, and RuleBasedVerifier feedback. ",
+        "fresh SAM3 initialization, a SimpleClick or SAM3 action worker, Environment.step/rebuild, ",
+        "and the configured GT-free Verifier. SAM3 masks, confidence maps, scores, prompts, and ",
+        "worker parameters are persisted below tool_runs/<sample>/sam3_initialization. ",
         "Ground truth is loaded only after all trajectories and rollout_complete.json exist.",
     ])
     return "\n".join(lines) + "\n"
