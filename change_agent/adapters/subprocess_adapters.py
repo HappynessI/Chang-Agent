@@ -168,6 +168,113 @@ class SubprocessBoxBackend(_SubprocessTool):
         )
 
 
+class SubprocessSAM3Initializer(_SubprocessTool):
+    """Run fresh dual-view SAM3 text initialization and preserve all evidence arrays."""
+
+    def __init__(
+        self,
+        *args: Any,
+        checkpoint: str | Path,
+        bpe: str | Path,
+        resolution: int = 1008,
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self.checkpoint = str(Path(checkpoint).resolve())
+        self.bpe = str(Path(bpe).resolve())
+        self.resolution = resolution
+
+    def initialize_masks(
+        self, t1_image: np.ndarray, t2_image: np.ndarray, query: str
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        call_dir = self.artifact_dir / f"initialize_{self.call_index:03d}"
+        self.call_index += 1
+        call_dir.mkdir(parents=True, exist_ok=False)
+        t1_image_path = call_dir / "t1_image.png"
+        t2_image_path = call_dir / "t2_image.png"
+        t1_mask_path = call_dir / "t1_mask.npy"
+        t2_mask_path = call_dir / "t2_mask.npy"
+        evidence_dir = call_dir / "evidence"
+        report_path = call_dir / "report.json"
+        stdout_path = call_dir / "stdout.log"
+        stderr_path = call_dir / "stderr.log"
+        Image.fromarray(_uint8_image(t1_image)).save(t1_image_path)
+        Image.fromarray(_uint8_image(t2_image)).save(t2_image_path)
+        command = [
+            self.python,
+            self.worker,
+            "initialize",
+            "--image",
+            str(t1_image_path),
+            "--image-t2",
+            str(t2_image_path),
+            "--output-mask",
+            str(t1_mask_path),
+            "--output-mask-t2",
+            str(t2_mask_path),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--report",
+            str(report_path),
+            "--device",
+            self.device,
+            "--checkpoint",
+            self.checkpoint,
+            "--bpe",
+            self.bpe,
+            "--resolution",
+            str(self.resolution),
+            "--query",
+            query,
+        ]
+        env = os.environ.copy()
+        if self.pythonpath:
+            existing = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = os.pathsep.join(
+                self.pythonpath + ((existing,) if existing else ())
+            )
+        result = subprocess.run(
+            command,
+            cwd=str(Path(self.worker).parent),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=self.timeout_seconds,
+        )
+        stdout_path.write_text(result.stdout, encoding="utf-8")
+        stderr_path.write_text(result.stderr, encoding="utf-8")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"SAM3 initialization failed with exit={result.returncode}; see {stderr_path}"
+            )
+        required = (t1_mask_path, t2_mask_path, report_path)
+        if not all(path.is_file() for path in required):
+            raise RuntimeError("SAM3 initialization did not produce all declared artifacts")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        t1_mask = np.asarray(np.load(t1_mask_path), dtype=bool)
+        t2_mask = np.asarray(np.load(t2_mask_path), dtype=bool)
+        if t1_mask.shape != t1_image.shape[:2] or t2_mask.shape != t2_image.shape[:2]:
+            raise ValueError("fresh SAM3 mask shape does not match its temporal image")
+        artifacts = report["intermediate_artifacts"]
+        t1_confidence = np.asarray(
+            np.load(artifacts["t1"]["confidence_map"]["file"]), dtype=np.float32
+        )
+        t2_confidence = np.asarray(
+            np.load(artifacts["t2"]["confidence_map"]["file"]), dtype=np.float32
+        )
+        self.last_evidence = {
+            "worker_mode": "initialize",
+            "worker_command": command,
+            "worker_report": report,
+            "worker_artifact_dir": str(call_dir),
+        }
+        return t1_mask, t2_mask, {
+            "initializer": "live_sam3_dual_view_text_prompt",
+            "sam3_initialization": self.last_evidence,
+            "change_confidence": np.maximum(t1_confidence, t2_confidence),
+        }
+
+
 def _uint8_image(image: np.ndarray) -> np.ndarray:
     array = np.asarray(image)
     if array.dtype != np.uint8:

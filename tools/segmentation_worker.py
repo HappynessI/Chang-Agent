@@ -54,21 +54,9 @@ def point(args: argparse.Namespace, image: np.ndarray) -> tuple[np.ndarray, dict
 
 
 def box(args: argparse.Namespace, image: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
-    import torch
-    from sam3 import build_sam3_image_model
-    from sam3.model.sam3_image_processor import Sam3Processor
-
     from change_agent.adapters.sam3_adapter import SAM3ProcessorAdapter
 
-    model = build_sam3_image_model(
-        bpe_path=args.bpe,
-        checkpoint_path=args.checkpoint,
-        device=args.device,
-        load_from_HF=False,
-    )
-    model.to(args.device)
-    model._device = torch.device(args.device)
-    processor = Sam3Processor(model, resolution=args.resolution, device=args.device)
+    processor = _build_sam3_processor(args)
     result = SAM3ProcessorAdapter(processor).segment_box(image, tuple(args.box), args.query)
     return result, {
         "tool": "sam3",
@@ -80,11 +68,87 @@ def box(args: argparse.Namespace, image: np.ndarray) -> tuple[np.ndarray, dict[s
     }
 
 
+def initialize(
+    args: argparse.Namespace, image1: np.ndarray
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Run fresh SAM3 text prompting for both temporal views with one model load."""
+
+    from change_agent.adapters.sam3_adapter import SAM3ProcessorAdapter
+
+    image2 = np.asarray(Image.open(args.image_t2).convert("RGB"))
+    if image2.shape[:2] != image1.shape[:2]:
+        raise ValueError("T1 and T2 initialization images must have the same shape")
+    adapter = SAM3ProcessorAdapter(_build_sam3_processor(args))
+    t1_mask, t1_evidence = adapter.segment_text(image1, args.query)
+    t2_mask, t2_evidence = adapter.segment_text(image2, args.query)
+    np.save(args.output_mask_t2, np.asarray(t2_mask, dtype=np.uint8))
+    evidence_dir = args.evidence_dir
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        "t1": _persist_arrays(t1_evidence, evidence_dir, "t1"),
+        "t2": _persist_arrays(t2_evidence, evidence_dir, "t2"),
+    }
+    return t1_mask, {
+        "tool": "sam3",
+        "operation": "fresh_dual_view_text_initialization",
+        "checkpoint": args.checkpoint,
+        "bpe": args.bpe,
+        "resolution": args.resolution,
+        "query": args.query,
+        "t1_mask": str(args.output_mask),
+        "t2_mask": str(args.output_mask_t2),
+        "intermediate_artifacts": artifacts,
+    }
+
+
+def _build_sam3_processor(args: argparse.Namespace):
+    import torch
+    from sam3 import build_sam3_image_model
+    from sam3.model.sam3_image_processor import Sam3Processor
+
+    model = build_sam3_image_model(
+        bpe_path=args.bpe,
+        checkpoint_path=args.checkpoint,
+        device=args.device,
+        load_from_HF=False,
+    )
+    model.to(args.device)
+    model._device = torch.device(args.device)
+    return Sam3Processor(model, resolution=args.resolution, device=args.device)
+
+
+def _persist_arrays(
+    evidence: dict[str, object], output_dir: Path, prefix: str
+) -> dict[str, dict[str, object]]:
+    manifest: dict[str, dict[str, object]] = {}
+    for name, value in evidence.items():
+        array = np.asarray(value)
+        path = output_dir / f"{prefix}_{name}.npy"
+        np.save(path, array)
+        numeric = array.astype(float, copy=False) if np.issubdtype(array.dtype, np.number) else None
+        record: dict[str, object] = {
+            "file": str(path),
+            "shape": list(array.shape),
+            "dtype": str(array.dtype),
+        }
+        if numeric is not None and array.size:
+            record.update(
+                min=float(np.nanmin(numeric)),
+                max=float(np.nanmax(numeric)),
+                mean=float(np.nanmean(numeric)),
+            )
+        manifest[name] = record
+    return manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("point", "box"))
+    parser.add_argument("mode", choices=("point", "box", "initialize"))
     parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--image-t2", type=Path)
     parser.add_argument("--output-mask", type=Path, required=True)
+    parser.add_argument("--output-mask-t2", type=Path)
+    parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--initial-mask", type=Path)
@@ -102,11 +166,26 @@ def main() -> None:
         parser.error("point requires --initial-mask, --coordinate, and --is-positive")
     if args.mode == "box" and (args.bpe is None or args.query is None or args.box is None):
         parser.error("box requires --bpe, --query, and --box")
+    if args.mode == "initialize" and (
+        args.bpe is None
+        or args.query is None
+        or args.image_t2 is None
+        or args.output_mask_t2 is None
+        or args.evidence_dir is None
+    ):
+        parser.error(
+            "initialize requires --bpe, --query, --image-t2, --output-mask-t2, and --evidence-dir"
+        )
 
     start = time.monotonic()
     before = rss_mb()
     image = np.asarray(Image.open(args.image).convert("RGB"))
-    result, details = point(args, image) if args.mode == "point" else box(args, image)
+    if args.mode == "point":
+        result, details = point(args, image)
+    elif args.mode == "box":
+        result, details = box(args, image)
+    else:
+        result, details = initialize(args, image)
     result = np.asarray(result, dtype=bool)
     if result.shape != image.shape[:2]:
         raise ValueError(f"worker mask shape {result.shape} != image shape {image.shape[:2]}")
