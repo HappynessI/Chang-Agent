@@ -1,5 +1,28 @@
 # Development log
 
+## 2026-07-17 — overlap-presence matching and full LEVIR runner
+
+- Changed the default matching mode from one-to-one greedy to OmniOVCD-compatible,
+  directional `overlap_presence` with threshold `0.25`.
+- Kept `greedy_one_to_one` as an explicit ablation and added candidate-pair,
+  directional-coverage, and split/merge-ambiguity evidence.
+- Separated `t12_min_instance_area` and `cd_min_instance_area`; both default to zero.
+- Added isolated real-model subprocess adapters and a segmentation worker for
+  SimpleClick point actions and SAM3 box actions.
+- Added `tools/run_levir_change_agent.py` for the three fixed LEVIR-CD samples. It
+  saves per-step masks/trajectories, verifier feedback, tool reports, history-best
+  predictions, and performs GT evaluation only after a rollout-complete marker.
+- Expanded the matching regression suite to cover split/merge, additions,
+  disappearances, unrelated instances, directional coverage, and area filters.
+
+Validation before the full GPU run:
+
+```text
+Python byte compilation: passed
+Unit tests: 19 passed
+git diff --check: passed
+```
+
 ## 2026-07-17 — v0–v3 skeleton
 
 - Added validated public/hidden state protocols and a strict JSON Action parser.

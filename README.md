@@ -20,15 +20,17 @@ The current code implements the v0–v3 research skeleton:
   `Qwen3VLForConditionalGeneration`;
 - an inference-only Environment with no GT argument or label state;
 - SimpleClick point and SAM3 box boundaries;
-- per-step instance extraction, one-to-one matching, and change-mask reconstruction;
+- per-step instance extraction, default OmniOVCD overlap-presence matching, optional
+  one-to-one greedy ablation, and change-mask reconstruction;
 - a transparent rule Verifier baseline and a trainable frozen-feature Verifier head;
 - offline GT perturbations for Verifier supervision;
 - feedback-driven iteration, finish rejection, complete trajectory artifacts, and
   history-best state selection.
 
-Real OmniOVCD, SAM3, SimpleClick, and Qwen3-VL weight-level GPU integration remains a
-server validation task. The rule Verifier is a baseline, not the research-result
-trained Verifier.
+The three-sample LEVIR runner in `tools/run_levir_change_agent.py` connects real
+Qwen3-VL actions to isolated SimpleClick/SAM3 workers while keeping GT outside the
+runtime loop. The rule Verifier is a baseline, not the research-result trained
+Verifier.
 
 ## Local smoke commands
 

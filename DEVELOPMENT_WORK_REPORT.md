@@ -1,5 +1,25 @@
 # Change-Agent 开发工作报告
 
+## 2026-07-17：Matching 决策落地与三样本完整闭环入口
+
+本轮将默认 matching 从确定性一对一 greedy 改为 OmniOVCD 原始的双向
+overlap-presence 语义，默认阈值为 `0.25`。一对一 greedy 保留为
+`greedy_one_to_one` 消融，不再是默认方案。状态 evidence 新增方向性 coverage、
+候选配对、实例数量、面积阈值与 `split_merge_ambiguity`。
+
+新增真实三样本入口 `tools/run_levir_change_agent.py`。该入口不调用
+`OmniOVCD/eval.py`，而是用 `OmniOVCDAdapter` 装载先前真实 OmniOVCD/SAM3
+三样本运行保存的 T1/T2 初始 mask，再依次执行 Qwen3-VL action、ActionParser、
+隔离环境中的 SimpleClick/SAM3 worker、Environment rebuild 和
+RuleBasedVerifier。所有样本 trajectory 保存完成并写入 `rollout_complete.json`
+之后，才打开 `label_cvt` 计算离线指标。
+
+完整命令、逐样本 action、工具结果、指标和产物清单记录在：
+
+```text
+/Data/wyh/CD-SegAgent/doc/NEXT_TASK_FULL_CHANGE_AGENT_RUN.md
+```
+
 更新时间：2026-07-17
 代码仓库：`git@github.com:HappynessI/Chang-Agent.git`
 当前分支：`main`
@@ -37,7 +57,8 @@
 - `change_agent/adapters/omniovcd_adapter.py`
   - 通过回调隔离 OmniOVCD/SAM3 的重模型依赖。
   - 实现 T1/T2 mask 初始化、box segmentation、8 邻域 connected components、实例匹配和 change mask 重建。
-  - matching 使用确定性的一对一 greedy overlap 匹配。
+  - 初版曾使用确定性一对一 greedy；2026-07-17 已由本文开头记录的
+    `overlap_presence` 默认策略取代，greedy 仅保留为消融。
 - `change_agent/adapters/sam3_adapter.py`
   - 接入 OmniOVCD 的公开 `set_image`、`set_text_prompt`、`add_geometric_prompt` API。
   - 将 SAM3 logits/masks 转成 NumPy bool mask 和 confidence map。

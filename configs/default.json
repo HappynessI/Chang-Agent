@@ -3,12 +3,13 @@
   "max_steps": 8,
   "agent_model": "Qwen/Qwen3-VL-2B-Instruct",
   "agent_max_new_tokens": 160,
-  "instance_overlap_threshold": 0.5,
-  "min_instance_area": 1,
+  "matching_mode": "overlap_presence",
+  "instance_overlap_threshold": 0.25,
+  "t12_min_instance_area": 0,
+  "cd_min_instance_area": 0,
   "verifier": {
     "type": "rule",
     "accept_threshold": 0.82
   },
   "seed": 42
 }
-

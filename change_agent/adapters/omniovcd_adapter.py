@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 import numpy as np
 
@@ -25,15 +25,35 @@ class InitializationResult:
 
 
 class MaskPairProcessor:
-    """Pure NumPy fallback matching the current OmniOVCD overlap semantics."""
+    """Rebuild change masks with configurable OmniOVCD-style instance matching."""
 
-    def __init__(self, overlap_threshold: float = 0.5, min_instance_area: int = 1):
+    MODES = {"overlap_presence", "greedy_one_to_one"}
+
+    def __init__(
+        self,
+        overlap_threshold: float = 0.25,
+        min_instance_area: int | None = None,
+        *,
+        matching_mode: Literal["overlap_presence", "greedy_one_to_one"] = "overlap_presence",
+        t12_min_instance_area: int = 0,
+        cd_min_instance_area: int = 0,
+    ):
         if not 0 <= overlap_threshold <= 1:
             raise ValueError("overlap_threshold must be in [0, 1]")
-        if min_instance_area < 1:
-            raise ValueError("min_instance_area must be positive")
+        if matching_mode not in self.MODES:
+            raise ValueError(f"matching_mode must be one of {sorted(self.MODES)}")
+        # Keep the original constructor keyword working while giving the two OmniOVCD
+        # area filters distinct, explicit meanings.
+        if min_instance_area is not None:
+            if t12_min_instance_area != 0:
+                raise ValueError("use either min_instance_area or t12_min_instance_area")
+            t12_min_instance_area = min_instance_area
+        if t12_min_instance_area < 0 or cd_min_instance_area < 0:
+            raise ValueError("instance area thresholds must be non-negative")
         self.overlap_threshold = overlap_threshold
-        self.min_instance_area = min_instance_area
+        self.matching_mode = matching_mode
+        self.t12_min_instance_area = t12_min_instance_area
+        self.cd_min_instance_area = cd_min_instance_area
 
     def rebuild(
         self,
@@ -45,32 +65,75 @@ class MaskPairProcessor:
         t2_mask = np.asarray(t2_mask, dtype=bool)
         if t1_mask.shape != t2_mask.shape or t1_mask.ndim != 2:
             raise ValueError("T1/T2 masks must be same-shaped 2-D arrays")
-        t1_instances = connected_components(t1_mask, self.min_instance_area)
-        t2_instances = connected_components(t2_mask, self.min_instance_area)
-        matching = self._match(t1_instances, t2_instances)
-        matched_t1 = {left for left, _ in matching}
-        matched_t2 = {right for _, right in matching}
+        # OmniOVCD extracts every component. t12_min_instance_area only suppresses
+        # small unmatched components from the change mask; it does not remove them
+        # from overlap checks against the opposite view.
+        t1_instances = connected_components(t1_mask)
+        t2_instances = connected_components(t2_mask)
+        candidates = self._candidate_pairs(t1_instances, t2_instances)
+        if self.matching_mode == "overlap_presence":
+            matching, matched_t1, matched_t2 = self._overlap_presence(candidates)
+        else:
+            matching = self._greedy_one_to_one(candidates)
+            matched_t1 = {left for left, _ in matching}
+            matched_t2 = {right for _, right in matching}
         change = np.zeros_like(t1_mask, dtype=bool)
         for index, instance in enumerate(t1_instances):
-            if index not in matched_t1:
+            if index not in matched_t1 and int(instance.sum()) >= self.t12_min_instance_area:
                 change |= instance
         for index, instance in enumerate(t2_instances):
-            if index not in matched_t2:
+            if index not in matched_t2 and int(instance.sum()) >= self.t12_min_instance_area:
                 change |= instance
+        if self.cd_min_instance_area > 0:
+            filtered = np.zeros_like(change)
+            for instance in connected_components(change):
+                if int(instance.sum()) >= self.cd_min_instance_area:
+                    filtered |= instance
+            change = filtered
+
+        diagnostic_candidates = [
+            {
+                "t1_id": left,
+                "t2_id": right,
+                "t1_coverage": round(t1_coverage, 8),
+                "t2_coverage": round(t2_coverage, 8),
+                "coverage": round(max(t1_coverage, t2_coverage), 8),
+            }
+            for left, right, t1_coverage, t2_coverage in candidates
+            if max(t1_coverage, t2_coverage) >= self.overlap_threshold
+        ]
+        t1_degree: dict[int, int] = {}
+        t2_degree: dict[int, int] = {}
+        for pair in diagnostic_candidates:
+            t1_degree[pair["t1_id"]] = t1_degree.get(pair["t1_id"], 0) + 1
+            t2_degree[pair["t2_id"]] = t2_degree.get(pair["t2_id"], 0) + 1
+        matching_evidence = {
+            "matching_mode": self.matching_mode,
+            "overlap_threshold": self.overlap_threshold,
+            "t12_min_instance_area": self.t12_min_instance_area,
+            "cd_min_instance_area": self.cd_min_instance_area,
+            "t1_instance_count": len(t1_instances),
+            "t2_instance_count": len(t2_instances),
+            "candidate_pairs": diagnostic_candidates,
+            "split_merge_ambiguity": any(value > 1 for value in t1_degree.values())
+            or any(value > 1 for value in t2_degree.values()),
+        }
+        merged_evidence = dict(evidence or {})
+        merged_evidence["matching"] = matching_evidence
         return PairUpdate(
             t1_instances=t1_instances,
             t2_instances=t2_instances,
             matching=matching,
             change_mask=change,
-            evidence=dict(evidence or {}),
+            evidence=merged_evidence,
         )
 
-    def _match(
-        self,
+    @staticmethod
+    def _candidate_pairs(
         t1_instances: tuple[np.ndarray, ...],
         t2_instances: tuple[np.ndarray, ...],
-    ) -> tuple[tuple[int, int], ...]:
-        candidates: list[tuple[float, int, int]] = []
+    ) -> list[tuple[int, int, float, float]]:
+        candidates: list[tuple[int, int, float, float]] = []
         for left, mask1 in enumerate(t1_instances):
             area1 = int(mask1.sum())
             for right, mask2 in enumerate(t2_instances):
@@ -78,14 +141,42 @@ class MaskPairProcessor:
                 if not intersection:
                     continue
                 area2 = int(mask2.sum())
-                overlap = min(intersection / area1, intersection / area2)
-                if overlap >= self.overlap_threshold:
-                    candidates.append((overlap, left, right))
-        # Deterministic one-to-one greedy matching avoids hiding duplicate instances.
+                candidates.append((left, right, intersection / area1, intersection / area2))
+        return candidates
+
+    def _overlap_presence(
+        self, candidates: list[tuple[int, int, float, float]]
+    ) -> tuple[tuple[tuple[int, int], ...], set[int], set[int]]:
+        matched_t1 = {
+            left for left, _, coverage, _ in candidates if coverage >= self.overlap_threshold
+        }
+        matched_t2 = {
+            right for _, right, _, coverage in candidates if coverage >= self.overlap_threshold
+        }
+        # The pair list is diagnostic: include a relationship when it supplies
+        # presence evidence in either direction. Change construction uses the two
+        # directional matched sets above, exactly as OmniOVCD does.
+        matching = tuple(
+            sorted(
+                (left, right)
+                for left, right, t1_coverage, t2_coverage in candidates
+                if max(t1_coverage, t2_coverage) >= self.overlap_threshold
+            )
+        )
+        return matching, matched_t1, matched_t2
+
+    def _greedy_one_to_one(
+        self, candidates: list[tuple[int, int, float, float]]
+    ) -> tuple[tuple[int, int], ...]:
+        ranked = [
+            (min(t1_coverage, t2_coverage), left, right)
+            for left, right, t1_coverage, t2_coverage in candidates
+            if min(t1_coverage, t2_coverage) >= self.overlap_threshold
+        ]
         matches: list[tuple[int, int]] = []
         used_left: set[int] = set()
         used_right: set[int] = set()
-        for _, left, right in sorted(candidates, reverse=True):
+        for _, left, right in sorted(ranked, reverse=True):
             if left not in used_left and right not in used_right:
                 matches.append((left, right))
                 used_left.add(left)
@@ -182,4 +273,3 @@ class OmniOVCDAdapter:
         return np.asarray(
             self.segment_box_callback(image, box_cxcywh_normalized, query), dtype=bool
         )
-

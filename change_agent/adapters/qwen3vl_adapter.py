@@ -112,6 +112,18 @@ class GroundingModelQwen3VL:
     @staticmethod
     def _instruction(observation: AgentObservation) -> str:
         feedback = observation.feedback.to_dict() if observation.feedback else None
+        history = observation.history_summary or "none"
+        has_tool_action = any(
+            f"action={name}" in history
+            for name in ("positive_point", "negative_point", "box")
+        )
+        finish_rule = (
+            "At least one segmentation tool action has already run; finish is allowed only "
+            "if the current mask is credible."
+            if has_tool_action
+            else "No segmentation tool action has run yet. Finish is forbidden: choose a "
+            "positive_point, negative_point, or box action now."
+        )
         return (
             "You refine a change-detection result. The three inputs above are explicitly "
             "T1, T2, and the current change mask. Do not invent a final mask. Select one "
@@ -119,7 +131,8 @@ class GroundingModelQwen3VL:
             "JSON object with target_view ('t1' or 't2') and action "
             "('positive_point', 'negative_point', 'box', or 'finish'). Point actions require "
             "coordinate:[x,y]; box requires box:[x1,y1,x2,y2]; finish requires neither.\n"
+            f"{finish_rule}\n"
             f"Query: {observation.query}\n"
             f"Verifier feedback: {json.dumps(feedback, ensure_ascii=False)}\n"
-            f"History summary: {observation.history_summary or 'none'}"
+            f"History summary: {history}"
         )

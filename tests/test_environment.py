@@ -99,6 +99,19 @@ class EnvironmentTest(unittest.TestCase):
             self.assertEqual(payload["steps"][1]["raw_action"], raw)
             self.assertTrue((Path(directory) / "masks" / "step_001.npy").exists())
 
+    def test_trajectory_can_save_masks_in_a_separate_directory(self):
+        self.environment.reset(self.image1, self.image2, "building")
+        self.environment.step(AgentAction("t1", "positive_point", coordinate=(0, 0)))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trajectory_path = self.environment.trajectory.save(
+                root / "trajectories" / "sample", root / "masks" / "sample"
+            )
+            payload = json.loads(trajectory_path.read_text())
+            mask_path = (trajectory_path.parent / payload["steps"][1]["change_mask_file"]).resolve()
+            self.assertTrue(mask_path.exists())
+            self.assertEqual(mask_path, (root / "masks" / "sample" / "step_001.npy").resolve())
+
     def test_runtime_rejects_non_inference_mode(self):
         with self.assertRaises(ValueError):
             ChangeAgentEnvironment(
@@ -111,4 +124,3 @@ class EnvironmentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

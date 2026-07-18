@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -26,12 +27,23 @@ class TrajectoryEntry:
     execution: dict[str, Any]
 
     def to_dict(self, mask_file: str | None = None) -> dict[str, Any]:
+        parsed = self.parsed_action.to_dict() if self.parsed_action else None
+        verifier = self.verifier.to_dict()
         return {
             "step_index": self.step_index,
             "raw_action": self.raw_action,
-            "parsed_action": self.parsed_action.to_dict() if self.parsed_action else None,
-            "verifier": self.verifier.to_dict(),
+            "parsed_action": parsed,
+            "target_view": parsed["target_view"] if parsed else None,
+            "tool": self.execution.get("tool"),
+            "tool_input": _json_safe(self.execution.get("tool_input")),
+            "quality_score": verifier["quality_score"],
+            "score_delta": verifier["score_delta"],
+            "error_type": verifier["error_type"],
+            "suggested_action": verifier["suggested_action"],
+            "accept": verifier["accept"],
+            "verifier": verifier,
             "execution": _json_safe(self.execution),
+            "matching_evidence": _json_safe(self.state.evidence.get("matching")),
             "change_mask_file": mask_file,
         }
 
@@ -64,14 +76,18 @@ class Trajectory:
             )
         return "; ".join(parts)
 
-    def save(self, output_dir: str | Path) -> Path:
+    def save(
+        self, output_dir: str | Path, mask_output_dir: str | Path | None = None
+    ) -> Path:
         output_dir = Path(output_dir)
-        masks_dir = output_dir / "masks"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        masks_dir = Path(mask_output_dir) if mask_output_dir else output_dir / "masks"
         masks_dir.mkdir(parents=True, exist_ok=True)
         serialized = []
         for entry in self.entries:
-            relative = Path("masks") / f"step_{entry.step_index:03d}.npy"
-            np.save(output_dir / relative, entry.state.change_mask.astype(np.uint8))
+            mask_path = masks_dir / f"step_{entry.step_index:03d}.npy"
+            relative = Path(os.path.relpath(mask_path, output_dir))
+            np.save(mask_path, entry.state.change_mask.astype(np.uint8))
             serialized.append(entry.to_dict(str(relative)))
         payload = {
             "metadata": _json_safe(self.run_metadata),
@@ -119,4 +135,3 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)
-

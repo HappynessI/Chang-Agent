@@ -84,7 +84,12 @@ class ActionExecutor:
         result = np.asarray(mask, dtype=bool)
         if result.shape != initial_mask.shape:
             raise ValueError(f"tool returned mask shape {result.shape}, expected {initial_mask.shape}")
-        return ExecutionResult(result, {"tool": tool, "tool_input": tool_input})
+        backend = self.point_backend if tool == "simpleclick" else self.box_backend
+        tool_result = getattr(backend, "last_evidence", None)
+        evidence = {"tool": tool, "tool_input": tool_input}
+        if tool_result:
+            evidence["tool_result"] = tool_result
+        return ExecutionResult(result, evidence)
 
 
 def xyxy_to_normalized_cxcywh(
@@ -104,4 +109,3 @@ def xyxy_to_normalized_cxcywh(
         (x2 - x1) / width,
         (y2 - y1) / height,
     )
-
