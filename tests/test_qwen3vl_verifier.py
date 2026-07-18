@@ -62,6 +62,18 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("ground-truth-free verifier", texts[-1])
         self.assertIn("do not alternate views by rule", texts[-1])
 
+    def test_invalid_outputs_use_auditable_safe_fallback(self):
+        processor = FakeProcessor({"quality_score": 0.5})
+        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor, max_retries=2)
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=bool)
+        state = ChangeState(image, image, "building", mask, mask, mask)
+        output = verifier.verify(state, 0.4, None)
+        self.assertEqual(output.quality_score, 0.4)
+        self.assertEqual(output.error_type, "uncertain_region")
+        self.assertFalse(output.accept)
+        self.assertTrue(verifier.last_evidence["fallback"])
+
 
 if __name__ == "__main__":
     unittest.main()

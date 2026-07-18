@@ -76,9 +76,22 @@ class Qwen3VLZeroShotVerifier:
             "type": "qwen3vl_zero_shot",
             "raw_output": raw,
             "validation_errors": errors,
+            "fallback": True,
             "gt_available": False,
         }
-        raise ValueError(f"Qwen3-VL Verifier returned no valid output: {errors}")
+        fallback_score = 0.0 if previous_score is None else float(previous_score)
+        return VerifierOutput(
+            quality_score=fallback_score,
+            score_delta=0.0,
+            error_type="uncertain_region",
+            target_view="t2",
+            suggested_action="finish",
+            feedback=(
+                "Verifier output was invalid after retries; retained the previous score "
+                f"without accepting the candidate. Validation errors: {errors}"
+            ),
+            accept=False,
+        )
 
     def _generate_raw(
         self,

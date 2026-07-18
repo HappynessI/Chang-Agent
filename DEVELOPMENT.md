@@ -33,6 +33,9 @@
 - Added an explicitly logged, mask-bounded SAM3 box safety fallback after all action
   retries are rejected, so a zero-shot episode can finish without treating `finish` as
   an executable segmentation decision.
+- Made the Qwen zero-shot Verifier return an explicit `uncertain_region` safe fallback
+  after malformed structured outputs exhaust retries; raw output, validation errors,
+  and `fallback=true` remain in verifier evidence instead of aborting the rollout.
 - Kept `RuleBasedVerifier` only as the explicit `--verifier rule` ablation; the real
   runner defaults to `qwen_zero_shot`.
 - Renamed offline report fields to `verifier_selected_step` and
@@ -42,7 +45,7 @@ Validation:
 
 ```text
 Python byte compilation: passed
-Unit tests: 32 passed
+Unit tests: 33 passed
 Runner/worker CLI parsing: passed
 git diff --check: passed
 ```
