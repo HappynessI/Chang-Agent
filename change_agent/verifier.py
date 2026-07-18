@@ -6,6 +6,7 @@ from typing import Protocol
 
 import numpy as np
 
+from .coordinates import pixel_box_to_normalized
 from .state import AgentAction, ChangeState, VerifierOutput
 
 
@@ -54,13 +55,13 @@ class RuleBasedVerifier:
             error_type = "false_negative"
             suggested = "positive_point"
             feedback = "The predicted change is nearly empty; inspect the suggested target view for a missing instance."
-            region = _full_region(mask.shape)
+            region = _normalized_region(_full_region(mask.shape), mask.shape)
         elif ratio > self.max_change_ratio:
             score = 0.2 * confidence_score
             error_type = "false_positive_change"
             suggested = "negative_point"
             feedback = "The change region is implausibly broad; remove unsupported foreground."
-            region = _mask_bbox(mask)
+            region = _normalized_region(_mask_bbox(mask), mask.shape)
         else:
             # Confidence dominates; a mild area prior prevents empty/full-mask shortcuts.
             area_prior = 1.0 - min(abs(ratio - 0.12) / 0.53, 1.0)
@@ -72,7 +73,11 @@ class RuleBasedVerifier:
                 if score >= self.accept_threshold
                 else "Model evidence remains uncertain in the current change region."
             )
-            region = None if score >= self.accept_threshold else _mask_bbox(mask)
+            region = (
+                None
+                if score >= self.accept_threshold
+                else _normalized_region(_mask_bbox(mask), mask.shape)
+            )
 
         delta = score - previous_score if previous_score is not None else 0.0
         target_view = _target_view(state, previous_action)
@@ -108,3 +113,11 @@ def _mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 
+
+def _normalized_region(
+    region: tuple[int, int, int, int] | None, shape: tuple[int, int]
+) -> tuple[int, int, int, int] | None:
+    if region is None:
+        return None
+    height, width = shape
+    return pixel_box_to_normalized(region, (width, height))

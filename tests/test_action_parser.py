@@ -1,6 +1,7 @@
 import unittest
 
 from change_agent.action_parser import ActionParser, ActionValidationError
+from change_agent.coordinates import pixel_box_to_normalized, pixel_point_to_normalized
 from change_agent.executor import xyxy_to_normalized_cxcywh
 
 
@@ -24,6 +25,19 @@ class ActionParserTest(unittest.TestCase):
         )
         self.assertEqual(action.box, (10, 20, 90, 80))
 
+    def test_public_normalized_coordinates_round_trip_to_internal_pixels(self):
+        image_size = (256, 256)
+        normalized = pixel_point_to_normalized((52, 250), image_size)
+        action = self.parser.parse_payload(
+            {"target_view": "t2", "action": "positive_point", "coordinate": normalized},
+            image_size,
+        )
+        self.assertEqual(action.coordinate, (52, 250))
+        self.assertEqual(
+            pixel_box_to_normalized((0, 37, 145, 255), image_size),
+            (0, 145, 569, 1000),
+        )
+
     def test_rejects_invalid_payloads(self):
         bad = [
             '{"target_view":"t3","action":"finish"}',
@@ -44,4 +58,3 @@ class ActionParserTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -6,6 +6,7 @@ import json
 import math
 from typing import Any
 
+from .coordinates import PROTOCOL_COORDINATE_MAX, normalized_point_to_pixel
 from .state import AgentAction
 
 
@@ -18,7 +19,7 @@ class ActionParser:
     VIEWS = {"t1", "t2"}
     ALLOWED_KEYS = {"target_view", "action", "coordinate", "box"}
 
-    def __init__(self, coordinate_max: float = 1000.0):
+    def __init__(self, coordinate_max: float = float(PROTOCOL_COORDINATE_MAX)):
         if coordinate_max <= 0:
             raise ValueError("coordinate_max must be positive")
         self.coordinate_max = float(coordinate_max)
@@ -140,6 +141,9 @@ class ActionParser:
             raise ActionValidationError(
                 f"coordinates must be normalized to [0, {self.coordinate_max:g}]"
             )
-        pixel_x = round(x / self.coordinate_max * (width - 1))
-        pixel_y = round(y / self.coordinate_max * (height - 1))
-        return pixel_x, pixel_y
+        try:
+            return normalized_point_to_pixel(
+                coordinate, (width, height), coordinate_max=self.coordinate_max
+            )
+        except ValueError as error:
+            raise ActionValidationError(str(error)) from error

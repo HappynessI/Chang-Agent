@@ -89,6 +89,11 @@ class EnvironmentTest(unittest.TestCase):
         self.assertNotIn("t2_mask", public)
         self.assertFalse(any("gt" in key.lower() for key in public))
 
+    def test_verifier_feedback_declares_normalized_public_coordinates(self):
+        observation = self.environment.reset(self.image1, self.image2, "building")
+        feedback = observation.feedback.to_dict()
+        self.assertEqual(feedback["coordinate_space"], "normalized_0_1000")
+
     def test_raw_action_and_trajectory_artifacts(self):
         self.environment.reset(self.image1, self.image2, "building")
         raw = '{"target_view":"t1","action":"positive_point","coordinate":[0,0]}'

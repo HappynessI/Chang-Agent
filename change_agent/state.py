@@ -7,6 +7,8 @@ from typing import Any, Literal, Mapping
 
 import numpy as np
 
+from .coordinates import PROTOCOL_COORDINATE_SPACE, validate_normalized_box
+
 TargetView = Literal["t1", "t2"]
 ActionName = Literal["positive_point", "negative_point", "box", "finish"]
 
@@ -29,6 +31,7 @@ class AgentAction:
         result: dict[str, Any] = {
             "target_view": self.target_view,
             "action": self.action,
+            "coordinate_space": "pixel",
         }
         if self.coordinate is not None:
             result["coordinate"] = list(self.coordinate)
@@ -51,6 +54,8 @@ class VerifierOutput:
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.quality_score) <= 1.0:
             raise ValueError("quality_score must be in [0, 1]")
+        if self.error_region is not None:
+            validate_normalized_box(self.error_region)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +64,7 @@ class VerifierOutput:
             "error_type": self.error_type,
             "target_view": self.target_view,
             "error_region": list(self.error_region) if self.error_region else None,
+            "coordinate_space": PROTOCOL_COORDINATE_SPACE,
             "suggested_action": self.suggested_action,
             "feedback": self.feedback,
             "accept": bool(self.accept),
@@ -141,4 +147,3 @@ class AgentObservation:
             "feedback": self.feedback.to_dict() if self.feedback else None,
             "history_summary": self.history_summary,
         }
-

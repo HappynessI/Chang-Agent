@@ -127,7 +127,9 @@ class GroundingModelQwen3VL:
         return (
             "You refine a change-detection result. The three inputs above are explicitly "
             "T1, T2, and the current change mask. Do not invent a final mask. Select one "
-            "tool action. Coordinates use [0,1000] normalized XY order. Return exactly one "
+            "tool action. All public coordinates, including Verifier error_region and your "
+            "output, use normalized [0,1000] XY order; they are not image pixels. For a "
+            "256x256 image, pixel center (128,128) is approximately (502,502). Return exactly one "
             "JSON object with target_view ('t1' or 't2') and action "
             "('positive_point', 'negative_point', 'box', or 'finish'). Point actions require "
             "coordinate:[x,y]; box requires box:[x1,y1,x2,y2]; finish requires neither.\n"
