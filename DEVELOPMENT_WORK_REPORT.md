@@ -1,5 +1,24 @@
 # Change-Agent 开发工作报告
 
+## 2026-07-18：首轮闭环问题修复
+
+首轮三样本闭环确认了工程链路可执行，但 9 次动作均未提升离线 IoU。针对审计
+发现的问题，本轮完成以下修复：
+
+1. Agent 和 Verifier 的公开坐标全部统一为 `[0,1000]` 归一化 XY/XYXY，
+   `ActionParser` 之后的 Environment 和工具边界才使用原图像素坐标。
+2. 三样本正式入口删除缓存 mask 参数，每个样本重新加载一次 SAM3，并在同一
+   worker 中依次执行 T1/T2 文本提示初始化。
+3. 初始化目录保存 T1/T2 输入、mask、confidence map、presence/object score、
+   prompt、checkpoint、resolution、命令、stdout/stderr 和 report。
+4. 删除此前按样本序号交替生成的伪 `target_view` 训练标签；Verifier head、loss、
+   NPZ schema 和 checkpoint schema 均不再包含 target-view 监督。
+5. 新增共享 Agent 权重的 Qwen3-VL zero-shot Verifier，输出结构化质量分数、错误
+   类型、真实视觉推断的目标时相、归一化错误区域、建议动作和 accept。规则
+   Verifier 只保留为显式消融。
+
+当前实现只完成代码与无权重单元测试，尚未启动下一轮长时间 GPU 推理。
+
 ## 2026-07-17：Matching 决策落地与三样本完整闭环入口
 
 本轮将默认 matching 从确定性一对一 greedy 改为 OmniOVCD 原始的双向
@@ -113,7 +132,6 @@ RuleBasedVerifier。所有样本 trajectory 保存完成并写入 `rollout_compl
 - quality regression head。
 - error-map segmentation head。
 - error-type classification head。
-- target-view classification head。
 - action classification head。
 - 组合 MSE、BCE、Dice 和多项 cross entropy loss。
 
@@ -148,9 +166,11 @@ features
 quality
 error_map
 error_type
-target_view
 action
 ```
+
+注意：旧版 smoke 曾使用 `index % 2` 构造 `target_view`，该字段不是真实标签，
+已在 2026-07-18 的 schema v2 中删除，禁止用于正式训练。
 
 已用 LEVIR-CD `test_256` 的 2 个样本完成构建和训练 smoke。
 

@@ -18,19 +18,37 @@ The current code implements the v0–v3 research skeleton:
 - JSON extraction plus view/action/coordinate/box validation;
 - a Qwen3-VL-2B Adapter using `AutoProcessor`, `apply_chat_template`, and
   `Qwen3VLForConditionalGeneration`;
+- a single public `[0,1000]` coordinate protocol for Agent/Verifier and pixel XY
+  coordinates only inside the Environment;
 - an inference-only Environment with no GT argument or label state;
 - SimpleClick point and SAM3 box boundaries;
 - per-step instance extraction, default OmniOVCD overlap-presence matching, optional
   one-to-one greedy ablation, and change-mask reconstruction;
-- a transparent rule Verifier baseline and a trainable frozen-feature Verifier head;
+- a Qwen3-VL zero-shot Verifier that shares the Agent model weights, plus a transparent
+  rule Verifier ablation and a trainable frozen-feature Verifier head;
 - offline GT perturbations for Verifier supervision;
 - feedback-driven iteration, finish rejection, complete trajectory artifacts, and
   history-best state selection.
 
-The three-sample LEVIR runner in `tools/run_levir_change_agent.py` connects real
-Qwen3-VL actions to isolated SimpleClick/SAM3 workers while keeping GT outside the
-runtime loop. The rule Verifier is a baseline, not the research-result trained
-Verifier.
+The three-sample LEVIR runner in `tools/run_levir_change_agent.py` now performs fresh
+SAM3 text-prompt initialization for both temporal views on every sample; cached masks
+are not accepted by the entry point. It saves the initial masks, confidence maps,
+presence/object scores, prompt/configuration, stdout/stderr, and worker report before
+running Qwen3-VL Agent actions. Qwen3-VL zero-shot verification is the default and the
+rule Verifier remains an explicit `--verifier rule` ablation.
+
+The offline training schema deliberately has no `target_view` target. Earlier smoke
+data alternated T1/T2 by sample index, which was not a real label and must not be used
+for training. A future trained target-view policy requires real supervision or a
+separately validated latent/tool-ranking objective.
+
+## Coordinate boundary
+
+- Agent JSON coordinates and Verifier `error_region` are normalized XY/XYXY integers
+  in `[0,1000]` and declare `coordinate_space=normalized_0_1000`.
+- `ActionParser` is the only public-to-internal conversion boundary.
+- Parsed actions, Environment state, and SimpleClick use original-image pixel XY.
+- SAM3 geometric prompts use normalized center/size values created by the Executor.
 
 ## Local smoke commands
 

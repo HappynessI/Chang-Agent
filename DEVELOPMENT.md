@@ -1,5 +1,33 @@
 # Development log
 
+## 2026-07-18 — normalized protocol, fresh SAM3, and zero-shot Verifier
+
+- Unified every Agent/Verifier-facing region under normalized `[0,1000]` XY/XYXY;
+  pixel coordinates now exist only after `ActionParser` inside the Environment.
+- Added explicit coordinate-space metadata and regression coverage for the 256-pixel
+  coordinate mismatch observed in the first three-sample rollout.
+- Removed the cached-mask option from the LEVIR runner. Each sample now starts a fresh
+  dual-view SAM3 text-prompt worker that loads SAM3 once, processes T1/T2, and saves
+  both masks plus all confidence/presence/object-score arrays and worker parameters.
+- Added a structured, GT-free Qwen3-VL zero-shot Verifier that shares the already
+  loaded Agent model/processor, preserves raw verifier responses, and infers
+  `target_view` visually instead of alternating labels.
+- Removed the synthetic `index % 2` target-view labels, target-view training array,
+  classifier head, and loss. Training schema/checkpoints are now version 2.
+- Kept `RuleBasedVerifier` only as the explicit `--verifier rule` ablation; the real
+  runner defaults to `qwen_zero_shot`.
+- Renamed offline report fields to `verifier_selected_step` and
+  `verifier_selected`, avoiding an implication that the selection is GT-oracle best.
+
+Validation:
+
+```text
+Python byte compilation: passed
+Unit tests: 25 passed
+Runner/worker CLI parsing: passed
+git diff --check: passed
+```
+
 ## 2026-07-17 — overlap-presence matching and full LEVIR runner
 
 - Changed the default matching mode from one-to-one greedy to OmniOVCD-compatible,
