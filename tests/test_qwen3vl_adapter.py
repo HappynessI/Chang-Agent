@@ -20,7 +20,7 @@ class FakeProcessor:
         return FakeInputs(input_ids=np.zeros((1, 3), dtype=np.int64))
 
     def batch_decode(self, generated, **kwargs):
-        return ['{"target_view":"t2","action":"positive_point","coordinate":[500,500]}']
+        return ['{"target_view":"t2","action":"positive_point","coordinate":[500,500],"coordinate_frame":"normalized_1000_xy"}']
 
 
 class FakeModel:
@@ -52,4 +52,3 @@ class QwenAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

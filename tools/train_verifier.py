@@ -29,9 +29,8 @@ def rss_mb() -> float:
 def make_synthetic_samples(count: int, seed: int) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(seed)
     features, quality, error_map = [], [], []
-    error_type, action = [], []
+    error_type = []
     type_ids = {"none": 0, "false_positive_change": 1, "false_negative": 2}
-    action_ids = {"finish": 0, "positive_point": 1, "negative_point": 2, "box": 3}
     for index in range(count):
         gt = np.zeros((16, 16), dtype=bool)
         y, x = 3 + index % 4, 3 + (index * 3) % 4
@@ -48,21 +47,11 @@ def make_synthetic_samples(count: int, seed: int) -> dict[str, np.ndarray]:
         quality.append(target.quality)
         error_map.append((target.false_positive_map | target.false_negative_map)[None])
         error_type.append(type_ids[target.error_type])
-        action.append(
-            action_ids[
-                "negative_point"
-                if target.error_type == "false_positive_change"
-                else "positive_point"
-                if target.error_type == "false_negative"
-                else "finish"
-            ]
-        )
     return {
         "features": np.stack(features),
         "quality": np.asarray(quality, dtype=np.float32),
         "error_map": np.stack(error_map).astype(np.float32),
         "error_type": np.asarray(error_type, dtype=np.int64),
-        "action": np.asarray(action, dtype=np.int64),
     }
 
 
@@ -70,7 +59,7 @@ def load_samples(path: Path | None, count: int, seed: int) -> dict[str, np.ndarr
     if path is None:
         return make_synthetic_samples(count, seed)
     with np.load(path) as data:
-        required = {"features", "quality", "error_map", "error_type", "action"}
+        required = {"features", "quality", "error_map", "error_type"}
         missing = required - set(data.files)
         if missing:
             raise ValueError(f"sample file is missing keys: {sorted(missing)}")
@@ -118,7 +107,7 @@ def main() -> None:
         {
             "model": model.state_dict(),
             "seed": args.seed,
-            "schema_version": 2,
+            "schema_version": 3,
             "target_view_supervision": "omitted",
         },
         args.output,

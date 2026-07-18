@@ -11,14 +11,12 @@ class VerifierPredictions:
     quality: Any
     error_map_logits: Any
     error_type_logits: Any
-    action_logits: Any
 
 
 def build_verifier_head(
     input_channels: int,
     hidden_channels: int = 128,
     error_types: int = 5,
-    actions: int = 4,
 ) -> Any:
     """Build lazily so NumPy-only inference does not require PyTorch."""
 
@@ -41,7 +39,6 @@ def build_verifier_head(
             self.pool = nn.AdaptiveAvgPool2d(1)
             self.quality = nn.Sequential(nn.Linear(hidden_channels, 1), nn.Sigmoid())
             self.error_type = nn.Linear(hidden_channels, error_types)
-            self.action = nn.Linear(hidden_channels, actions)
 
         def forward(self, frozen_features: Any) -> VerifierPredictions:
             features = self.encoder(frozen_features)
@@ -50,7 +47,6 @@ def build_verifier_head(
                 quality=self.quality(pooled).squeeze(1),
                 error_map_logits=self.error_map(features),
                 error_type_logits=self.error_type(pooled),
-                action_logits=self.action(pooled),
             )
 
     return FrozenFeatureVerifierHead()
@@ -73,6 +69,5 @@ def verifier_loss(predictions: VerifierPredictions, targets: dict[str, Any]) -> 
     )).mean()
     classification = (
         functional.cross_entropy(predictions.error_type_logits, targets["error_type"])
-        + functional.cross_entropy(predictions.action_logits, targets["action"])
     )
     return quality_loss + bce + dice_loss + classification

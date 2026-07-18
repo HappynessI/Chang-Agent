@@ -4,6 +4,11 @@
 
 - Unified every Agent/Verifier-facing region under normalized `[0,1000]` XY/XYXY;
   pixel coordinates now exist only after `ActionParser` inside the Environment.
+- Required `coordinate_frame=normalized_1000_xy` for every point/box Agent action;
+  missing frames are rejected, repeated all-`<=255` values produce an audit warning,
+  and no automatic pixel correction is attempted.
+- Added configurable `verifier_best`, `conservative_best`, and `initial` selection;
+  every run exports initial, verifier-best, last, and selected masks.
 - Added explicit coordinate-space metadata and regression coverage for the 256-pixel
   coordinate mismatch observed in the first three-sample rollout.
 - Removed the cached-mask option from the LEVIR runner. Each sample now starts a fresh
@@ -13,7 +18,11 @@
   loaded Agent model/processor, preserves raw verifier responses, and infers
   `target_view` visually instead of alternating labels.
 - Removed the synthetic `index % 2` target-view labels, target-view training array,
-  classifier head, and loss. Training schema/checkpoints are now version 2.
+  classifier head, action head, and their losses. Training schema/checkpoints are now
+  version 3 and retain only quality/error-map/error-type supervision.
+- SAM3 initialization persistence is limited to selected diagnostics (mask/logit,
+  confidence/presence/object scores, and selected FPN feature arrays), not every
+  Transformer activation or attention map.
 - Kept `RuleBasedVerifier` only as the explicit `--verifier rule` ablation; the real
   runner defaults to `qwen_zero_shot`.
 - Renamed offline report fields to `verifier_selected_step` and
@@ -23,7 +32,7 @@ Validation:
 
 ```text
 Python byte compilation: passed
-Unit tests: 25 passed
+Unit tests: 28 passed
 Runner/worker CLI parsing: passed
 git diff --check: passed
 ```

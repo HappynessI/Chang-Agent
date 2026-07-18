@@ -10,7 +10,7 @@ class VerifierTrainingSchemaTest(unittest.TestCase):
         self.assertNotIn("target_view", samples)
         self.assertEqual(
             set(samples),
-            {"features", "quality", "error_map", "error_type", "action"},
+            {"features", "quality", "error_map", "error_type"},
         )
 
     def test_head_and_loss_have_no_target_view_branch(self):
@@ -23,6 +23,7 @@ class VerifierTrainingSchemaTest(unittest.TestCase):
         model = build_verifier_head(tensors["features"].shape[1], hidden_channels=8)
         predictions = model(tensors["features"])
         self.assertFalse(hasattr(predictions, "target_view_logits"))
+        self.assertFalse(hasattr(predictions, "action_logits"))
         loss = verifier_loss(predictions, tensors)
         self.assertTrue(torch.isfinite(loss))
 

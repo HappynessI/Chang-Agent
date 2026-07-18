@@ -37,6 +37,9 @@ class ChangeAgentEnvironment:
         max_steps: int = 8,
         inference_only: bool = True,
         run_metadata: dict[str, Any] | None = None,
+        selection_policy: str = "conservative_best",
+        selection_epsilon: float = 0.0,
+        max_selection_area_delta: float = 0.25,
     ):
         if not inference_only:
             raise ValueError("runtime Environment currently supports inference_only=True only")
@@ -48,10 +51,19 @@ class ChangeAgentEnvironment:
         self.action_parser = action_parser or ActionParser()
         self.max_steps = max_steps
         self.inference_only = True
-        self.trajectory = Trajectory(run_metadata)
+        self.selection_policy = selection_policy
+        self.selection_epsilon = selection_epsilon
+        self.max_selection_area_delta = max_selection_area_delta
+        self.trajectory = Trajectory(
+            run_metadata,
+            selection_policy=selection_policy,
+            selection_epsilon=selection_epsilon,
+            max_area_delta=max_selection_area_delta,
+        )
         self.state: ChangeState | None = None
         self.feedback: VerifierOutput | None = None
         self.done = False
+        self._small_coordinate_streak = 0
 
     def reset(
         self, t1_image: np.ndarray, t2_image: np.ndarray, query: str
@@ -73,7 +85,13 @@ class ChangeAgentEnvironment:
         self.feedback = self.verifier.verify(self.state, None, None)
         execution = self._with_verifier_evidence({"event": "reset"})
         self.done = False
-        self.trajectory = Trajectory(self.trajectory.run_metadata)
+        self._small_coordinate_streak = 0
+        self.trajectory = Trajectory(
+            self.trajectory.run_metadata,
+            selection_policy=self.selection_policy,
+            selection_epsilon=self.selection_epsilon,
+            max_area_delta=self.max_selection_area_delta,
+        )
         self.trajectory.append(
             TrajectoryEntry(0, None, None, self.feedback, self.state.clone(), execution)
         )
@@ -101,19 +119,28 @@ class ChangeAgentEnvironment:
             return self.observation(), True
 
         raw_action = action_or_raw if isinstance(action_or_raw, str) else None
+        raw_payload = None
+        coordinate_warning = None
+        if raw_action is not None:
+            raw_payload = self.action_parser.extract_payload(raw_action)
+            coordinate_warning = self._coordinate_warning(raw_payload)
         action = (
-            self.action_parser.parse(action_or_raw, self.state.image_size)
+            self.action_parser.parse_payload(raw_payload, self.state.image_size)
             if isinstance(action_or_raw, str)
             else action_or_raw
         )
         action = self.action_parser.validate_pixel_action(action, self.state.image_size)
         next_index = self.state.step_index + 1
-        execution: dict[str, Any]
+        execution: dict[str, Any] = {}
+        if raw_payload is not None:
+            execution["raw_action_payload"] = raw_payload
+        if coordinate_warning is not None:
+            execution["coordinate_warning"] = coordinate_warning
 
         if action.action == "finish":
             candidate = self.state.clone()
             candidate.step_index = next_index
-            execution = {"event": "finish_requested"}
+            execution["event"] = "finish_requested"
         else:
             target_image = (
                 self.state.t1_image if action.target_view == "t1" else self.state.t2_image
@@ -137,7 +164,7 @@ class ChangeAgentEnvironment:
                 update,
                 step_index=next_index,
             )
-            execution = result.evidence
+            execution.update(result.evidence)
 
         verifier_output = self.verifier.verify(
             candidate, self.feedback.quality_score, action
@@ -160,6 +187,22 @@ class ChangeAgentEnvironment:
             )
         )
         return self.observation(), self.done
+
+    def _coordinate_warning(self, payload: dict[str, Any]) -> str | None:
+        values = payload.get("coordinate") or payload.get("box")
+        if values is None:
+            self._small_coordinate_streak = 0
+            return None
+        if all(isinstance(value, (int, float)) and 0 <= value <= 255 for value in values):
+            self._small_coordinate_streak += 1
+        else:
+            self._small_coordinate_streak = 0
+        if self._small_coordinate_streak >= 2:
+            return (
+                "consecutive_public_coordinates_all_le_255; interpreted as normalized_1000_xy, "
+                "not auto-corrected to pixels"
+            )
+        return None
 
     def _with_verifier_evidence(self, execution: dict[str, Any]) -> dict[str, Any]:
         result = dict(execution)

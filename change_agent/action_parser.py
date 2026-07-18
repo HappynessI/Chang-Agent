@@ -17,7 +17,8 @@ class ActionValidationError(ValueError):
 class ActionParser:
     ACTIONS = {"positive_point", "negative_point", "box", "finish"}
     VIEWS = {"t1", "t2"}
-    ALLOWED_KEYS = {"target_view", "action", "coordinate", "box"}
+    ALLOWED_KEYS = {"target_view", "action", "coordinate", "coordinate_frame", "box"}
+    COORDINATE_FRAME = "normalized_1000_xy"
 
     def __init__(self, coordinate_max: float = float(PROTOCOL_COORDINATE_MAX)):
         if coordinate_max <= 0:
@@ -25,8 +26,13 @@ class ActionParser:
         self.coordinate_max = float(coordinate_max)
 
     def parse(self, raw_response: str, image_size: tuple[int, int]) -> AgentAction:
-        payload = self._extract_json_object(raw_response)
+        payload = self.extract_payload(raw_response)
         return self.parse_payload(payload, image_size)
+
+    def extract_payload(self, raw_response: str) -> dict[str, Any]:
+        """Extract the raw public action payload for auditable trajectory logging."""
+
+        return self._extract_json_object(raw_response)
 
     def parse_payload(
         self, payload: dict[str, Any], image_size: tuple[int, int]
@@ -48,6 +54,10 @@ class ActionParser:
         if action in {"positive_point", "negative_point"}:
             if "box" in payload:
                 raise ActionValidationError("point action must not include box")
+            if payload.get("coordinate_frame") != self.COORDINATE_FRAME:
+                raise ActionValidationError(
+                    f"point action requires coordinate_frame={self.COORDINATE_FRAME!r}"
+                )
             coordinate = self._number_list(payload.get("coordinate"), 2, "coordinate")
             x, y = self._point_to_pixels(coordinate, width, height)
             return AgentAction(target_view, action, coordinate=(x, y))
@@ -55,6 +65,10 @@ class ActionParser:
         if action == "box":
             if "coordinate" in payload:
                 raise ActionValidationError("box action must not include coordinate")
+            if payload.get("coordinate_frame") != self.COORDINATE_FRAME:
+                raise ActionValidationError(
+                    f"box action requires coordinate_frame={self.COORDINATE_FRAME!r}"
+                )
             box = self._number_list(payload.get("box"), 4, "box")
             x1, y1 = self._point_to_pixels(box[:2], width, height)
             x2, y2 = self._point_to_pixels(box[2:], width, height)
@@ -62,7 +76,7 @@ class ActionParser:
                 raise ActionValidationError("box must satisfy x1 < x2 and y1 < y2")
             return AgentAction(target_view, action, box=(x1, y1, x2, y2))
 
-        if "coordinate" in payload or "box" in payload:
+        if "coordinate" in payload or "box" in payload or "coordinate_frame" in payload:
             raise ActionValidationError("finish action must not include coordinate or box")
         return AgentAction(target_view, "finish")
 

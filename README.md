@@ -25,7 +25,8 @@ The current code implements the v0–v3 research skeleton:
 - per-step instance extraction, default OmniOVCD overlap-presence matching, optional
   one-to-one greedy ablation, and change-mask reconstruction;
 - a Qwen3-VL zero-shot Verifier that shares the Agent model weights, plus a transparent
-  rule Verifier ablation and a trainable frozen-feature Verifier head;
+  rule Verifier ablation and a trainable frozen-feature Verifier head for quality,
+  error-map, and error-type only;
 - offline GT perturbations for Verifier supervision;
 - feedback-driven iteration, finish rejection, complete trajectory artifacts, and
   history-best state selection.
@@ -46,9 +47,19 @@ separately validated latent/tool-ranking objective.
 
 - Agent JSON coordinates and Verifier `error_region` are normalized XY/XYXY integers
   in `[0,1000]` and declare `coordinate_space=normalized_0_1000`.
+- Point/box Agent actions must additionally declare
+  `coordinate_frame=normalized_1000_xy`; missing or mismatched frames are rejected.
 - `ActionParser` is the only public-to-internal conversion boundary.
 - Parsed actions, Environment state, and SimpleClick use original-image pixel XY.
+- Trajectories preserve the raw normalized payload, parsed pixel action, and a warning
+  after two consecutive actions whose public values are all `<=255`; no automatic
+  pixel-coordinate correction is performed.
 - SAM3 geometric prompts use normalized center/size values created by the Executor.
+
+The runner supports `verifier_best`, `conservative_best`, and `initial` selection
+policies. All step masks are retained, and initial, verifier-best, last, and selected
+prediction masks are exported. `conservative_best` only admits a step when its score
+improves by more than `selection_epsilon` without an excessive absolute mask-area jump.
 
 ## Local smoke commands
 

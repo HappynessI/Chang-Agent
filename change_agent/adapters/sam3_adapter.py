@@ -63,6 +63,26 @@ class SAM3ProcessorAdapter:
         state = self.processor.set_text_prompt(prompt=query, state=state)
         mask, confidence = self._mask_from_state(state, image.shape[:2])
         evidence: dict[str, Any] = {"confidence_map": confidence}
+        for key in (
+            "semantic_mask_logits",
+            "masks_logits",
+            "masks",
+            "backbone_fpn",
+            "fpn_features",
+        ):
+            if key in state:
+                # These are selected diagnostics only; full transformer activations
+                # and attention maps intentionally remain transient.
+                value = state[key]
+                if isinstance(value, dict):
+                    for subkey, subvalue in value.items():
+                        array = self._numpy(subvalue)
+                        if array.dtype != object:
+                            evidence[f"{key}.{subkey}"] = array
+                else:
+                    array = self._numpy(value)
+                    if array.dtype != object:
+                        evidence[key] = array
         for key in ("presence_score", "object_score", "scores"):
             if key in state:
                 evidence[key] = self._numpy(state[key])

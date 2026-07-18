@@ -43,6 +43,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--query", default="building")
     parser.add_argument("--max-steps", type=int, default=3)
+    parser.add_argument(
+        "--selection-policy",
+        choices=("verifier_best", "conservative_best", "initial"),
+        default="conservative_best",
+    )
+    parser.add_argument("--selection-epsilon", type=float, default=0.0)
+    parser.add_argument("--max-selection-area-delta", type=float, default=0.25)
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
     parser.add_argument("--overlap-threshold", type=float, default=0.25)
     parser.add_argument("--t12-min-instance-area", type=int, default=0)
@@ -76,6 +83,8 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=False)
     for name in ("predictions", "trajectories", "masks", "verifier_feedback", "logs", "tool_runs"):
         (args.output / name).mkdir()
+    for name in ("initial", "verifier_best", "last", "selected"):
+        (args.output / "predictions" / name).mkdir()
     _validate_inputs(args)
     manifest = _base_manifest(args)
     (args.output / "run_manifest.md").write_text(_render_manifest(manifest), encoding="utf-8")
@@ -139,6 +148,9 @@ def main() -> None:
             ActionExecutor(point_backend, box_backend),
             verifier,
             max_steps=args.max_steps,
+            selection_policy=args.selection_policy,
+            selection_epsilon=args.selection_epsilon,
+            max_selection_area_delta=args.max_selection_area_delta,
             run_metadata={
                 "sample": sample_file,
                 "query": args.query,
@@ -183,13 +195,26 @@ def main() -> None:
             (trajectory_dir / "invalid_agent_outputs.json").write_text(
                 json.dumps(invalid_outputs, indent=2, ensure_ascii=False), encoding="utf-8"
             )
-        best = environment.best_state.change_mask
-        Image.fromarray(best.astype(np.uint8) * 255, mode="L").save(
+        selected = environment.best_state.change_mask
+        verifier_best = environment.trajectory.verifier_best_entry.state.change_mask
+        initial = environment.trajectory.entries[0].state.change_mask
+        last = environment.trajectory.entries[-1].state.change_mask
+        Image.fromarray(selected.astype(np.uint8) * 255, mode="L").save(
             args.output / "predictions" / sample_file
         )
+        for name, mask in (
+            ("selected", selected),
+            ("verifier_best", verifier_best),
+            ("initial", initial),
+            ("last", last),
+        ):
+            Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(
+                args.output / "predictions" / name / sample_file
+            )
         rollout_records[sample] = {
             "trajectory": trajectory_path,
             "best_step": environment.trajectory.best_entry.step_index,
+            "verifier_best_step": environment.trajectory.verifier_best_entry.step_index,
             "tool_action_count": len(tool_steps),
             "raw_actions": [entry.raw_action for entry in environment.trajectory.entries[1:]],
         }
@@ -242,6 +267,8 @@ def evaluate_after_rollout(
         payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
         gt = np.asarray(Image.open(gt_dir / f"{sample}.png")) > 0
         step_metrics = []
+        selected_metrics = None
+        verifier_best_metrics = None
         for step in payload["steps"]:
             mask_path = (trajectory_path.parent / step["change_mask_file"]).resolve()
             prediction = np.asarray(np.load(mask_path), dtype=bool)
@@ -249,8 +276,10 @@ def evaluate_after_rollout(
             step["offline_metrics"] = values
             step_metrics.append({"step_index": step["step_index"], **values})
             if step["step_index"] == payload["best_step"]:
-                best_metrics = values
+                selected_metrics = values
                 aggregate_counts += counts
+            if step["step_index"] == payload["verifier_best_step"]:
+                verifier_best_metrics = values
         trajectory_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -259,7 +288,12 @@ def evaluate_after_rollout(
             "tool_action_count": record["tool_action_count"],
             "steps": step_metrics,
             "initial": step_metrics[0],
-            "verifier_selected": {"step_index": payload["best_step"], **best_metrics},
+            "verifier_selected": {"step_index": payload["best_step"], **selected_metrics},
+            "verifier_best_step": payload["verifier_best_step"],
+            "verifier_best": {
+                "step_index": payload["verifier_best_step"], **verifier_best_metrics
+            },
+            "last": step_metrics[-1],
         }
     aggregate, _ = _metrics_from_counts(aggregate_counts)
     return {"samples": samples, "aggregate": aggregate}
@@ -329,6 +363,9 @@ def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "t12_min_instance_area": args.t12_min_instance_area,
         "cd_min_instance_area": args.cd_min_instance_area,
         "max_steps": args.max_steps,
+        "selection_policy": args.selection_policy,
+        "selection_epsilon": args.selection_epsilon,
+        "max_selection_area_delta": args.max_selection_area_delta,
         "seed": args.seed,
         "gt_policy": "label_cvt is opened only by evaluate_after_rollout after rollout_complete.json",
     }

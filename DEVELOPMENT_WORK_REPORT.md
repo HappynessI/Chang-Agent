@@ -12,10 +12,15 @@
 3. 初始化目录保存 T1/T2 输入、mask、confidence map、presence/object score、
    prompt、checkpoint、resolution、命令、stdout/stderr 和 report。
 4. 删除此前按样本序号交替生成的伪 `target_view` 训练标签；Verifier head、loss、
-   NPZ schema 和 checkpoint schema 均不再包含 target-view 监督。
+   NPZ schema 和 checkpoint schema 均不再包含 target-view 监督，也暂不训练
+   action head；第一阶段只保留 quality、error-map、error-type。
 5. 新增共享 Agent 权重的 Qwen3-VL zero-shot Verifier，输出结构化质量分数、错误
    类型、真实视觉推断的目标时相、归一化错误区域、建议动作和 accept。规则
    Verifier 只保留为显式消融。
+6. 增加 `coordinate_frame=normalized_1000_xy` 必填校验、连续小坐标告警，并在
+   trajectory 中同时保存 raw normalized payload 与 parsed pixel action。
+7. 增加 `verifier_best`、`conservative_best`、`initial` 三种选择策略；所有 step
+   mask 以及 initial/verifier-best/last/selected 预测均保留。
 
 当前实现只完成代码与无权重单元测试，尚未启动下一轮长时间 GPU 推理。
 

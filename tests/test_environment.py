@@ -96,13 +96,37 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_raw_action_and_trajectory_artifacts(self):
         self.environment.reset(self.image1, self.image2, "building")
-        raw = '{"target_view":"t1","action":"positive_point","coordinate":[0,0]}'
+        raw = '{"target_view":"t1","action":"positive_point","coordinate":[0,0],"coordinate_frame":"normalized_1000_xy"}'
         self.environment.step(raw)
         with tempfile.TemporaryDirectory() as directory:
             path = self.environment.trajectory.save(directory)
             payload = json.loads(path.read_text())
             self.assertEqual(payload["steps"][1]["raw_action"], raw)
+            self.assertEqual(
+                payload["steps"][1]["raw_action_payload"]["coordinate_frame"],
+                "normalized_1000_xy",
+            )
             self.assertTrue((Path(directory) / "masks" / "step_001.npy").exists())
+
+    def test_repeated_small_public_coordinates_are_warned_not_autocorrected(self):
+        self.environment.reset(self.image1, self.image2, "building")
+        raw = '{"target_view":"t1","action":"positive_point","coordinate":[100,200],"coordinate_frame":"normalized_1000_xy"}'
+        self.environment.step(raw)
+        self.environment.step(raw)
+        warning = self.environment.trajectory.entries[2].execution["coordinate_warning"]
+        self.assertIn("not auto-corrected to pixels", warning)
+
+    def test_initial_selection_policy_keeps_initial_state(self):
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(Point(), self.box),
+            EvidenceVerifier(),
+            max_steps=4,
+            selection_policy="initial",
+        )
+        environment.reset(self.image1, self.image2, "building")
+        environment.step(AgentAction("t2", "box", box=(2, 2, 5, 5)))
+        self.assertEqual(environment.trajectory.best_entry.step_index, 0)
 
     def test_trajectory_can_save_masks_in_a_separate_directory(self):
         self.environment.reset(self.image1, self.image2, "building")

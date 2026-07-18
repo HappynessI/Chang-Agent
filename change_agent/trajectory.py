@@ -32,6 +32,8 @@ class TrajectoryEntry:
         return {
             "step_index": self.step_index,
             "raw_action": self.raw_action,
+            "raw_action_payload": _json_safe(self.execution.get("raw_action_payload")),
+            "coordinate_warning": self.execution.get("coordinate_warning"),
             "parsed_action": parsed,
             "target_view": parsed["target_view"] if parsed else None,
             "tool": self.execution.get("tool"),
@@ -49,10 +51,22 @@ class TrajectoryEntry:
 
 
 class Trajectory:
-    def __init__(self, run_metadata: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        run_metadata: dict[str, Any] | None = None,
+        *,
+        selection_policy: str = "conservative_best",
+        selection_epsilon: float = 0.0,
+        max_area_delta: float = 0.25,
+    ):
+        if selection_policy not in {"verifier_best", "conservative_best", "initial"}:
+            raise ValueError("unsupported selection_policy")
         self.entries: list[TrajectoryEntry] = []
         self.run_metadata = default_run_metadata()
         self.run_metadata.update(run_metadata or {})
+        self.selection_policy = selection_policy
+        self.selection_epsilon = selection_epsilon
+        self.max_area_delta = max_area_delta
 
     def append(self, entry: TrajectoryEntry) -> None:
         if self.entries and entry.step_index <= self.entries[-1].step_index:
@@ -61,6 +75,27 @@ class Trajectory:
 
     @property
     def best_entry(self) -> TrajectoryEntry:
+        if not self.entries:
+            raise RuntimeError("trajectory is empty")
+        if self.selection_policy == "initial":
+            return self.entries[0]
+        if self.selection_policy == "verifier_best":
+            return max(self.entries, key=lambda item: item.verifier.quality_score)
+        accepted = [self.entries[0]]
+        for previous, current in zip(self.entries, self.entries[1:]):
+            area_delta = abs(
+                float(current.state.change_mask.mean())
+                - float(previous.state.change_mask.mean())
+            )
+            if (
+                current.verifier.score_delta > self.selection_epsilon
+                and area_delta <= self.max_area_delta
+            ):
+                accepted.append(current)
+        return max(accepted, key=lambda item: item.verifier.quality_score)
+
+    @property
+    def verifier_best_entry(self) -> TrajectoryEntry:
         if not self.entries:
             raise RuntimeError("trajectory is empty")
         return max(self.entries, key=lambda item: item.verifier.quality_score)
@@ -92,6 +127,8 @@ class Trajectory:
         payload = {
             "metadata": _json_safe(self.run_metadata),
             "best_step": self.best_entry.step_index if self.entries else None,
+            "selection_policy": self.selection_policy,
+            "verifier_best_step": self.verifier_best_entry.step_index if self.entries else None,
             "steps": serialized,
         }
         path = output_dir / "trajectory.json"
