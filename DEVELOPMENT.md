@@ -1,5 +1,50 @@
 # Development log
 
+## 2026-07-18 — no synthetic box fallback and rejected-candidate rollback
+
+- Removed the runner-generated SAM3 box action that previously executed after Qwen
+  action retries were exhausted. Exhaustion now records all rejected raw outputs,
+  sets `episode_stop_reason=action_retry_exhaustion_without_state_change`, and safely
+  exports the current/history-best state even when no tool action ran.
+- Added an Environment candidate-commit boundary. Tool candidates are rejected when
+  the Verifier is invalid, the score does not improve beyond `selection_epsilon`, or
+  the absolute change-mask area jump exceeds `max_selection_area_delta`.
+- Rejected candidate masks, Verifier outputs, tool evidence, area ratios, and rejection
+  reasons remain in the trajectory, but the live Environment state and valid feedback
+  roll back to the previous accepted version. The step index still advances so repeated
+  failures cannot create an infinite loop.
+- History-best selection excludes rejected candidates; raw `verifier_best` remains an
+  audit artifact. Added regressions for retry exhaustion without fallback execution,
+  invalid-Verifier rollback, and excessive-area rollback.
+
+## 2026-07-18 — staged Verifier diagnostics and derived actions
+
+- Split Qwen Verifier handling into a diagnostic stage and a dedicated localization
+  request. Missing `error_region` is retained as a semantic diagnosis instead of
+  being discarded immediately; one localization request is issued before declaring
+  the Verifier invalid.
+- Removed model authority over `accept`, `stop`, and `suggested_action`. The runtime
+  derives them from `error_type`, `error_region`, and the quality threshold. Invalid
+  feedback is explicitly marked `verifier_valid=false`, has
+  `localization_valid=false`, `suggested_action=null`, and `stop=false`.
+- Invalid feedback retains the previous valid diagnostic text and never tells the
+  Agent to finish. Environment termination now uses the derived `stop` field.
+- Added regressions for contradictory model fields, successful second-stage
+  localization, failed localization with retained feedback, and invalid no-finish
+  fallback behavior.
+
+## 2026-07-18 — system-owned Agent coordinate protocol
+
+- Removed `coordinate_frame` from the Qwen action schema and the runner's safety
+  fallback. The prompt still defines normalized `[0,1000]` XY/XYXY, while the model
+  now emits only action fields and coordinates.
+- Made the retired field optional at the parser boundary. Correct legacy declarations
+  remain accepted for old artifacts/clients, conflicting values remain invalid, and
+  missing declarations no longer consume retries or trigger safety fallbacks.
+- Added point, box, prompt, Environment, and trajectory regressions for field-free
+  actions. This directly covers the five valid point actions rejected in
+  `change_agent_levir_fresh_qwen_20260718_133335` solely for omitting the field.
+
 ## 2026-07-18 — normalized protocol, fresh SAM3, and zero-shot Verifier
 
 - Unified every Agent/Verifier-facing region under normalized `[0,1000]` XY/XYXY;

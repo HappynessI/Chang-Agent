@@ -46,9 +46,11 @@ separately validated latent/tool-ranking objective.
 ## Coordinate boundary
 
 - Agent JSON coordinates and Verifier `error_region` are normalized XY/XYXY integers
-  in `[0,1000]` and declare `coordinate_space=normalized_0_1000`.
-- Point/box Agent actions must additionally declare
-  `coordinate_frame=normalized_1000_xy`; missing or mismatched frames are rejected.
+  in `[0,1000]`. The runtime owns this protocol; Agent actions contain only the action
+  fields and coordinates and do not repeat coordinate configuration metadata.
+- `coordinate_frame=normalized_1000_xy` remains accepted only for compatibility with
+  older action payloads. It is no longer required or requested from Qwen; a conflicting
+  legacy value is rejected rather than allowed to override the system protocol.
 - `ActionParser` is the only public-to-internal conversion boundary.
 - Parsed actions, Environment state, and SimpleClick use original-image pixel XY.
 - Trajectories preserve the raw normalized payload, parsed pixel action, and a warning
@@ -56,10 +58,27 @@ separately validated latent/tool-ranking objective.
   pixel-coordinate correction is performed.
 - SAM3 geometric prompts use normalized center/size values created by the Executor.
 
+## Verifier feedback boundary
+
+- Qwen's Verifier response is diagnostic only: it supplies quality, error type,
+  target view, optional error region, and text feedback.
+- When an actionable diagnosis omits `error_region`, the runtime sends a separate
+  localization request. If localization still fails, the result is marked with
+  `verifier_valid=false` and `localization_valid=false`, exposes no suggested action,
+  and cannot stop the episode; the previous valid feedback is retained for context.
+- `accept`, `stop`, and `suggested_action` are derived by the runtime. `none` maps to
+  `finish` with `accept=(quality_score >= threshold)`; false positives map to a
+  `negative_point`, false negatives to a `positive_point`, and mixed/uncertain errors
+  to a `box` when a valid region is available.
+
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
-policies. All step masks are retained, and initial, verifier-best, last, and selected
-prediction masks are exported. `conservative_best` only admits a step when its score
-improves by more than `selection_epsilon` without an excessive absolute mask-area jump.
+policies. All attempted candidate masks are retained, and initial, verifier-best,
+last-attempted, and selected prediction masks are exported. A tool candidate is accepted
+only when the Verifier is valid, its score improves by more than `selection_epsilon`,
+and its absolute mask-area jump stays within the configured limit. Rejected candidates
+remain auditable in the trajectory, while the next Agent step resumes from the previous
+accepted state. If model action retries are exhausted, the episode stops without
+executing a synthetic SAM3 box action.
 
 ## Local smoke commands
 

@@ -47,15 +47,24 @@ class VerifierOutput:
     error_type: str = "none"
     target_view: TargetView = "t2"
     error_region: tuple[int, int, int, int] | None = None
-    suggested_action: ActionName = "finish"
+    suggested_action: ActionName | None = "finish"
     feedback: str = ""
     accept: bool = False
+    verifier_valid: bool = True
+    localization_valid: bool = True
+    stop: bool | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.quality_score) <= 1.0:
             raise ValueError("quality_score must be in [0, 1]")
         if self.error_region is not None:
             validate_normalized_box(self.error_region)
+        if self.stop is None:
+            object.__setattr__(self, "stop", bool(self.accept))
+        if not self.verifier_valid:
+            object.__setattr__(self, "accept", False)
+            object.__setattr__(self, "stop", False)
+            object.__setattr__(self, "suggested_action", None)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +77,9 @@ class VerifierOutput:
             "suggested_action": self.suggested_action,
             "feedback": self.feedback,
             "accept": bool(self.accept),
+            "verifier_valid": bool(self.verifier_valid),
+            "localization_valid": bool(self.localization_valid),
+            "stop": bool(self.stop),
         }
 
 

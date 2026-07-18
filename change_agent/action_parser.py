@@ -18,6 +18,9 @@ class ActionParser:
     ACTIONS = {"positive_point", "negative_point", "box", "finish"}
     VIEWS = {"t1", "t2"}
     ALLOWED_KEYS = {"target_view", "action", "coordinate", "coordinate_frame", "box"}
+    # The coordinate protocol is owned by the runtime. This value is accepted only
+    # for compatibility with action payloads produced before the field was removed
+    # from the public model schema.
     COORDINATE_FRAME = "normalized_1000_xy"
 
     def __init__(self, coordinate_max: float = float(PROTOCOL_COORDINATE_MAX)):
@@ -54,10 +57,7 @@ class ActionParser:
         if action in {"positive_point", "negative_point"}:
             if "box" in payload:
                 raise ActionValidationError("point action must not include box")
-            if payload.get("coordinate_frame") != self.COORDINATE_FRAME:
-                raise ActionValidationError(
-                    f"point action requires coordinate_frame={self.COORDINATE_FRAME!r}"
-                )
+            self._validate_legacy_coordinate_frame(payload)
             coordinate = self._number_list(payload.get("coordinate"), 2, "coordinate")
             x, y = self._point_to_pixels(coordinate, width, height)
             return AgentAction(target_view, action, coordinate=(x, y))
@@ -65,10 +65,7 @@ class ActionParser:
         if action == "box":
             if "coordinate" in payload:
                 raise ActionValidationError("box action must not include coordinate")
-            if payload.get("coordinate_frame") != self.COORDINATE_FRAME:
-                raise ActionValidationError(
-                    f"box action requires coordinate_frame={self.COORDINATE_FRAME!r}"
-                )
+            self._validate_legacy_coordinate_frame(payload)
             box = self._number_list(payload.get("box"), 4, "box")
             x1, y1 = self._point_to_pixels(box[:2], width, height)
             x2, y2 = self._point_to_pixels(box[2:], width, height)
@@ -79,6 +76,18 @@ class ActionParser:
         if "coordinate" in payload or "box" in payload or "coordinate_frame" in payload:
             raise ActionValidationError("finish action must not include coordinate or box")
         return AgentAction(target_view, "finish")
+
+    def _validate_legacy_coordinate_frame(self, payload: dict[str, Any]) -> None:
+        """Accept the retired field without making the model declare configuration."""
+
+        if (
+            "coordinate_frame" in payload
+            and payload["coordinate_frame"] != self.COORDINATE_FRAME
+        ):
+            raise ActionValidationError(
+                "coordinate_frame is system-defined; if supplied by a legacy client, "
+                f"it must equal {self.COORDINATE_FRAME!r}"
+            )
 
     def validate_pixel_action(
         self, action: AgentAction, image_size: tuple[int, int]

@@ -74,6 +74,9 @@ class ChangeAgentEnvironment:
             raise ValueError("query must not be empty")
         t1_image = np.asarray(t1_image)
         t2_image = np.asarray(t2_image)
+        reset_verifier = getattr(self.verifier, "reset", None)
+        if callable(reset_verifier):
+            reset_verifier()
         initialized = self.backend.initialize(t1_image, t2_image, query)
         self.state = self._state_from_update(
             t1_image,
@@ -85,7 +88,9 @@ class ChangeAgentEnvironment:
             step_index=0,
         )
         self.feedback = self.verifier.verify(self.state, None, None)
-        execution = self._with_verifier_evidence({"event": "reset"})
+        execution = self._with_verifier_evidence(
+            {"event": "reset", "candidate_accepted": True}
+        )
         self.done = False
         self._small_coordinate_streak = 0
         self.trajectory = Trajectory(
@@ -138,6 +143,8 @@ class ChangeAgentEnvironment:
             and not any(entry.execution.get("tool") for entry in self.trajectory.entries)
         ):
             raise ActionValidationError("finish is forbidden before a segmentation tool action")
+        previous_state = self.state.clone()
+        previous_feedback = self.feedback
         next_index = self.state.step_index + 1
         execution: dict[str, Any] = {}
         if raw_payload is not None:
@@ -177,12 +184,47 @@ class ChangeAgentEnvironment:
         verifier_output = self.verifier.verify(
             candidate, self.feedback.quality_score, action
         )
+        previous_area_ratio = float(previous_state.change_mask.mean())
+        candidate_area_ratio = float(candidate.change_mask.mean())
+        area_delta = abs(candidate_area_ratio - previous_area_ratio)
+        rejection_reasons: list[str] = []
+        if not verifier_output.verifier_valid:
+            rejection_reasons.append("verifier_invalid")
+        if action.action != "finish":
+            if verifier_output.score_delta <= self.selection_epsilon:
+                rejection_reasons.append("score_did_not_improve")
+            if area_delta > self.max_selection_area_delta:
+                rejection_reasons.append("mask_area_delta_exceeded")
+        candidate_accepted = not rejection_reasons
+        execution.update(
+            {
+                "candidate_accepted": candidate_accepted,
+                "candidate_rejection_reasons": rejection_reasons,
+                "previous_area_ratio": previous_area_ratio,
+                "candidate_area_ratio": candidate_area_ratio,
+                "candidate_area_delta": area_delta,
+            }
+        )
         execution = self._with_verifier_evidence(execution)
-        self.state = candidate
-        self.feedback = verifier_output
+        if candidate_accepted:
+            self.state = candidate
+            self.feedback = verifier_output
+        else:
+            # Keep the rejected candidate in the trajectory, but continue the
+            # closed loop from the last accepted state and feedback.
+            previous_state.step_index = next_index
+            self.state = previous_state
+            self.feedback = previous_feedback
+            reject_callback = getattr(self.verifier, "on_candidate_rejected", None)
+            if callable(reject_callback):
+                reject_callback(previous_feedback)
         self.done = (
             next_index >= self.max_steps
-            or (action.action == "finish" and verifier_output.accept)
+            or (
+                candidate_accepted
+                and action.action == "finish"
+                and verifier_output.stop
+            )
         )
         self.trajectory.append(
             TrajectoryEntry(

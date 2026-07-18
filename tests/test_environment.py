@@ -61,6 +61,14 @@ class EvidenceVerifier:
         )
 
 
+class SequenceVerifier:
+    def __init__(self, outputs):
+        self.outputs = iter(outputs)
+
+    def verify(self, state, previous_score, previous_action):
+        return next(self.outputs)
+
+
 class EnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.box = Box()
@@ -97,21 +105,21 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_raw_action_and_trajectory_artifacts(self):
         self.environment.reset(self.image1, self.image2, "building")
-        raw = '{"target_view":"t1","action":"positive_point","coordinate":[0,0],"coordinate_frame":"normalized_1000_xy"}'
+        raw = '{"target_view":"t1","action":"positive_point","coordinate":[0,0]}'
         self.environment.step(raw)
         with tempfile.TemporaryDirectory() as directory:
             path = self.environment.trajectory.save(directory)
             payload = json.loads(path.read_text())
             self.assertEqual(payload["steps"][1]["raw_action"], raw)
+            self.assertNotIn("coordinate_frame", payload["steps"][1]["raw_action_payload"])
             self.assertEqual(
-                payload["steps"][1]["raw_action_payload"]["coordinate_frame"],
-                "normalized_1000_xy",
+                payload["steps"][1]["raw_action_payload"]["coordinate"], [0, 0]
             )
             self.assertTrue((Path(directory) / "masks" / "step_001.npy").exists())
 
     def test_repeated_small_public_coordinates_are_warned_not_autocorrected(self):
         self.environment.reset(self.image1, self.image2, "building")
-        raw = '{"target_view":"t1","action":"positive_point","coordinate":[100,200],"coordinate_frame":"normalized_1000_xy"}'
+        raw = '{"target_view":"t1","action":"positive_point","coordinate":[100,200]}'
         self.environment.step(raw)
         self.environment.step(raw)
         warning = self.environment.trajectory.entries[2].execution["coordinate_warning"]
@@ -127,6 +135,82 @@ class EnvironmentTest(unittest.TestCase):
         )
         environment.reset(self.image1, self.image2, "building")
         environment.step(AgentAction("t2", "box", box=(2, 2, 5, 5)))
+        self.assertEqual(environment.trajectory.best_entry.step_index, 0)
+
+    def test_invalid_verifier_candidate_is_recorded_then_rolled_back(self):
+        initial_feedback = VerifierOutput(
+            quality_score=0.3,
+            error_type="uncertain_region",
+            target_view="t2",
+            error_region=(0, 0, 1000, 1000),
+            suggested_action="box",
+            feedback="Initial state needs review.",
+        )
+        invalid_feedback = VerifierOutput(
+            quality_score=0.9,
+            error_type="none",
+            target_view="t2",
+            feedback="Malformed verifier result.",
+            verifier_valid=False,
+            localization_valid=False,
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(Point(), self.box),
+            SequenceVerifier([initial_feedback, invalid_feedback]),
+            max_steps=3,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        accepted_mask = environment.state.change_mask.copy()
+
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+
+        rejected = environment.trajectory.entries[1]
+        self.assertFalse(rejected.execution["candidate_accepted"])
+        self.assertIn("verifier_invalid", rejected.execution["candidate_rejection_reasons"])
+        self.assertFalse(np.array_equal(rejected.state.change_mask, accepted_mask))
+        self.assertTrue(np.array_equal(environment.state.change_mask, accepted_mask))
+        self.assertEqual(environment.state.step_index, 1)
+        self.assertIs(environment.feedback, initial_feedback)
+        self.assertEqual(environment.trajectory.best_entry.step_index, 0)
+
+    def test_excessive_mask_area_candidate_is_rolled_back(self):
+        initial_feedback = VerifierOutput(
+            quality_score=0.3,
+            error_type="uncertain_region",
+            target_view="t2",
+            error_region=(0, 0, 1000, 1000),
+            suggested_action="box",
+            feedback="Initial state needs review.",
+        )
+        optimistic_feedback = VerifierOutput(
+            quality_score=0.95,
+            score_delta=0.65,
+            error_type="none",
+            target_view="t2",
+            feedback="Candidate looks good.",
+            accept=True,
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(Point(), self.box),
+            SequenceVerifier([initial_feedback, optimistic_feedback]),
+            max_steps=3,
+            max_selection_area_delta=0.0,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        accepted_mask = environment.state.change_mask.copy()
+
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+
+        rejected = environment.trajectory.entries[1]
+        self.assertFalse(rejected.execution["candidate_accepted"])
+        self.assertIn(
+            "mask_area_delta_exceeded",
+            rejected.execution["candidate_rejection_reasons"],
+        )
+        self.assertGreater(rejected.verifier.score_delta, 0)
+        self.assertTrue(np.array_equal(environment.state.change_mask, accepted_mask))
         self.assertEqual(environment.trajectory.best_entry.step_index, 0)
 
     def test_finish_is_rejected_before_any_tool_action(self):

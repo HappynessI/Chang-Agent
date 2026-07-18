@@ -43,6 +43,10 @@ class TrajectoryEntry:
             "error_type": verifier["error_type"],
             "suggested_action": verifier["suggested_action"],
             "accept": verifier["accept"],
+            "candidate_accepted": self.execution.get("candidate_accepted"),
+            "candidate_rejection_reasons": _json_safe(
+                self.execution.get("candidate_rejection_reasons", [])
+            ),
             "verifier": verifier,
             "execution": _json_safe(self.execution),
             "matching_evidence": _json_safe(self.state.evidence.get("matching")),
@@ -79,19 +83,13 @@ class Trajectory:
             raise RuntimeError("trajectory is empty")
         if self.selection_policy == "initial":
             return self.entries[0]
-        if self.selection_policy == "verifier_best":
-            return max(self.entries, key=lambda item: item.verifier.quality_score)
-        accepted = [self.entries[0]]
-        for previous, current in zip(self.entries, self.entries[1:]):
-            area_delta = abs(
-                float(current.state.change_mask.mean())
-                - float(previous.state.change_mask.mean())
-            )
-            if (
-                current.verifier.score_delta > self.selection_epsilon
-                and area_delta <= self.max_area_delta
-            ):
-                accepted.append(current)
+        accepted = [
+            item
+            for item in self.entries
+            if item.execution.get("candidate_accepted", True)
+        ]
+        if not accepted:
+            return self.entries[0]
         return max(accepted, key=lambda item: item.verifier.quality_score)
 
     @property
@@ -107,7 +105,8 @@ class Trajectory:
             action = item.parsed_action.action if item.parsed_action else "reset"
             parts.append(
                 f"step={item.step_index}, action={action}, "
-                f"score={item.verifier.quality_score:.3f}, error={item.verifier.error_type}"
+                f"score={item.verifier.quality_score:.3f}, error={item.verifier.error_type}, "
+                f"accepted={item.execution.get('candidate_accepted', True)}"
             )
         return "; ".join(parts)
 

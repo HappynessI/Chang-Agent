@@ -123,7 +123,12 @@ class GroundingModelQwen3VL:
             f"action={name}" in history
             for name in ("positive_point", "negative_point", "box")
         )
+        verifier_invalid = observation.feedback is not None and not observation.feedback.verifier_valid
         finish_rule = (
+            "Verifier feedback is invalid and cannot authorize finish. Do not finish from "
+            "this feedback; recheck the visual evidence and choose a segmentation tool action."
+            if verifier_invalid
+            else
             "At least one segmentation tool action has already run; finish is allowed only "
             "if the current mask is credible."
             if has_tool_action
@@ -142,9 +147,10 @@ class GroundingModelQwen3VL:
             "output, use normalized [0,1000] XY order; they are not image pixels. For a "
             "256x256 image, pixel center (128,128) is approximately (502,502). Return exactly one "
             "JSON object with target_view ('t1' or 't2') and action "
-            "('positive_point', 'negative_point', 'box', or 'finish'). Point actions require "
-            "coordinate:[x,y] and coordinate_frame:'normalized_1000_xy'; box requires box "
-            "and the same coordinate_frame; finish requires neither.\n"
+            "('positive_point', 'negative_point', 'box', or 'finish'). The coordinate protocol "
+            "is system-defined: do not output coordinate-frame or other configuration fields. "
+            "Point actions require coordinate:[x,y]; box actions require box:[x1,y1,x2,y2]; "
+            "finish requires neither.\n"
             f"{correction}"
             f"{finish_rule}\n"
             f"Query: {observation.query}\n"

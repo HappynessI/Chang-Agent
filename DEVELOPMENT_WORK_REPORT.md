@@ -1,5 +1,47 @@
 # Change-Agent 开发工作报告
 
+## 2026-07-18：删除自动 box fallback，并回滚未接受 candidate
+
+上次三个样本唯一实际执行的工具动作都是重试耗尽后由 runner 自动生成的 SAM3
+大框，且全部降低离线 IoU。现已删除该 fallback：动作重试耗尽时不再调用任何
+分割工具、不改变当前 mask，记录全部原始无效输出和
+`episode_stop_reason=action_retry_exhaustion_without_state_change`，随后安全导出当前
+及历史最佳结果；没有工具动作不再被当作 runner 异常。
+
+Environment 新增 candidate commit 边界。工具候选只有在 Verifier 有效、分数提升
+超过 `selection_epsilon`、mask 面积绝对变化不超过
+`max_selection_area_delta` 时才成为下一轮当前状态。否则候选 mask、工具证据、
+Verifier 输出、面积变化和拒绝原因仍完整写入 trajectory，但 live state 与 feedback
+恢复为上一轮已接受版本；step index 继续推进以避免反复失败造成无限循环。最终
+selected state 排除 rejected candidate，`verifier_best` 仅保留为原始评分审计产物。
+
+## 2026-07-18：Verifier 两阶段诊断与动作程序推导
+
+针对上次闭环中 `quality_score`、`error_type`、`suggested_action` 和 `accept`
+互相矛盾，以及大量缺少 `error_region` 的反馈，现将 Qwen 输出降级为诊断输入：
+只读取质量分数、错误类型、目标时相、可选错误区域和文本说明。
+
+当诊断指出有错误但没有区域时，运行时保留错误类型和文本，并单独发起只要求
+`error_region` 的定位请求。定位再次失败才判定 `verifier_valid=false`；此时同时
+设置 `localization_valid=false`、`suggested_action=null`、`stop=false`，保留上一轮
+有效 feedback，不再向 Agent 发送 `finish`。
+
+`accept`、`stop` 和 `suggested_action` 不再由模型生成或信任：`none` 统一推导为
+`finish`，只有质量分数达到阈值才 accept/stop；false positive 推导负点，false
+negative 推导正点，mixed/uncertain 推导 box。Environment 只依据 `stop` 结束。
+
+## 2026-07-18：坐标协议改由系统单方定义
+
+复盘 `change_agent_levir_fresh_qwen_20260718_133335` 后确认，三个样本共有 5 次
+本可执行的 point 动作仅因没有复述 `coordinate_frame` 而被拒，并导致每个样本都
+耗尽动作重试、进入 box safety fallback。现已从 Qwen action schema 与 runner
+fallback 中删除该字段要求：系统始终将公开 action 坐标解释为 `[0,1000]` 归一化
+XY/XYXY，模型只输出 `target_view`、`action` 和对应的 `coordinate`/`box`。
+
+Parser 对缺少该字段的 point/box 动作直接接受，同时仅为旧产物兼容而接受值为
+`normalized_1000_xy` 的历史字段；冲突值仍会拒绝，不能覆盖系统协议。相应的
+ActionParser、Qwen prompt、Environment trajectory 与 fallback 回归测试均已更新。
+
 ## 2026-07-18：首轮闭环问题修复
 
 首轮三样本闭环确认了工程链路可执行，但 9 次动作均未提升离线 IoU。针对审计

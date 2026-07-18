@@ -20,8 +20,7 @@ class ActionParserTest(unittest.TestCase):
 
     def test_parses_box(self):
         action = self.parser.parse(
-            '{"target_view":"t1","action":"box","box":[100,200,900,800],'
-            '"coordinate_frame":"normalized_1000_xy"}',
+            '{"target_view":"t1","action":"box","box":[100,200,900,800]}',
             (101, 101),
         )
         self.assertEqual(action.box, (10, 20, 90, 80))
@@ -34,7 +33,6 @@ class ActionParserTest(unittest.TestCase):
                 "target_view": "t2",
                 "action": "positive_point",
                 "coordinate": normalized,
-                "coordinate_frame": "normalized_1000_xy",
             },
             image_size,
         )
@@ -50,7 +48,9 @@ class ActionParserTest(unittest.TestCase):
             '{"target_view":"t1","action":"positive_point","coordinate":[-1,4]}',
             '{"target_view":"t1","action":"box","box":[500,0,400,1000],'
             '"coordinate_frame":"normalized_1000_xy"}',
-            '{"target_view":"t1","action":"positive_point","coordinate":[1,2]}',
+            '{"target_view":"t1","action":"positive_point","coordinate":[1001,2]}',
+            '{"target_view":"t1","action":"positive_point","coordinate":[1,2],'
+            '"coordinate_frame":"pixel_xy"}',
             '{"target_view":"t1","action":"finish","box":[0,0,1,1]}',
             '{"target_view":"t1","action":"finish","surprise":1}',
             "not json",
@@ -59,12 +59,17 @@ class ActionParserTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ActionValidationError):
                 self.parser.parse(raw, (100, 100))
 
-    def test_coordinate_frame_is_required_for_point_actions(self):
-        with self.assertRaises(ActionValidationError):
-            self.parser.parse(
-                '{"target_view":"t2","action":"positive_point","coordinate":[500,500]}',
-                (256, 256),
-            )
+    def test_system_coordinate_protocol_needs_no_model_field(self):
+        point = self.parser.parse(
+            '{"target_view":"t2","action":"positive_point","coordinate":[500,500]}',
+            (256, 256),
+        )
+        box = self.parser.parse(
+            '{"target_view":"t1","action":"box","box":[0,0,1000,1000]}',
+            (256, 256),
+        )
+        self.assertEqual(point.coordinate, (128, 128))
+        self.assertEqual(box.box, (0, 0, 255, 255))
 
     def test_box_conversion_for_sam3(self):
         result = xyxy_to_normalized_cxcywh((10, 20, 30, 60), (100, 100))
