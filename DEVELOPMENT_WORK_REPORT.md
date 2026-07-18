@@ -1,5 +1,16 @@
 # Change-Agent 开发工作报告
 
+## 2026-07-18：向 Verifier 暴露双时相 predicted object mask
+
+此前 Qwen Verifier 只能看到 T1/T2 原图和最终 current change mask，无法直接判断
+变化来自哪一个时相的 object mask。现已将输入固定为五张带标签的图像：
+`T1 original image`、`T2 original image`、`Predicted T1 object mask`、
+`Predicted T2 object mask`、`Current change mask`。Prompt 明确说明两个 predicted
+mask 不是 GT，current change mask 是由它们和 OmniOVCD matching 共同重建的。
+
+这样 Verifier 可以直接区分新增、消失、误标和时相归因；输入顺序和标签已加入
+回归测试。五张图会增加 Qwen 视觉编码开销，下一轮 GPU smoke 需记录显存和耗时。
+
 ## 2026-07-18：删除自动 box fallback，并回滚未接受 candidate
 
 上次三个样本唯一实际执行的工具动作都是重试耗尽后由 runner 自动生成的 SAM3

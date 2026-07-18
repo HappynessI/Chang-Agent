@@ -1,5 +1,15 @@
 # Development log
 
+## 2026-07-18 — expose both temporal object masks to the Verifier
+
+- Expanded every Qwen Verifier request from three to five labeled visual inputs:
+  `T1 original image`, `T2 original image`, `Predicted T1 object mask`,
+  `Predicted T2 object mask`, and `Current change mask`.
+- The diagnostic prompt explicitly states that T1/T2 masks are predictions rather than
+  GT and that the change mask is reconstructed from those masks and OmniOVCD matching.
+- Added a regression asserting the exact input order and labels, so future prompt changes
+  cannot silently make the model infer image/mask roles from position alone.
+
 ## 2026-07-18 — no synthetic box fallback and rejected-candidate rollback
 
 - Removed the runner-generated SAM3 box action that previously executed after Qwen

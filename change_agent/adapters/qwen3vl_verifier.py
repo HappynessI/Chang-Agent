@@ -344,8 +344,11 @@ class Qwen3VLZeroShotVerifier:
             "changes, not merely buildings present in one image. Diagnose false positives "
             "and false negatives. Select target_view as the temporal semantic mask that "
             "should be edited; do not alternate views by rule. All regions use normalized "
-            "[0,1000] XYXY coordinates, never image pixels. Return exactly one JSON object "
-            "with only quality_score (0.0 to 1.0), error_type ('none', "
+            "[0,1000] XYXY coordinates, never image pixels. Return exactly one JSON object. "
+            "The predicted T1/T2 object masks are model outputs, not GT; the current change "
+            "mask is reconstructed from those masks and OmniOVCD matching evidence. Use all "
+            "five visual inputs to attribute additions, disappearances, and mismatches. "
+            "Return only quality_score (0.0 to 1.0), error_type ('none', "
             "'false_positive_change', 'false_negative', 'mixed_error', or 'uncertain_region'), "
             "target_view ('t1' or 't2'), error_region ([x1,y1,x2,y2] or null), and feedback "
             "(one concise sentence). If an error exists but its location is unclear, set "
@@ -369,11 +372,15 @@ class Qwen3VLZeroShotVerifier:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "T1 image (earlier time):"},
+                    {"type": "text", "text": "T1 original image:"},
                     {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t1_image)},
-                    {"type": "text", "text": "T2 image (later time):"},
+                    {"type": "text", "text": "T2 original image:"},
                     {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t2_image)},
-                    {"type": "text", "text": "Candidate binary change mask:"},
+                    {"type": "text", "text": "Predicted T1 object mask:"},
+                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t1_mask)},
+                    {"type": "text", "text": "Predicted T2 object mask:"},
+                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t2_mask)},
+                    {"type": "text", "text": "Current change mask:"},
                     {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.change_mask)},
                     {"type": "text", "text": prompt},
                 ],

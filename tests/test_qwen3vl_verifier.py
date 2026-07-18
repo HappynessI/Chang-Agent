@@ -66,8 +66,19 @@ class QwenVerifierTest(unittest.TestCase):
             for item in processor.messages[0]["content"]
             if item["type"] == "text"
         ]
+        self.assertEqual(
+            texts[:5],
+            [
+                "T1 original image:",
+                "T2 original image:",
+                "Predicted T1 object mask:",
+                "Predicted T2 object mask:",
+                "Current change mask:",
+            ],
+        )
         self.assertIn("ground-truth-free verifier", texts[-1])
         self.assertIn("do not alternate views by rule", texts[-1])
+        self.assertIn("not GT", texts[-1])
 
     def test_invalid_outputs_use_auditable_safe_fallback(self):
         processor = FakeProcessor({"quality_score": 0.5})

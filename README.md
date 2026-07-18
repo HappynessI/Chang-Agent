@@ -62,6 +62,10 @@ separately validated latent/tool-ranking objective.
 
 - Qwen's Verifier response is diagnostic only: it supplies quality, error type,
   target view, optional error region, and text feedback.
+- The Verifier receives five explicitly labeled visual inputs: T1/T2 original images,
+  predicted T1/T2 object masks, and the current change mask. The predicted object masks
+  are model outputs rather than GT; the change mask is interpreted together with the
+  OmniOVCD matching summary.
 - When an actionable diagnosis omits `error_region`, the runtime sends a separate
   localization request. If localization still fails, the result is marked with
   `verifier_valid=false` and `localization_valid=false`, exposes no suggested action,
