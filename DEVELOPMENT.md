@@ -27,6 +27,9 @@
   `semantic_mask_logits` are already probabilities. The adapter now mirrors
   OmniOVCD's semantic/instance/object/presence fusion and `prob_thd=0.4` threshold,
   instead of treating every positive probability as foreground.
+- Enforced the first-tool requirement at the Environment boundary after a live retry
+  showed that prompt-only guidance allowed three consecutive `finish` actions. Agent
+  retries now include the exact validation error, including missing coordinate frames.
 - Kept `RuleBasedVerifier` only as the explicit `--verifier rule` ablation; the real
   runner defaults to `qwen_zero_shot`.
 - Renamed offline report fields to `verifier_selected_step` and
@@ -36,7 +39,7 @@ Validation:
 
 ```text
 Python byte compilation: passed
-Unit tests: 30 passed
+Unit tests: 32 passed
 Runner/worker CLI parsing: passed
 git diff --check: passed
 ```

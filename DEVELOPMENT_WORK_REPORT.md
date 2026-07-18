@@ -29,6 +29,10 @@
 现已按 OmniOVCD 配置恢复 semantic/instance/object/presence 融合与 `0.4` 阈值；
 失败运行目录保留为诊断证据，修复后重新启动独立输出目录。
 
+第二次真实启动进一步暴露了 prompt-only 的首轮 finish 约束无效：Qwen 连续输出
+finish，耗尽三步但没有工具动作。Environment 现已在首个真实分割动作之前强制
+拒绝 finish，并将具体 validation error 注入下一次 Qwen retry Prompt。
+
 ## 2026-07-17：Matching 决策落地与三样本完整闭环入口
 
 本轮将默认 matching 从确定性一对一 greedy 改为 OmniOVCD 原始的双向

@@ -49,6 +49,20 @@ class QwenAdapterTest(unittest.TestCase):
         self.assertEqual(action.coordinate, (10, 5))
         self.assertIn("positive_point", raw)
 
+    def test_validation_error_is_injected_into_retry_prompt(self):
+        processor = FakeProcessor()
+        adapter = GroundingModelQwen3VL(model=FakeModel(), processor=processor)
+        image = np.zeros((11, 21, 3), dtype=np.uint8)
+        observation = AgentObservation(image, image, "building", np.zeros((11, 21)))
+        adapter.generate_raw(observation, "finish is forbidden before a tool action")
+        texts = [
+            item["text"]
+            for item in processor.messages[0]["content"]
+            if item["type"] == "text"
+        ]
+        self.assertIn("previous action was rejected", texts[-1])
+        self.assertIn("finish is forbidden", texts[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

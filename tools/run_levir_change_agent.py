@@ -165,13 +165,15 @@ def main() -> None:
         observation = environment.reset(image1, image2, args.query)
         invalid_outputs: list[dict[str, str]] = []
         while not environment.done:
+            validation_error = None
             for attempt in range(args.action_retries):
-                raw = qwen.generate_raw(observation)
+                raw = qwen.generate_raw(observation, validation_error)
                 try:
                     observation, _ = environment.step(raw)
                     break
                 except ActionValidationError as error:
                     invalid_outputs.append({"raw_agent_output": raw, "error": str(error)})
+                    validation_error = str(error)
                     if attempt + 1 == args.action_retries:
                         raise
         tool_steps = [entry for entry in environment.trajectory.entries if entry.execution.get("tool")]

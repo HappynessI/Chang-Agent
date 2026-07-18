@@ -6,7 +6,7 @@ from typing import Any, Mapping, Protocol
 
 import numpy as np
 
-from .action_parser import ActionParser
+from .action_parser import ActionParser, ActionValidationError
 from .adapters.omniovcd_adapter import InitializationResult, PairUpdate
 from .executor import ActionExecutor
 from .state import AgentAction, AgentObservation, ChangeState, VerifierOutput
@@ -40,6 +40,7 @@ class ChangeAgentEnvironment:
         selection_policy: str = "conservative_best",
         selection_epsilon: float = 0.0,
         max_selection_area_delta: float = 0.25,
+        require_tool_before_finish: bool = True,
     ):
         if not inference_only:
             raise ValueError("runtime Environment currently supports inference_only=True only")
@@ -54,6 +55,7 @@ class ChangeAgentEnvironment:
         self.selection_policy = selection_policy
         self.selection_epsilon = selection_epsilon
         self.max_selection_area_delta = max_selection_area_delta
+        self.require_tool_before_finish = require_tool_before_finish
         self.trajectory = Trajectory(
             run_metadata,
             selection_policy=selection_policy,
@@ -130,6 +132,12 @@ class ChangeAgentEnvironment:
             else action_or_raw
         )
         action = self.action_parser.validate_pixel_action(action, self.state.image_size)
+        if (
+            action.action == "finish"
+            and self.require_tool_before_finish
+            and not any(entry.execution.get("tool") for entry in self.trajectory.entries)
+        ):
+            raise ActionValidationError("finish is forbidden before a segmentation tool action")
         next_index = self.state.step_index + 1
         execution: dict[str, Any] = {}
         if raw_payload is not None:

@@ -53,8 +53,10 @@ class GroundingModelQwen3VL:
         self.model = model
         self.processor = processor
 
-    def build_messages(self, observation: AgentObservation) -> list[dict[str, Any]]:
-        prompt = self._instruction(observation)
+    def build_messages(
+        self, observation: AgentObservation, validation_error: str | None = None
+    ) -> list[dict[str, Any]]:
+        prompt = self._instruction(observation, validation_error)
         return [
             {
                 "role": "user",
@@ -70,8 +72,10 @@ class GroundingModelQwen3VL:
             }
         ]
 
-    def generate_raw(self, observation: AgentObservation) -> str:
-        messages = self.build_messages(observation)
+    def generate_raw(
+        self, observation: AgentObservation, validation_error: str | None = None
+    ) -> str:
+        messages = self.build_messages(observation, validation_error)
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -110,7 +114,9 @@ class GroundingModelQwen3VL:
         return Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L")
 
     @staticmethod
-    def _instruction(observation: AgentObservation) -> str:
+    def _instruction(
+        observation: AgentObservation, validation_error: str | None = None
+    ) -> str:
         feedback = observation.feedback.to_dict() if observation.feedback else None
         history = observation.history_summary or "none"
         has_tool_action = any(
@@ -124,6 +130,11 @@ class GroundingModelQwen3VL:
             else "No segmentation tool action has run yet. Finish is forbidden: choose a "
             "positive_point, negative_point, or box action now."
         )
+        correction = (
+            f"Your previous action was rejected: {validation_error}. Return a corrected action.\n"
+            if validation_error
+            else ""
+        )
         return (
             "You refine a change-detection result. The three inputs above are explicitly "
             "T1, T2, and the current change mask. Do not invent a final mask. Select one "
@@ -134,6 +145,7 @@ class GroundingModelQwen3VL:
             "('positive_point', 'negative_point', 'box', or 'finish'). Point actions require "
             "coordinate:[x,y] and coordinate_frame:'normalized_1000_xy'; box requires box "
             "and the same coordinate_frame; finish requires neither.\n"
+            f"{correction}"
             f"{finish_rule}\n"
             f"Query: {observation.query}\n"
             f"Verifier feedback: {json.dumps(feedback, ensure_ascii=False)}\n"

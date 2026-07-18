@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from change_agent.adapters.omniovcd_adapter import InitializationResult, MaskPairProcessor
+from change_agent.action_parser import ActionValidationError
 from change_agent.environment import ChangeAgentEnvironment
 from change_agent.executor import ActionExecutor
 from change_agent.state import AgentAction, VerifierOutput
@@ -127,6 +128,11 @@ class EnvironmentTest(unittest.TestCase):
         environment.reset(self.image1, self.image2, "building")
         environment.step(AgentAction("t2", "box", box=(2, 2, 5, 5)))
         self.assertEqual(environment.trajectory.best_entry.step_index, 0)
+
+    def test_finish_is_rejected_before_any_tool_action(self):
+        self.environment.reset(self.image1, self.image2, "building")
+        with self.assertRaises(ActionValidationError):
+            self.environment.step(AgentAction("t2", "finish"))
 
     def test_trajectory_can_save_masks_in_a_separate_directory(self):
         self.environment.reset(self.image1, self.image2, "building")
