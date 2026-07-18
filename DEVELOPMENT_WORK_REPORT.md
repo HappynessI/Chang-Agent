@@ -24,6 +24,11 @@
 
 当前实现只完成代码与无权重单元测试，尚未启动下一轮长时间 GPU 推理。
 
+首次 fresh-SAM3 真实启动暴露了概率阈值问题：SAM3 public processor 的
+`semantic_mask_logits` 实际已在 `[0,1]`，旧 adapter 用 `>0` 会产生全图 mask。
+现已按 OmniOVCD 配置恢复 semantic/instance/object/presence 融合与 `0.4` 阈值；
+失败运行目录保留为诊断证据，修复后重新启动独立输出目录。
+
 ## 2026-07-17：Matching 决策落地与三样本完整闭环入口
 
 本轮将默认 matching 从确定性一对一 greedy 改为 OmniOVCD 原始的双向

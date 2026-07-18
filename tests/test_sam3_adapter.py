@@ -40,7 +40,29 @@ class SAM3AdapterTest(unittest.TestCase):
         self.assertEqual(int(result.sum()), 16)
         self.assertEqual(processor.box, [0.5, 0.5, 0.2, 0.3])
 
+    def test_probability_outputs_use_omniovcd_threshold_and_presence(self):
+        adapter = SAM3ProcessorAdapter(FakeProcessor())
+        semantic = np.full((1, 1, 8, 8), 0.01, dtype=np.float32)
+        semantic[..., 2:6, 2:6] = 0.9
+        state = {
+            "semantic_mask_logits": semantic,
+            "masks_logits": np.empty((0, 1, 8, 8), dtype=np.float32),
+            "presence_score": np.asarray(0.8, dtype=np.float32),
+        }
+        mask, confidence = adapter._mask_from_state(state, (8, 8))
+        self.assertEqual(int(mask.sum()), 16)
+        self.assertAlmostEqual(float(confidence.max()), 0.72, places=5)
+
+    def test_low_presence_rejects_semantic_false_positive(self):
+        adapter = SAM3ProcessorAdapter(FakeProcessor())
+        state = {
+            "semantic_mask_logits": np.ones((1, 1, 8, 8), dtype=np.float32),
+            "masks_logits": np.empty((0, 1, 8, 8), dtype=np.float32),
+            "presence_score": np.asarray(0.02, dtype=np.float32),
+        }
+        mask, _ = adapter._mask_from_state(state, (8, 8))
+        self.assertFalse(mask.any())
+
 
 if __name__ == "__main__":
     unittest.main()
-

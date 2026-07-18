@@ -15,7 +15,7 @@ class SAM3ProcessorAdapter:
     injected here. No private encoder state is exposed to the Agent.
     """
 
-    def __init__(self, processor: Any, mask_threshold: float = 0.0):
+    def __init__(self, processor: Any, mask_threshold: float = 0.4):
         self.processor = processor
         self.mask_threshold = mask_threshold
 
@@ -92,25 +92,56 @@ class SAM3ProcessorAdapter:
         self, state: dict[str, Any], shape: tuple[int, int]
     ) -> tuple[np.ndarray, np.ndarray]:
         height, width = shape
-        logits = state.get("semantic_mask_logits")
-        if logits is None:
-            logits = state.get("masks_logits")
-        if logits is None:
+        score_maps: list[np.ndarray] = []
+        semantic = state.get("semantic_mask_logits")
+        if semantic is not None:
+            score_maps.append(self._collapse_score_map(self._numpy(semantic)))
+
+        instances = state.get("masks_logits")
+        if instances is not None:
+            instance_array = self._numpy(instances).astype(float)
+            if instance_array.size:
+                while instance_array.ndim > 3:
+                    instance_array = instance_array.squeeze(1)
+                instance_array = self._as_probability(instance_array)
+                object_scores = state.get("object_score")
+                if object_scores is not None:
+                    weights = self._numpy(object_scores).astype(float).reshape(-1, 1, 1)
+                    if len(weights) == len(instance_array):
+                        instance_array = instance_array * weights
+                score_maps.append(instance_array.max(axis=0))
+
+        if not score_maps:
             masks = state.get("masks")
             if masks is None:
                 raise KeyError("SAM3 state contains no semantic/instance mask output")
-            array = self._numpy(masks).astype(float)
-        else:
-            array = self._numpy(logits).astype(float)
-        while array.ndim > 2:
-            array = array.max(axis=0)
+            score_maps.append(self._collapse_score_map(self._numpy(masks).astype(float)))
+
+        array = np.maximum.reduce(score_maps)
+        presence = state.get("presence_score")
+        if presence is not None:
+            presence_value = float(np.asarray(self._numpy(presence), dtype=float).max(initial=0))
+            array = array * np.clip(presence_value, 0, 1)
         if array.shape != (height, width):
             image = Image.fromarray(array.astype(np.float32), mode="F")
             array = np.asarray(image.resize((width, height), resample=Image.Resampling.BILINEAR))
         mask = array > self.mask_threshold
-        # Logits are converted to a bounded confidence map without assuming calibration.
-        confidence = 1.0 / (1.0 + np.exp(-np.clip(array, -30, 30)))
+        confidence = np.clip(array, 0, 1)
         return mask.astype(bool), confidence.astype(np.float32)
+
+    @classmethod
+    def _collapse_score_map(cls, value: np.ndarray) -> np.ndarray:
+        array = cls._as_probability(np.asarray(value, dtype=float))
+        while array.ndim > 2:
+            array = array.max(axis=0)
+        return array
+
+    @staticmethod
+    def _as_probability(value: np.ndarray) -> np.ndarray:
+        array = np.asarray(value, dtype=float)
+        if array.size and (float(array.min()) < 0 or float(array.max()) > 1):
+            return 1.0 / (1.0 + np.exp(-np.clip(array, -30, 30)))
+        return np.clip(array, 0, 1)
 
     @staticmethod
     def _numpy(value: Any) -> np.ndarray:

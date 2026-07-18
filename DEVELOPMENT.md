@@ -23,6 +23,10 @@
 - SAM3 initialization persistence is limited to selected diagnostics (mask/logit,
   confidence/presence/object scores, and selected FPN feature arrays), not every
   Transformer activation or attention map.
+- Fixed fresh SAM3 mask construction after the first live attempt exposed that
+  `semantic_mask_logits` are already probabilities. The adapter now mirrors
+  OmniOVCD's semantic/instance/object/presence fusion and `prob_thd=0.4` threshold,
+  instead of treating every positive probability as foreground.
 - Kept `RuleBasedVerifier` only as the explicit `--verifier rule` ablation; the real
   runner defaults to `qwen_zero_shot`.
 - Renamed offline report fields to `verifier_selected_step` and
@@ -32,7 +36,7 @@ Validation:
 
 ```text
 Python byte compilation: passed
-Unit tests: 28 passed
+Unit tests: 30 passed
 Runner/worker CLI parsing: passed
 git diff --check: passed
 ```
