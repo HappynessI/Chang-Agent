@@ -24,7 +24,9 @@ region feedback sentences could exceed the Qwen3-VL-2B output budget.
   that was already rejected on the same live state.
 - Saved-candidate replay now reconstructs local point/box composition rather than using
   a worker's raw full-image mask as the temporal candidate mask.
-- Verifier output budget defaults to 256 tokens. Trajectory and run-manifest source
+- Verifier output budget defaults to 1024 tokens. The compact schema remains mandatory;
+  the larger ceiling provides headroom for occasional Qwen formatting drift and retries.
+  Trajectory and run-manifest source
   metadata now includes `git_worktree_sha256`, covering tracked diffs and untracked file
   contents without persisting the diff itself.
 

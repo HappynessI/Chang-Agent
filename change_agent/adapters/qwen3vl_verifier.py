@@ -82,7 +82,7 @@ class Qwen3VLZeroShotVerifier:
         *,
         model: Any,
         processor: Any,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 1024,
         accept_threshold: float = 0.82,
         max_retries: int = 2,
         **legacy_localization_options: Any,

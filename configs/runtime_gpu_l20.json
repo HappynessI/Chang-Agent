@@ -7,6 +7,7 @@
   "coordinate_protocol": "public_normalized_0_1000_internal_pixel_xy",
   "initialization": "fresh_sam3_dual_view_text_prompt",
   "verifier": "qwen3vl_zero_shot_shared_weights",
+  "verifier_max_new_tokens": 1024,
   "selection_policy": "conservative_best",
   "max_selection_area_delta": 0.25,
   "max_steps": 3,

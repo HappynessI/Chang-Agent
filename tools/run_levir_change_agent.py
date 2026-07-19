@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--verifier", choices=("qwen_zero_shot", "rule"), default="qwen_zero_shot"
     )
-    parser.add_argument("--verifier-max-new-tokens", type=int, default=256)
+    parser.add_argument("--verifier-max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument("--verifier-retries", type=int, default=2)
     parser.add_argument("--device-map", default="auto")

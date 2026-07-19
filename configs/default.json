@@ -15,6 +15,7 @@
   "verifier": {
     "type": "qwen3vl_compact_delta_effect_zero_shot",
     "shared_agent_weights": true,
+    "max_new_tokens": 1024,
     "max_region_proposals": 6,
     "max_delta_region_proposals": 2,
     "decision": "programmatic_from_added_removed_effect_labels"

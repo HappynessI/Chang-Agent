@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--query", default="building")
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-retries", type=int, default=2)
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--comparison-epsilon", type=float, default=1e-6)
