@@ -1,5 +1,33 @@
 # Development log
 
+## 2026-07-19 — exact component anchors and outlined RGB correspondence
+
+GPU job `41396` (`change_agent_levir_gpu_closed_loop_20260719_143908`) completed on one
+GPU in 147 seconds and confirmed exact full candidate-delta coverage: `test_85_16` split
+13 components into five batches and audited all 96 pixels. All initial calls were valid
+and the locality gate continued to reject a catastrophic global SimpleClick candidate.
+Aggregate selected IoU/F1 nevertheless remained at the baseline
+`0.69744116`/`0.82175592` because all first-step point coordinates landed in padded crop
+background rather than on the audited component. The 96-pixel candidate improved
+`test_85_16` offline IoU from `0.30658070` to `0.31390233`, but its exact components were
+visually mixed (48 GT-positive and 48 false-positive pixels) and were conservatively
+rejected rather than weakening the all-components-beneficial rule.
+
+- Every initial and candidate proposal now records both pixel and normalized
+  connected-component seeds. Point feedback uses the exact seed as a degenerate
+  `error_region`, and the Agent point example contains that coordinate with an explicit
+  instruction to copy it exactly. Box actions retain the padded proposal box.
+- Initial and candidate RGB panels draw a one-pixel yellow ring immediately outside the
+  exact component in both temporal crops. The audited pixels retain their original RGB;
+  the amplified difference remains computed from raw, unannotated T1/T2 crops.
+- The prompt directs Qwen to classify the pixels inside that ring. This removes the
+  padded-box spatial ambiguity seen in job `41396` without exposing predicted masks or
+  abstract FP/FN/action semantics to the decisive visual call.
+- The Verifier schema/cache version is bumped so no pre-outline judgment can be reused.
+
+Regression coverage checks exact seed normalization and injection, preservation of RGB
+inside the component, the external yellow ring, and raw-difference isolation.
+
 ## 2026-07-19 — full delta batching and programmatic initial semantics
 
 GPU job `41377` (`change_agent_levir_gpu_closed_loop_20260719_135752`) completed on one

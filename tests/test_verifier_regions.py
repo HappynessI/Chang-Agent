@@ -25,6 +25,7 @@ class VerifierRegionTest(unittest.TestCase):
         self.assertIn("temporal_difference", proposals[0]["sources"])
         self.assertEqual(state.evidence["verifier_mask_facts"]["change_pixels"], 30)
         self.assertEqual(proposals[0]["change_pixels"], 30)
+        self.assertEqual(len(proposals[0]["component_seed_normalized"]), 2)
         self.assertEqual(
             state.evidence["verifier_mask_facts"]["initial_audit_coverage_ratio"],
             1.0,

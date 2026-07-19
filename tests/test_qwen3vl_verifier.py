@@ -102,7 +102,8 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_type, "false_positive_change")
         self.assertEqual(output.suggested_action, "negative_point")
         self.assertEqual(output.target_view, "t2")
-        self.assertEqual(output.error_region, tuple(proposals[0]["box_normalized"]))
+        seed = tuple(proposals[0]["component_seed_normalized"])
+        self.assertEqual(output.error_region, (*seed, *seed))
         self.assertEqual(processor.call_count, 1)
 
     def test_unchanged_building_component_adds_missing_temporal_mask(self):
@@ -118,7 +119,8 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_type, "false_positive_change")
         self.assertEqual(output.suggested_action, "positive_point")
         self.assertEqual(output.target_view, "t1")
-        self.assertEqual(output.error_region, tuple(proposals[0]["box_normalized"]))
+        seed = tuple(proposals[0]["component_seed_normalized"])
+        self.assertEqual(output.error_region, (*seed, *seed))
 
     def test_initial_model_outputs_only_temporal_states_without_target_view(self):
         state = make_state()
@@ -594,6 +596,29 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("elementary RGB facts", texts[-1])
         self.assertNotIn("predicted T1 object mask", " ".join(texts).lower())
         self.assertNotIn("change_pixels", " ".join(texts))
+
+    def test_component_outline_preserves_audited_rgb_pixels(self):
+        rgb = np.zeros((5, 5, 3), dtype=np.uint8)
+        rgb[2, 2] = [40, 80, 120]
+        component = np.zeros((5, 5), dtype=bool)
+        component[2, 2] = True
+
+        outlined = Qwen3VLZeroShotVerifier._outline_component(rgb, component)
+
+        np.testing.assert_array_equal(outlined[2, 2], rgb[2, 2])
+        np.testing.assert_array_equal(outlined[1, 2], [255, 255, 0])
+        np.testing.assert_array_equal(outlined[0, 0], [0, 0, 0])
+
+    def test_initial_panel_difference_uses_raw_rgb_not_yellow_outline(self):
+        state = make_state()
+        proposals = attach_verifier_regions(state)
+
+        panel = np.asarray(
+            Qwen3VLZeroShotVerifier._rgb_initial_panel(state, proposals[0])
+        )
+
+        self.assertTrue(np.any(np.all(panel[:192, :192] == [255, 255, 0], axis=2)))
+        self.assertFalse(np.any(panel[192:, 192:]))
 
     def test_identical_candidate_must_be_unchanged(self):
         previous = make_state()

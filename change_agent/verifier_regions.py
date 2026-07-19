@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 from .adapters.omniovcd_adapter import connected_components
-from .coordinates import pixel_box_to_normalized
+from .coordinates import pixel_box_to_normalized, pixel_point_to_normalized
 from .state import ChangeState
 
 
@@ -199,6 +199,9 @@ def build_candidate_delta_regions(
                 "sources": [f"candidate_{effect_kind}"],
                 "component_area": int(component.sum()),
                 "component_seed_pixels": [int(seed_x), int(seed_y)],
+                "component_seed_normalized": list(
+                    pixel_point_to_normalized((int(seed_x), int(seed_y)), (width, height))
+                ),
                 "box_pixels": list(crop_box),
                 "box_normalized": list(
                     pixel_box_to_normalized(crop_box, (width, height))
@@ -328,6 +331,9 @@ def build_verifier_regions(
                 ),
                 "component_area": int(item["component_area"]),
                 "component_seed_pixels": [int(seed_x), int(seed_y)],
+                "component_seed_normalized": list(
+                    pixel_point_to_normalized((int(seed_x), int(seed_y)), (width, height))
+                ),
                 "box_pixels": list(crop_box),
                 "box_normalized": list(
                     pixel_box_to_normalized(crop_box, (width, height))

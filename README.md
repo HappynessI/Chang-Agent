@@ -67,17 +67,22 @@ separately validated latent/tool-ranking objective.
   added/removed delta connected component, assigns stable `dN` identifiers, and sends at
   most three components per Qwen batch. The batch size is not a global coverage cap;
   covered delta pixels must still equal the complete candidate delta.
-- Initial Qwen calls see clean T1/T2 RGB plus an exact binary audit component and RGB
-  difference. Predicted masks, change status, FP/FN semantics, and target views are
-  hidden. Responses contain only `[t1_state,t2_state]` using `building`, `background`,
-  `mixed`, or `uncertain`; per-region prose is not requested.
+- Initial Qwen calls see T1/T2 RGB with a one-pixel yellow ring outside the exact audit
+  component, plus its binary geometry and raw RGB difference. The ring never overwrites
+  audited RGB pixels or enters the difference image. Predicted masks, change status,
+  FP/FN semantics, and target views are hidden. Responses contain only
+  `[t1_state,t2_state]` using `building`, `background`, `mixed`, or `uncertain`;
+  per-region prose is not requested.
 - Initial audit coverage is measured over current change pixels plus mask-derived missing
   pixels. Uncovered pixels receive a deterministic box and prevent initial `finish`, even
   when every inspected proposal is supported. Runtime code combines RGB states with
   Environment-owned `present/missing` geometry to derive `true_change`, FP, FN,
   no-error, or uncertain; therefore an existing white component cannot become FN by a
   model-generated abstract label.
-- Target view and suggested action are derived rather than generated. For example, an
+- Target view, suggested action, and point coordinate are derived rather than generated.
+  Point feedback carries the exact connected-component seed as a degenerate normalized
+  `error_region`; the Agent is instructed to copy that Environment-owned anchor exactly.
+  For example, an
   unchanged background in one spurious predicted view maps to a negative point there,
   while an unchanged building missing from the opposite predicted view maps to a
   positive point in that missing view. Ambiguous matching cases map to a box.
@@ -88,7 +93,8 @@ separately validated latent/tool-ranking objective.
   `quality_score` and `progress_score` remain `null`.
 - Every candidate component has two evidence records. The mask-context pass emits an
   advisory effect label. The decisive pass sees clean T1/T2 RGB and the exact binary
-  delta, then emits only the two elementary temporal states. Runtime code combines
+  delta, with the same external yellow ring for correspondence, then emits only the two
+  elementary temporal states. Runtime code combines
   those states with added/removed polarity to derive the effect. A mask-context
   disagreement or malformed advisory response remains auditable but cannot filter an
   RGB-supported beneficial edit; mixed/uncertain RGB evidence still rejects safely.
@@ -120,9 +126,9 @@ forbidden action; the next response must change its tool type or geometry and se
 different unresolved region.
 
 The Agent prompt injects only the JSON example for the Verifier's current suggested
-action, keeping the Qwen3-VL-2B instruction short. Point examples always include
-`coordinate`, box examples always include `box`, finish examples include neither, and
-none includes `coordinate_frame`. On validation failure, the retry path also supplies
+action, keeping the Qwen3-VL-2B instruction short. Point examples always include the
+exact Environment component anchor as `coordinate`, box examples always include `box`,
+finish examples include neither, and none includes `coordinate_frame`. On validation failure, the retry path also supplies
 the previous invalid payload and repeats an exact same-view/same-action repair template
 for a missing or malformed `coordinate`/`box` field.
 

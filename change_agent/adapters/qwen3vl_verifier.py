@@ -64,7 +64,7 @@ class Qwen3VLZeroShotVerifier:
     runtime rules. Mask-context effect labels are retained only as audit evidence.
     """
 
-    SCHEMA_VERSION = "rgb_temporal_state_batched_effect_v5"
+    SCHEMA_VERSION = "outlined_rgb_temporal_state_batched_effect_v6"
     CANDIDATE_EVIDENCE_MODES = ("mask_context", "rgb_temporal_state")
     ERROR_TYPES = {
         "none",
@@ -597,8 +597,10 @@ class Qwen3VLZeroShotVerifier:
         prompt = (
             "Judge elementary RGB facts at the exact highlighted audit pixels. Predicted masks, "
             "change-mask status, FP/FN labels, and action semantics are intentionally hidden. "
-            "Each panel contains clean T1 RGB, clean T2 RGB, the exact binary audit component, "
-            "and amplified absolute RGB difference. For every region_id, independently classify "
+            "Each panel contains T1 RGB and T2 RGB with the exact component surrounded by a "
+            "yellow outline, the exact binary audit component, and amplified absolute RGB "
+            "difference. Inspect the original RGB inside the yellow outline. For every "
+            "region_id, independently classify "
             "the object state at those exact pixels in T1 and T2 as building, background, mixed, "
             "or uncertain. Use mixed when the highlighted component spans both building and "
             "background. Return exactly one compact JSON object mapping every exact region_id to "
@@ -735,8 +737,10 @@ class Qwen3VLZeroShotVerifier:
         prompt = (
             "Judge elementary RGB facts at the exact candidate delta pixels. Predicted T1/T2 "
             "object masks and their statistics are intentionally hidden. In each panel: top-left "
-            "is the clean T1 crop, top-right is the clean T2 crop, bottom-left is the exact binary "
-            "delta location, and bottom-right is amplified absolute RGB difference. For every "
+            "is the T1 crop with a yellow outline around the exact delta, top-right is the T2 "
+            "crop with the same outline, bottom-left is the exact binary delta location, and "
+            "bottom-right is amplified absolute RGB difference. Inspect the original RGB inside "
+            "the yellow outline. For every "
             "region_id, classify the object state at those pixels independently in T1 and T2 as "
             "building, background, mixed, or uncertain. Use mixed when the component spans both "
             "building and background. Return exactly one compact JSON object mapping every exact "
@@ -824,13 +828,6 @@ class Qwen3VLZeroShotVerifier:
             if selected is not None and selected.target_view in {"t1", "t2"}
             else previous_action.target_view if previous_action else "t2"
         )
-        region = (
-            tuple(lookup[selected.region_id]["box_normalized"])
-            if selected is not None
-            else tuple(mask_facts["initial_audit_uncovered_box_normalized"])
-            if uncovered and mask_facts.get("initial_audit_uncovered_box_normalized")
-            else None
-        )
         facts = (
             f"Current change mask contains {int(mask_facts.get('change_pixels', 0))} white pixels "
             f"across {len(proposals)} inspected audit proposals."
@@ -852,6 +849,18 @@ class Qwen3VLZeroShotVerifier:
             if selected is not None and selected.suggested_action is not None
             else "box" if uncovered and selected is None else None
         )
+        if selected is not None and suggested_action in {
+            "positive_point",
+            "negative_point",
+        }:
+            seed_x, seed_y = lookup[selected.region_id]["component_seed_normalized"]
+            region = (seed_x, seed_y, seed_x, seed_y)
+        elif selected is not None:
+            region = tuple(lookup[selected.region_id]["box_normalized"])
+        elif uncovered and mask_facts.get("initial_audit_uncovered_box_normalized"):
+            region = tuple(mask_facts["initial_audit_uncovered_box_normalized"])
+        else:
+            region = None
         return _RegionalAnalysis(
             judgments,
             error_type,
@@ -1299,17 +1308,21 @@ class Qwen3VLZeroShotVerifier:
         proposal: dict[str, Any],
         panel_size: int = 192,
     ) -> Image.Image:
-        """Show clean RGB evidence, exact delta geometry, and raw temporal difference."""
+        """Show outlined RGB evidence, exact delta geometry, and raw difference."""
 
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
-        t1 = np.asarray(state.t1_image[region], dtype=np.uint8)
-        t2 = np.asarray(state.t2_image[region], dtype=np.uint8)
         delta = Qwen3VLZeroShotVerifier._proposal_delta_component(
             state, previous_state, proposal
         )[region]
+        raw_t1 = state.t1_image[region]
+        raw_t2 = state.t2_image[region]
+        t1 = Qwen3VLZeroShotVerifier._outline_component(raw_t1, delta)
+        t2 = Qwen3VLZeroShotVerifier._outline_component(raw_t2, delta)
         delta_rgb = np.repeat((delta.astype(np.uint8) * 255)[..., None], 3, axis=2)
-        absolute_difference = np.abs(t2.astype(np.int16) - t1.astype(np.int16))
+        absolute_difference = np.abs(
+            raw_t2.astype(np.int16) - raw_t1.astype(np.int16)
+        )
         absolute_difference = np.clip(absolute_difference * 2, 0, 255).astype(np.uint8)
         tiles = [
             Image.fromarray(t1),
@@ -1332,19 +1345,23 @@ class Qwen3VLZeroShotVerifier:
         proposal: dict[str, Any],
         panel_size: int = 192,
     ) -> Image.Image:
-        """Show clean temporal RGB and exact initial audit-component geometry."""
+        """Show outlined RGB evidence and exact initial component geometry."""
 
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
-        t1 = np.asarray(state.t1_image[region], dtype=np.uint8)
-        t2 = np.asarray(state.t2_image[region], dtype=np.uint8)
         component = Qwen3VLZeroShotVerifier._proposal_initial_component(
             state, proposal
         )[region]
+        raw_t1 = state.t1_image[region]
+        raw_t2 = state.t2_image[region]
+        t1 = Qwen3VLZeroShotVerifier._outline_component(raw_t1, component)
+        t2 = Qwen3VLZeroShotVerifier._outline_component(raw_t2, component)
         component_rgb = np.repeat(
             (component.astype(np.uint8) * 255)[..., None], 3, axis=2
         )
-        absolute_difference = np.abs(t2.astype(np.int16) - t1.astype(np.int16))
+        absolute_difference = np.abs(
+            raw_t2.astype(np.int16) - raw_t1.astype(np.int16)
+        )
         absolute_difference = np.clip(absolute_difference * 2, 0, 255).astype(np.uint8)
         tiles = [
             Image.fromarray(t1),
@@ -1360,6 +1377,24 @@ class Qwen3VLZeroShotVerifier:
                 ((index % 2) * panel_size, (index // 2) * panel_size),
             )
         return canvas
+
+    @staticmethod
+    def _outline_component(rgb: np.ndarray, component: np.ndarray) -> np.ndarray:
+        """Draw an outer yellow ring without covering component RGB pixels."""
+
+        image = np.array(rgb, dtype=np.uint8, copy=True)
+        mask = np.asarray(component, dtype=bool)
+        padded = np.pad(mask, 1, mode="constant", constant_values=False)
+        dilated = np.zeros_like(mask)
+        for offset_y in range(3):
+            for offset_x in range(3):
+                dilated |= padded[
+                    offset_y : offset_y + mask.shape[0],
+                    offset_x : offset_x + mask.shape[1],
+                ]
+        outline = np.logical_and(dilated, ~mask)
+        image[outline] = np.array([255, 255, 0], dtype=np.uint8)
+        return image
 
     @staticmethod
     def _proposal_initial_component(

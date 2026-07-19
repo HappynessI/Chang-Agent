@@ -530,3 +530,28 @@ verdict、target view 与 positive/negative/box。普通已有白色区域由协
 `rejected_action` JSON，retry prompt 将其列为 forbidden，并要求改变 action type 或
 coordinate/box、转向其他未解决区域。该修复避免把坐标合法但已失败的动作误当成普通
 格式错误反复修复。
+
+## 16. 2026-07-19 全量分批实测与精确组件锚点
+
+GPU 作业 `41396`（`outputs/change_agent_levir_gpu_closed_loop_20260719_143908`）证明
+上一轮的全量分批机制已经在线生效：`test_85_16` 的 96 个 candidate delta 像素被拆成
+13 个连通分量、五个 batch，`covered_delta_pixels=96`、`coverage_ratio=1.0`。因此当前
+主要问题已经从“候选没进入 Verifier”转为“初始动作定位和 RGB 局部语义仍不够精确”。
+
+三个样本第一次 negative point 的像素坐标分别为 `[115,147]`、`[129,151]` 和
+`[96,61]`，都来自 padded proposal box 的模型自由选点，未命中对应连通分量，最终
+`changed_pixels=0`。更重要的是，三个最大 initial present component 与离线 GT 的重合
+率分别为 90.79%、70.95% 和 92.98%，Qwen 却均输出 background/background。若只把
+自由坐标换成精确点，而不提高局部视觉对应性，会更准确地删除真实变化，不能接受。
+
+本轮同时收紧动作几何和改善视觉证据：每个 proposal 保存 Environment 计算的分量 seed
+像素及其 `[0,1000]` 坐标；point 型反馈把该 seed 作为退化 `error_region`，Agent 不再
+自行在 padded box 内选点，而是复制精确锚点。T1/T2 crop 在分量外侧绘制黄色一像素
+轮廓，明确要求判断轮廓内的原始 RGB。轮廓不覆盖被审计像素，并且绝对差分图仍从未
+标注的 raw RGB 计算，避免人工颜色成为时相变化证据。box 型不确定动作继续使用完整
+padded box。
+
+作业 `41396` 中 `test_85_16` 的 96-pixel candidate 离线 IoU 从 `0.30658070` 提升到
+`0.31390233`，但其中恰好 48 像素为 GT change、48 像素为 FP，并非“全部有益候选”。
+因此不能为放行它而降低 mixed/uncertain 的安全门；下一轮应首先验证黄色轮廓能否修正
+initial component 语义，以及精确锚点能否在语义正确时产生非空局部编辑。

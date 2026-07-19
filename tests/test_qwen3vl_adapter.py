@@ -101,10 +101,11 @@ class QwenAdapterTest(unittest.TestCase):
         prompt = processor.messages[0]["content"][-1]["text"]
         self.assertIn("Verifier recommends a point action", prompt)
         self.assertIn(
-            '{"target_view":"t2","action":"positive_point","coordinate":[620,410]}',
+            '{"target_view":"t2","action":"positive_point","coordinate":[550,400]}',
             prompt,
         )
-        self.assertIn("Never omit coordinate", prompt)
+        self.assertIn("copy it exactly", prompt)
+        self.assertIn("Never omit or move coordinate", prompt)
         self.assertNotIn('"box":[120,180,760,820]', prompt)
 
     def test_verifier_box_recommendation_injects_only_box_example(self):
@@ -134,7 +135,7 @@ class QwenAdapterTest(unittest.TestCase):
             prompt,
         )
         self.assertIn("Never omit box", prompt)
-        self.assertNotIn('"coordinate":[620,410]', prompt)
+        self.assertNotIn('"coordinate":[550,400]', prompt)
 
     def test_retry_for_missing_point_coordinate_repeats_exact_structure(self):
         processor = FakeProcessor()

@@ -220,18 +220,24 @@ class GroundingModelQwen3VL:
         action = feedback.suggested_action
         target_view = feedback.target_view
         if action in {"positive_point", "negative_point"}:
+            if feedback.error_region is not None:
+                x1, y1, x2, y2 = feedback.error_region
+                coordinate = [round((x1 + x2) / 2), round((y1 + y2) / 2)]
+            else:
+                coordinate = [620, 410]
             example = json.dumps(
                 {
                     "target_view": target_view,
                     "action": action,
-                    "coordinate": [620, 410],
+                    "coordinate": coordinate,
                 },
                 separators=(",", ":"),
             )
             return (
                 "The Verifier recommends a point action. Your output must follow this "
-                f"structure:\n{example}\nThe numbers are an example only. Choose the actual "
-                "[x,y] from the image and error_region. Never omit coordinate.\n"
+                f"structure:\n{example}\nThe coordinate is the Environment-owned component "
+                "anchor inside error_region; copy it exactly so the point hits the audited "
+                "component. Never omit or move coordinate.\n"
             )
         if action == "box":
             example = json.dumps(
