@@ -1,5 +1,93 @@
 # Development log
 
+## 2026-07-19 — replay challenge, safe initial finish, and pairwise delta crops
+
+- Added `tools/replay_verifier_challenge.py`, which replays the saved tool candidates
+  from the previous three-sample run through the GT-free Verifier. GT is opened only
+  after each Verifier response to assign offline `better/worse/unchanged` labels.
+  The report is atomically committed, so a failed model/configuration run removes its
+  temporary directory and leaves no failed result under `outputs/`.
+- The Environment and Agent now allow a direct initial `finish` only when the initial
+  Verifier is valid, reports `error_type=none`, and sets `comparison=initial, stop=true`.
+  Invalid or actionable initial feedback still requires a segmentation tool action.
+- Pairwise local panels now show previous-vs-candidate change pixels explicitly:
+  previous red, candidate green, and delta blue, alongside the T1/T2 and semantic-mask
+  views. This makes the actual candidate edit visible at the same crop scale used for
+  regional diagnosis.
+- Added regressions for safe initial finish, initial Agent prompt authorization, local
+  delta visibility, atomic failure cleanup, and declared comparison tolerances.
+
+## 2026-07-19 — region-grounded diagnosis and categorical pairwise gate
+
+- Replaced Qwen's joint absolute `quality_score` plus continuous `progress_score`
+  prediction with two focused stages. The regional stage classifies fixed proposals;
+  the candidate stage emits only `better`, `worse`, `unchanged`, or `uncertain`.
+  Qwen runtime outputs now leave both numeric score fields null.
+- Added Environment-owned Verifier proposals from change-mask connected components,
+  T1/T2 object-mask XOR components, and candidate added/removed delta components.
+  Proposals are padded, deduplicated, capped at six, serialized with their sources and
+  exact pixel counts, and converted to normalized boxes by the runtime.
+- Preserved the five labeled full-image inputs and added a 384x384 local four-panel view
+  per proposal. The panel explicitly enlarges the RGB crops, binary change mask, and
+  color-coded temporal masks, so small white components remain visible.
+- Region responses must cover every Environment `region_id` exactly once with
+  `true_change`, `false_positive`, `false_negative`, or `uncertain`. Qwen no longer
+  generates localization coordinates; actionable `error_region` is the selected
+  Environment proposal box.
+- Added authoritative mask facts and a semantic consistency gate: when the runtime
+  counts any white change pixels, a model response claiming the mask is empty is invalid
+  and retried. The proposal builder retains even a single white pixel despite the normal
+  minimum-area filter.
+- Environment candidate commit now requires categorical `comparison=better` while
+  retaining verifier-validity, locality, area, topology, rollback, and full trajectory
+  gates. Pairwise trajectories use the latest accepted state as best instead of
+  manufacturing an absolute scalar rank.
+- Added regressions for proposal construction/source merging, one-pixel preservation,
+  full-plus-local visual inputs, empty-mask contradiction retries, fixed-box diagnosis,
+  pairwise-only output, identical-state validation, and rejection of worse candidates.
+
+Validation:
+
+```text
+Python byte compilation: passed
+Unit tests: 68 passed
+git diff --check: passed
+```
+
+## 2026-07-19 — restore the official SAM3 CUDA autocast contract
+
+- The first migrated A800 smoke job (`40907`) reached fresh SAM3 initialization but
+  failed in the fused ViT MLP with a BF16-activation/FP32-weight dtype mismatch.
+- The isolated segmentation worker had omitted the CUDA autocast context used by the
+  official SAM3 inference examples. SAM3 text initialization and box inference now
+  run inside a scoped autocast context: BF16 on supported GPUs and FP16 otherwise.
+  CPU execution keeps a no-op context.
+- Added regression coverage for CPU, CUDA BF16, and CUDA FP16-fallback selection.
+  Slurm released the failed job's GPU; its diagnostic output was removed after the
+  final successful rollout, as requested during output cleanup.
+- The follow-up job (`40909`) passed the fused MLP and exposed a separate normal
+  zero-detection edge case: SAM3 can return empty semantic, instance, and mask arrays.
+  The adapter now maps an explicit empty detector result to an all-zero mask and
+  confidence map while still raising when the state contains no mask output keys.
+  Added a regression for this distinction. Slurm released the failed job's GPU; its
+  diagnostic output was removed after the final successful rollout.
+- Job `40910` then completed inference and failed only while persisting a BF16
+  diagnostic tensor, because PyTorch cannot directly expose BF16 storage to NumPy.
+  The adapter now promotes BF16 to FP32 strictly at the diagnostic serialization
+  boundary, with a real BF16 tensor regression. Its GPU was released, and the failed
+  diagnostic output was removed after the final successful rollout.
+- The final one-GPU job (`40911`) completed all three fixed LEVIR-CD samples on one
+  A800 in 114 seconds and released its allocation. Aggregate conservative-selected
+  IoU/F1 were `0.69744116`/`0.82175592`. The run confirmed that field-free point
+  actions execute, retry exhaustion no longer invokes a synthetic box, and rejected
+  candidates roll back without contaminating the selected prediction.
+- Remaining audit findings are model-policy issues rather than runtime failures:
+  ten Agent responses omitted required point/box coordinates, all six Verifier
+  localizations covered the whole image, and a post-rollout-improving candidate for
+  `test_85_16` (IoU `0.30658070` to `0.38875878`) was rejected because the GT-free
+  Verifier score stayed at zero. See
+  `outputs/change_agent_levir_gpu_smoke_20260719_030624/CLOSED_LOOP_AUDIT.md`.
+
 ## 2026-07-18 — expose both temporal object masks to the Verifier
 
 - Expanded every Qwen Verifier request from three to five labeled visual inputs:

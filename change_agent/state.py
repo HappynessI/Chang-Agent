@@ -11,6 +11,7 @@ from .coordinates import PROTOCOL_COORDINATE_SPACE, validate_normalized_box
 
 TargetView = Literal["t1", "t2"]
 ActionName = Literal["positive_point", "negative_point", "box", "finish"]
+ComparisonLabel = Literal["initial", "better", "worse", "unchanged", "uncertain"]
 
 
 def _copy_array(value: np.ndarray, *, dtype: Any | None = None) -> np.ndarray:
@@ -42,9 +43,12 @@ class AgentAction:
 
 @dataclass(frozen=True)
 class VerifierOutput:
-    quality_score: float
+    # ``quality_score`` remains optional for rule/trained baselines and old artifacts.
+    # The Qwen pairwise verifier deliberately leaves it unset.
+    quality_score: float | None = None
     score_delta: float = 0.0
     progress_score: float | None = None
+    comparison: ComparisonLabel | None = None
     error_type: str = "none"
     target_view: TargetView = "t2"
     error_region: tuple[int, int, int, int] | None = None
@@ -56,12 +60,21 @@ class VerifierOutput:
     stop: bool | None = None
 
     def __post_init__(self) -> None:
-        if not 0.0 <= float(self.quality_score) <= 1.0:
+        if self.quality_score is not None and not 0.0 <= float(self.quality_score) <= 1.0:
             raise ValueError("quality_score must be in [0, 1]")
         if self.progress_score is not None and not -1.0 <= float(self.progress_score) <= 1.0:
             raise ValueError("progress_score must be in [-1, 1]")
         if self.error_region is not None:
             validate_normalized_box(self.error_region)
+        if self.comparison not in {
+            None,
+            "initial",
+            "better",
+            "worse",
+            "unchanged",
+            "uncertain",
+        }:
+            raise ValueError("unsupported comparison label")
         if self.stop is None:
             object.__setattr__(self, "stop", bool(self.accept))
         if not self.verifier_valid:
@@ -71,11 +84,14 @@ class VerifierOutput:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "quality_score": float(self.quality_score),
+            "quality_score": (
+                float(self.quality_score) if self.quality_score is not None else None
+            ),
             "progress_score": (
                 float(self.progress_score) if self.progress_score is not None else None
             ),
             "score_delta": float(self.score_delta),
+            "comparison": self.comparison,
             "error_type": self.error_type,
             "target_view": self.target_view,
             "error_region": list(self.error_region) if self.error_region else None,

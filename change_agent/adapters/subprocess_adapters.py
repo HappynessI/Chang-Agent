@@ -48,8 +48,6 @@ class _SubprocessTool:
         mask_path = call_dir / "initial_mask.npy"
         output_path = call_dir / "output_mask.npy"
         report_path = call_dir / "report.json"
-        stdout_path = call_dir / "stdout.log"
-        stderr_path = call_dir / "stderr.log"
         Image.fromarray(_uint8_image(image)).save(image_path)
         if initial_mask is not None:
             np.save(mask_path, np.asarray(initial_mask, dtype=np.uint8))
@@ -84,16 +82,12 @@ class _SubprocessTool:
             command,
             cwd=str(Path(self.worker).parent),
             env=env,
-            text=True,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             timeout=self.timeout_seconds,
         )
-        stdout_path.write_text(result.stdout, encoding="utf-8")
-        stderr_path.write_text(result.stderr, encoding="utf-8")
         if result.returncode != 0:
-            raise RuntimeError(
-                f"{mode} worker failed with exit={result.returncode}; see {stderr_path}"
-            )
+            raise RuntimeError(f"{mode} worker failed with exit={result.returncode}")
         if not output_path.is_file() or not report_path.is_file():
             raise RuntimeError(f"{mode} worker did not produce its declared artifacts")
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -215,8 +209,6 @@ class SubprocessSAM3Initializer(_SubprocessTool):
         t2_mask_path = call_dir / "t2_mask.npy"
         evidence_dir = call_dir / "evidence"
         report_path = call_dir / "report.json"
-        stdout_path = call_dir / "stdout.log"
-        stderr_path = call_dir / "stderr.log"
         Image.fromarray(_uint8_image(t1_image)).save(t1_image_path)
         Image.fromarray(_uint8_image(t2_image)).save(t2_image_path)
         command = [
@@ -260,16 +252,12 @@ class SubprocessSAM3Initializer(_SubprocessTool):
             command,
             cwd=str(Path(self.worker).parent),
             env=env,
-            text=True,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             timeout=self.timeout_seconds,
         )
-        stdout_path.write_text(result.stdout, encoding="utf-8")
-        stderr_path.write_text(result.stderr, encoding="utf-8")
         if result.returncode != 0:
-            raise RuntimeError(
-                f"SAM3 initialization failed with exit={result.returncode}; see {stderr_path}"
-            )
+            raise RuntimeError(f"SAM3 initialization failed with exit={result.returncode}")
         required = (t1_mask_path, t2_mask_path, report_path)
         if not all(path.is_file() for path in required):
             raise RuntimeError("SAM3 initialization did not produce all declared artifacts")

@@ -1,0 +1,58 @@
+import unittest
+
+import numpy as np
+
+from change_agent.state import ChangeState
+from change_agent.verifier_regions import attach_verifier_regions, build_verifier_regions
+
+
+class VerifierRegionTest(unittest.TestCase):
+    def test_proposals_merge_change_and_temporal_difference_sources(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        t1 = np.zeros((32, 32), dtype=bool)
+        t2 = np.zeros_like(t1)
+        t2[10:15, 12:18] = True
+        state = ChangeState(image, image, "building", t1, t2, t2)
+
+        proposals = attach_verifier_regions(state)
+
+        self.assertEqual(len(proposals), 1)
+        self.assertIn("change_component", proposals[0]["sources"])
+        self.assertIn("temporal_difference", proposals[0]["sources"])
+        self.assertEqual(state.evidence["verifier_mask_facts"]["change_pixels"], 30)
+        self.assertEqual(proposals[0]["change_pixels"], 30)
+
+    def test_candidate_delta_sources_have_priority_and_region_limit(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        previous_mask[2:5, 2:5] = True
+        current_mask = previous_mask.copy()
+        current_mask[20:25, 20:25] = True
+        previous = ChangeState(
+            image, image, "building", np.zeros_like(previous_mask), previous_mask, previous_mask
+        )
+        current = ChangeState(
+            image, image, "building", np.zeros_like(current_mask), current_mask, current_mask
+        )
+
+        proposals = build_verifier_regions(current, previous, max_regions=1)
+
+        self.assertEqual(len(proposals), 1)
+        self.assertIn("candidate_added", proposals[0]["sources"])
+        self.assertGreater(proposals[0]["candidate_delta_pixels"], 0)
+
+    def test_single_white_pixel_is_never_lost_by_min_area_filter(self):
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=bool)
+        mask[8, 8] = True
+        state = ChangeState(image, image, "building", np.zeros_like(mask), mask, mask)
+
+        proposals = build_verifier_regions(state, min_component_area=4)
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0]["component_area"], 1)
+        self.assertEqual(proposals[0]["change_pixels"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

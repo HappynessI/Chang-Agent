@@ -57,6 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-locality-outside-ratio", type=float, default=0.1)
     parser.add_argument("--max-target-mask-change-ratio", type=float, default=0.25)
     parser.add_argument("--max-component-count-delta", type=int, default=4)
+    parser.add_argument("--verifier-max-regions", type=int, default=6)
+    parser.add_argument("--verifier-min-region-area", type=int, default=4)
+    parser.add_argument("--verifier-region-padding-ratio", type=float, default=0.25)
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
     parser.add_argument("--overlap-threshold", type=float, default=0.25)
     parser.add_argument("--t12-min-instance-area", type=int, default=0)
@@ -66,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--verifier", choices=("qwen_zero_shot", "rule"), default="qwen_zero_shot"
     )
-    parser.add_argument("--verifier-max-new-tokens", type=int, default=256)
+    parser.add_argument("--verifier-max-new-tokens", type=int, default=512)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument("--verifier-retries", type=int, default=2)
     parser.add_argument("--device-map", default="auto")
@@ -164,11 +167,22 @@ def main() -> None:
             max_locality_outside_ratio=args.max_locality_outside_ratio,
             max_target_mask_change_ratio=args.max_target_mask_change_ratio,
             max_component_count_delta=args.max_component_count_delta,
+            verifier_max_regions=args.verifier_max_regions,
+            verifier_min_region_area=args.verifier_min_region_area,
+            verifier_region_padding_ratio=args.verifier_region_padding_ratio,
             run_metadata={
                 "sample": sample_file,
                 "query": args.query,
                 "agent": "Qwen3-VL-2B-Instruct",
                 "verifier": args.verifier,
+                "verifier_decision_mode": (
+                    "region_classification_then_categorical_pairwise"
+                    if args.verifier == "qwen_zero_shot"
+                    else "legacy_rule_score"
+                ),
+                "verifier_max_regions": args.verifier_max_regions,
+                "verifier_min_region_area": args.verifier_min_region_area,
+                "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
                 "coordinate_protocol": "public normalized_0_1000; environment pixel_xy",
                 "matching_mode": args.matching_mode,
                 "overlap_threshold": args.overlap_threshold,
@@ -460,6 +474,14 @@ def _base_manifest(
         "box_executor": f"SAM3 {args.sam3_checkpoint}",
         "verifier": args.verifier,
         "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
+        "verifier_decision_mode": (
+            "region_classification_then_categorical_pairwise"
+            if args.verifier == "qwen_zero_shot"
+            else "legacy_rule_score"
+        ),
+        "verifier_max_regions": args.verifier_max_regions,
+        "verifier_min_region_area": args.verifier_min_region_area,
+        "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
         "coordinate_protocol": "Agent/Verifier normalized_0_1000; Environment pixel_xy",
         "target_view_policy": "zero-shot visual inference; no alternating pseudo-label",
         "matching_mode": args.matching_mode,

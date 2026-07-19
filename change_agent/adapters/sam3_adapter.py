@@ -93,12 +93,17 @@ class SAM3ProcessorAdapter:
     ) -> tuple[np.ndarray, np.ndarray]:
         height, width = shape
         score_maps: list[np.ndarray] = []
+        has_mask_output = False
         semantic = state.get("semantic_mask_logits")
         if semantic is not None:
-            score_maps.append(self._collapse_score_map(self._numpy(semantic)))
+            has_mask_output = True
+            semantic_array = self._numpy(semantic)
+            if semantic_array.size:
+                score_maps.append(self._collapse_score_map(semantic_array))
 
         instances = state.get("masks_logits")
         if instances is not None:
+            has_mask_output = True
             instance_array = self._numpy(instances).astype(float)
             if instance_array.size:
                 while instance_array.ndim > 3:
@@ -113,11 +118,19 @@ class SAM3ProcessorAdapter:
 
         if not score_maps:
             masks = state.get("masks")
-            if masks is None:
+            if masks is not None:
+                has_mask_output = True
+                masks_array = self._numpy(masks).astype(float)
+                if masks_array.size:
+                    score_maps.append(self._collapse_score_map(masks_array))
+            if not has_mask_output:
                 raise KeyError("SAM3 state contains no semantic/instance mask output")
-            score_maps.append(self._collapse_score_map(self._numpy(masks).astype(float)))
 
-        array = np.maximum.reduce(score_maps)
+        array = (
+            np.maximum.reduce(score_maps)
+            if score_maps
+            else np.zeros((height, width), dtype=float)
+        )
         presence = state.get("presence_score")
         if presence is not None:
             presence_value = float(np.asarray(self._numpy(presence), dtype=float).max(initial=0))
@@ -147,6 +160,10 @@ class SAM3ProcessorAdapter:
     def _numpy(value: Any) -> np.ndarray:
         if hasattr(value, "detach"):
             value = value.detach()
+        if str(getattr(value, "dtype", "")) == "torch.bfloat16":
+            # NumPy has no native PyTorch BF16 conversion path. Evidence is
+            # diagnostic-only, so promote at this serialization boundary.
+            value = value.float()
         if hasattr(value, "cpu"):
             value = value.cpu()
         if hasattr(value, "numpy"):

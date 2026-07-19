@@ -25,9 +25,9 @@ The current code implements the v0–v3 research skeleton:
 - SimpleClick point and SAM3 box boundaries;
 - per-step instance extraction, default OmniOVCD overlap-presence matching, optional
   one-to-one greedy ablation, and change-mask reconstruction;
-- a Qwen3-VL zero-shot Verifier that shares the Agent model weights, plus a transparent
-  rule Verifier ablation and a trainable frozen-feature Verifier head for quality,
-  error-map, and error-type only;
+- a region-grounded, categorical pairwise Qwen3-VL zero-shot Verifier that shares the
+  Agent model weights, plus a transparent rule Verifier ablation and a legacy trainable
+  frozen-feature Verifier head for offline quality/error-map/error-type experiments;
 - offline GT perturbations for Verifier supervision;
 - feedback-driven iteration, finish rejection, complete trajectory artifacts, and
   history-best state selection.
@@ -61,32 +61,37 @@ separately validated latent/tool-ranking objective.
 
 ## Verifier feedback boundary
 
-- Qwen's first Verifier response contains only absolute `quality_score`, independent
-  pairwise `progress_score`, error type, and concise feedback. `progress_score` is in
-  `[-1,1]`: positive means the candidate improved over the previous valid state,
-  negative means it regressed, and zero means no material change. Initial verification
-  has no comparison state and must return zero progress.
-- T1/T2 originals are fixed inputs. Candidate verification additionally receives the
-  previous valid T1/T2/change masks, candidate T1/T2/change masks, and the normalized
-  action that produced the candidate. The final candidate change mask is the primary
-  evaluation target; temporal object masks are supporting predictions rather than GT.
-- The prompt explicitly defines added buildings, disappeared buildings, unchanged
-  buildings, and unchanged background. Empty predicted T1 or T2 masks are not treated
-  as automatic errors; the original images and final change mask decide plausibility.
-- Every actionable diagnosis uses a separate localization request for `target_view`
-  and `error_region`. If localization fails, the result is marked with
-  `verifier_valid=false` and `localization_valid=false`, exposes no suggested action,
-  and cannot stop the episode; the previous valid feedback is retained for context.
-- `accept`, `stop`, and `suggested_action` are derived by the runtime. `none` maps to
-  `finish` with `accept=(quality_score >= threshold)`; false positives map to a
-  `negative_point`, false negatives to a `positive_point`, and mixed/uncertain errors
-  to a `box` when a valid region is available.
+- Before every verification, the Environment builds at most six auditable proposals
+  from current change-mask components, T1/T2 object-mask XOR components, and candidate
+  added/removed delta components. It records exact global and per-region pixel counts.
+- Qwen retains the five labeled full-image inputs, then receives an upscaled four-panel
+  crop for every proposal: T1, T2, binary change, and color-coded T1/T2/change masks.
+  It classifies each exact `region_id` as `true_change`, `false_positive`,
+  `false_negative`, or `uncertain`; it cannot invent a localization box.
+- Exact mask facts are authoritative. If `change_pixels>0`, a response claiming that
+  the current mask is empty is rejected and retried. Even a one-pixel component is kept
+  as a proposal and upscaled so white foreground cannot silently disappear visually.
+- The parser accepts both the preferred `{"regions": [...]}` response and the keyed
+  object form Qwen3-VL often emits (`{"r0": {...}, "r1": {...}}`), restoring
+  Environment proposal order and tolerating a harmless `target_view` on non-actionable
+  `true_change`/`uncertain` judgments.
+- For a post-action candidate, a second request outputs only categorical `better`,
+  `worse`, `unchanged`, or `uncertain` plus one sentence. Qwen does not predict
+  `quality_score` or continuous `progress_score`; those serialized fields are `null`.
+- `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
+  from region judgments and Environment boxes. False positives map to a negative point,
+  false negatives to a positive point, mixed/uncertain results to a box, and fully
+  supported proposals to finish. Invalid analysis cannot authorize an action or stop.
+- A valid, error-free initial state may finish without a redundant tool action. The
+  saved-candidate replay challenge in `tools/replay_verifier_challenge.py` evaluates
+  pairwise decisions without exposing GT to the Verifier; GT is read only afterward to
+  score the decision.
 
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
 policies. All attempted candidate masks are retained, and initial, verifier-best,
 last-attempted, and selected prediction masks are exported. A tool candidate is accepted
-only when the Verifier is valid, its pairwise progress exceeds `selection_epsilon`,
-and its absolute mask-area jump stays within the configured limit. Rejected candidates
+only when the Verifier is valid, its categorical comparison is `better`, and its
+absolute mask-area jump stays within the configured limit. Rejected candidates
 remain auditable in the trajectory, while the next Agent step resumes from the previous
 accepted state. If model action retries are exhausted, the episode stops without
 executing a synthetic SAM3 box action.
@@ -108,13 +113,15 @@ for a missing or malformed `coordinate`/`box` field.
 - Every tool result records target-mask XOR statistics: action ROI, changed and
   outside-ROI pixels, outside-ROI ratio, target-mask change ratio, largest changed
   component, and before/after component counts.
-- Candidate acceptance rejects excessive outside-ROI changes, excessive target-mask
-  changes, and excessive component-count jumps in addition to the existing progress and
-  change-mask area gates. Thresholds are explicit runner arguments and trajectory fields.
-- Verifier localization rejects near-full-image regions unless the candidate delta is
-  itself broad. False-positive regions must overlap current white change pixels, while
-  false-negative regions must lie mostly outside them. Invalid localization is retried
-  with the exact consistency error before the Verifier is marked invalid.
+- Candidate acceptance rejects non-`better` pairwise decisions, excessive outside-ROI
+  changes, excessive target-mask changes, excessive component-count jumps, and excessive
+  change-mask area jumps. Thresholds and categorical decisions are trajectory fields.
+- Actionable `error_region` always comes from the bounded Environment proposal set.
+  Unknown/duplicate region IDs, missing proposal judgments, false-positive judgments
+  with no white pixels, and mask-emptiness contradictions are rejected and retried.
+- GPU/Slurm/monitor stdout and stderr, including subprocess worker `stdout.log` and
+  `stderr.log`, are discarded; output directories retain only structured experiment
+  artifacts, masks, reports, trajectories, and verifier feedback.
 
 ## Runtime audit
 

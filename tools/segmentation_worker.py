@@ -7,6 +7,7 @@ import argparse
 import json
 import resource
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +67,10 @@ def box(args: argparse.Namespace, image: np.ndarray) -> tuple[np.ndarray, dict[s
     from change_agent.adapters.sam3_adapter import SAM3ProcessorAdapter
 
     processor = _build_sam3_processor(args)
-    result = SAM3ProcessorAdapter(processor).segment_box(image, tuple(args.box), args.query)
+    with _sam3_autocast(args.device):
+        result = SAM3ProcessorAdapter(processor).segment_box(
+            image, tuple(args.box), args.query
+        )
     return result, {
         "tool": "sam3",
         "checkpoint": args.checkpoint,
@@ -88,8 +92,9 @@ def initialize(
     if image2.shape[:2] != image1.shape[:2]:
         raise ValueError("T1 and T2 initialization images must have the same shape")
     adapter = SAM3ProcessorAdapter(_build_sam3_processor(args))
-    t1_mask, t1_evidence = adapter.segment_text(image1, args.query)
-    t2_mask, t2_evidence = adapter.segment_text(image2, args.query)
+    with _sam3_autocast(args.device):
+        t1_mask, t1_evidence = adapter.segment_text(image1, args.query)
+        t2_mask, t2_evidence = adapter.segment_text(image2, args.query)
     np.save(args.output_mask_t2, np.asarray(t2_mask, dtype=np.uint8))
     evidence_dir = args.evidence_dir
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +129,17 @@ def _build_sam3_processor(args: argparse.Namespace):
     model.to(args.device)
     model._device = torch.device(args.device)
     return Sam3Processor(model, resolution=args.resolution, device=args.device)
+
+
+def _sam3_autocast(device: str):
+    """Match the mixed-precision context required by the official SAM3 inference path."""
+
+    import torch
+
+    if torch.device(device).type != "cuda":
+        return nullcontext()
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return torch.autocast(device_type="cuda", dtype=dtype)
 
 
 def _persist_arrays(

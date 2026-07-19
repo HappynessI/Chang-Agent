@@ -12,6 +12,7 @@ from .executor import ActionExecutor
 from .state import AgentAction, AgentObservation, ChangeState, VerifierOutput
 from .trajectory import Trajectory, TrajectoryEntry
 from .verifier import Verifier
+from .verifier_regions import attach_verifier_regions
 
 
 class StateBackend(Protocol):
@@ -44,6 +45,9 @@ class ChangeAgentEnvironment:
         max_target_mask_change_ratio: float = 0.25,
         max_component_count_delta: int = 4,
         require_tool_before_finish: bool = True,
+        verifier_max_regions: int = 6,
+        verifier_min_region_area: int = 4,
+        verifier_region_padding_ratio: float = 0.25,
     ):
         if not inference_only:
             raise ValueError("runtime Environment currently supports inference_only=True only")
@@ -55,6 +59,10 @@ class ChangeAgentEnvironment:
             raise ValueError("max_target_mask_change_ratio must be in [0, 1]")
         if max_component_count_delta < 0:
             raise ValueError("max_component_count_delta must be non-negative")
+        if verifier_max_regions < 1 or verifier_min_region_area < 1:
+            raise ValueError("Verifier region limits must be positive")
+        if verifier_region_padding_ratio < 0:
+            raise ValueError("verifier_region_padding_ratio must be non-negative")
         self.backend = backend
         self.executor = executor
         self.verifier = verifier
@@ -68,6 +76,9 @@ class ChangeAgentEnvironment:
         self.max_target_mask_change_ratio = max_target_mask_change_ratio
         self.max_component_count_delta = max_component_count_delta
         self.require_tool_before_finish = require_tool_before_finish
+        self.verifier_max_regions = verifier_max_regions
+        self.verifier_min_region_area = verifier_min_region_area
+        self.verifier_region_padding_ratio = verifier_region_padding_ratio
         self.trajectory = Trajectory(
             run_metadata,
             selection_policy=selection_policy,
@@ -103,6 +114,7 @@ class ChangeAgentEnvironment:
             initialized.update,
             step_index=0,
         )
+        self._attach_verifier_regions(self.state, None)
         self.feedback = self.verifier.verify(self.state, None, None, None)
         execution = self._with_verifier_evidence(
             {"event": "reset", "candidate_accepted": True}
@@ -164,6 +176,7 @@ class ChangeAgentEnvironment:
             action.action == "finish"
             and self.require_tool_before_finish
             and not any(entry.execution.get("tool") for entry in self.trajectory.entries)
+            and not self._initial_finish_authorized()
         ):
             raise ActionValidationError("finish is forbidden before a segmentation tool action")
         previous_state = self.state.clone()
@@ -213,6 +226,7 @@ class ChangeAgentEnvironment:
             )
             execution.update(result.evidence)
 
+        self._attach_verifier_regions(candidate, previous_state)
         verifier_output = self.verifier.verify(
             candidate, self.feedback.quality_score, action, previous_state
         )
@@ -222,13 +236,25 @@ class ChangeAgentEnvironment:
         rejection_reasons: list[str] = []
         if not verifier_output.verifier_valid:
             rejection_reasons.append("verifier_invalid")
-        if action.action != "finish":
+        if verifier_output.comparison is not None:
+            ranking_progress = {
+                "better": 1.0,
+                "worse": -1.0,
+                "initial": 0.0,
+                "unchanged": 0.0,
+                "uncertain": 0.0,
+            }[verifier_output.comparison]
+        else:
             ranking_progress = (
                 verifier_output.progress_score
                 if verifier_output.progress_score is not None
                 else verifier_output.score_delta
             )
-            if ranking_progress <= self.selection_epsilon:
+        if action.action != "finish":
+            if verifier_output.comparison is not None:
+                if verifier_output.comparison != "better":
+                    rejection_reasons.append("pairwise_candidate_not_better")
+            elif ranking_progress <= self.selection_epsilon:
                 rejection_reasons.append("progress_did_not_improve")
             if area_delta > self.max_selection_area_delta:
                 rejection_reasons.append("mask_area_delta_exceeded")
@@ -253,11 +279,8 @@ class ChangeAgentEnvironment:
                 "previous_area_ratio": previous_area_ratio,
                 "candidate_area_ratio": candidate_area_ratio,
                 "candidate_area_delta": area_delta,
-                "ranking_progress": (
-                    verifier_output.progress_score
-                    if verifier_output.progress_score is not None
-                    else verifier_output.score_delta
-                ),
+                "ranking_progress": ranking_progress,
+                "pairwise_comparison": verifier_output.comparison,
             }
         )
         execution = self._with_verifier_evidence(execution)
@@ -331,6 +354,29 @@ class ChangeAgentEnvironment:
         if evidence:
             result["verifier_evidence"] = evidence
         return result
+
+    def _initial_finish_authorized(self) -> bool:
+        """Allow a verified, error-free initial state to finish without a no-op tool."""
+
+        feedback = self.feedback
+        return bool(
+            feedback is not None
+            and feedback.verifier_valid
+            and feedback.comparison == "initial"
+            and feedback.error_type == "none"
+            and feedback.stop
+        )
+
+    def _attach_verifier_regions(
+        self, state: ChangeState, previous_state: ChangeState | None
+    ) -> None:
+        attach_verifier_regions(
+            state,
+            previous_state,
+            max_regions=self.verifier_max_regions,
+            min_component_area=self.verifier_min_region_area,
+            padding_ratio=self.verifier_region_padding_ratio,
+        )
 
     @property
     def best_state(self) -> ChangeState:

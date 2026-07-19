@@ -5,8 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import torch
 
 from change_agent.adapters.subprocess_adapters import SubprocessSAM3Initializer
+from tools.segmentation_worker import _sam3_autocast
 
 
 class Completed:
@@ -58,6 +60,28 @@ class SubprocessInitializationTest(unittest.TestCase):
             self.assertTrue(t2.all())
             self.assertTrue(np.allclose(evidence["change_confidence"], 0.7))
             self.assertEqual(evidence["initializer"], "live_sam3_dual_view_text_prompt")
+            self.assertFalse(any(root.rglob("stdout.log")))
+            self.assertFalse(any(root.rglob("stderr.log")))
+
+    def test_sam3_autocast_is_disabled_for_cpu(self):
+        with _sam3_autocast("cpu"):
+            pass
+
+    @patch("torch.autocast")
+    @patch("torch.cuda.is_bf16_supported", return_value=True)
+    def test_sam3_autocast_uses_bfloat16_when_supported(
+        self, _is_bf16_supported, autocast
+    ):
+        _sam3_autocast("cuda")
+        autocast.assert_called_once_with(device_type="cuda", dtype=torch.bfloat16)
+
+    @patch("torch.autocast")
+    @patch("torch.cuda.is_bf16_supported", return_value=False)
+    def test_sam3_autocast_falls_back_to_float16(
+        self, _is_bf16_supported, autocast
+    ):
+        _sam3_autocast("cuda:0")
+        autocast.assert_called_once_with(device_type="cuda", dtype=torch.float16)
 
 
 if __name__ == "__main__":

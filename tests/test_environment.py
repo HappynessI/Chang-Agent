@@ -71,6 +71,22 @@ class SequenceVerifier:
         return next(self.outputs)
 
 
+class ProposalCaptureVerifier:
+    def __init__(self):
+        self.states = []
+
+    def verify(self, state, previous_score, previous_action, previous_state=None):
+        self.states.append(state.clone())
+        return VerifierOutput(
+            comparison="initial" if previous_state is None else "better",
+            error_type="false_positive_change",
+            target_view="t1",
+            error_region=(0, 0, 1000, 1000),
+            suggested_action="negative_point",
+            feedback="proposal capture",
+        )
+
+
 class EnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.box = Box()
@@ -101,6 +117,57 @@ class EnvironmentTest(unittest.TestCase):
         self.assertTrue(np.array_equal(public["predicted_t1_mask"], observation.t1_mask))
         self.assertTrue(np.array_equal(public["predicted_t2_mask"], observation.t2_mask))
         self.assertFalse(any("gt" in key.lower() for key in public))
+
+    def test_environment_attaches_mask_derived_regions_before_verification(self):
+        verifier = ProposalCaptureVerifier()
+        environment = ChangeAgentEnvironment(
+            Backend(), ActionExecutor(Point(), self.box), verifier, max_steps=2
+        )
+
+        environment.reset(self.image1, self.image2, "building")
+
+        evidence = verifier.states[0].evidence
+        self.assertGreater(len(evidence["verifier_region_proposals"]), 0)
+        self.assertEqual(evidence["verifier_mask_facts"]["change_pixels"], 9)
+        self.assertIn(
+            "change_component",
+            evidence["verifier_region_proposals"][0]["sources"],
+        )
+
+    def test_pairwise_worse_candidate_is_rejected_without_scores(self):
+        initial_feedback = VerifierOutput(
+            comparison="initial",
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="positive_point",
+            feedback="Initial feedback.",
+        )
+        candidate_feedback = VerifierOutput(
+            comparison="worse",
+            error_type="false_positive_change",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="negative_point",
+            feedback="Candidate is worse.",
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(Point(), self.box),
+            SequenceVerifier([initial_feedback, candidate_feedback]),
+            max_steps=2,
+        )
+        environment.reset(self.image1, self.image2, "building")
+
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+
+        entry = environment.trajectory.entries[1]
+        self.assertFalse(entry.execution["candidate_accepted"])
+        self.assertEqual(entry.execution["pairwise_comparison"], "worse")
+        self.assertIn(
+            "pairwise_candidate_not_better",
+            entry.execution["candidate_rejection_reasons"],
+        )
 
     def test_locality_gate_rejects_global_point_component(self):
         class GlobalPoint:
@@ -266,6 +333,36 @@ class EnvironmentTest(unittest.TestCase):
         self.environment.reset(self.image1, self.image2, "building")
         with self.assertRaises(ActionValidationError):
             self.environment.step(AgentAction("t2", "finish"))
+
+    def test_initial_verified_error_free_state_can_finish_without_tool(self):
+        class MatchedBackend(Backend):
+            def initialize(self, t1_image, t2_image, query):
+                t1 = np.zeros(t1_image.shape[:2], dtype=bool)
+                t1[2:5, 2:5] = True
+                return InitializationResult(t1, t1.copy(), self.processor.rebuild(t1, t1))
+
+        class InitialClearVerifier:
+            def verify(self, state, previous_score, previous_action, previous_state=None):
+                return VerifierOutput(
+                    comparison="initial" if previous_state is None else "unchanged",
+                    error_type="none",
+                    feedback="All inspected regions are supported.",
+                    suggested_action="finish",
+                    accept=True,
+                    stop=True,
+                )
+
+        environment = ChangeAgentEnvironment(
+            MatchedBackend(),
+            ActionExecutor(Point(), self.box),
+            InitialClearVerifier(),
+            max_steps=2,
+        )
+        environment.reset(self.image1, self.image2, "building")
+
+        _, done = environment.step(AgentAction("t2", "finish"))
+
+        self.assertTrue(done)
 
     def test_trajectory_can_save_masks_in_a_separate_directory(self):
         self.environment.reset(self.image1, self.image2, "building")

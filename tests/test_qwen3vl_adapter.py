@@ -200,6 +200,31 @@ class QwenAdapterTest(unittest.TestCase):
         self.assertIn("Verifier feedback is invalid", texts[-1])
         self.assertIn("cannot authorize finish", texts[-1])
 
+    def test_initial_error_free_verifier_feedback_allows_finish_without_tool(self):
+        processor = FakeProcessor()
+        adapter = GroundingModelQwen3VL(model=FakeModel(), processor=processor)
+        image = np.zeros((11, 21, 3), dtype=np.uint8)
+        observation = AgentObservation(
+            image,
+            image,
+            "building",
+            np.zeros((11, 21)),
+            feedback=VerifierOutput(
+                comparison="initial",
+                error_type="none",
+                suggested_action="finish",
+                feedback="All inspected regions are supported.",
+                accept=True,
+                stop=True,
+            ),
+        )
+
+        adapter.generate_raw(observation)
+        prompt = processor.messages[0]["content"][-1]["text"]
+
+        self.assertIn("finish is allowed without", prompt)
+        self.assertIn('"action":"finish"', prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+import torch
 
 from change_agent.adapters.sam3_adapter import SAM3ProcessorAdapter
 
@@ -62,6 +63,27 @@ class SAM3AdapterTest(unittest.TestCase):
         }
         mask, _ = adapter._mask_from_state(state, (8, 8))
         self.assertFalse(mask.any())
+
+    def test_empty_detector_outputs_return_an_empty_mask(self):
+        adapter = SAM3ProcessorAdapter(FakeProcessor())
+        state = {
+            "semantic_mask_logits": np.empty((0, 1, 8, 8), dtype=np.float32),
+            "masks_logits": np.empty((0, 1, 8, 8), dtype=np.float32),
+            "masks": np.empty((0, 8, 8), dtype=np.float32),
+            "presence_score": np.empty((0,), dtype=np.float32),
+        }
+        mask, confidence = adapter._mask_from_state(state, (8, 8))
+        self.assertEqual(mask.shape, (8, 8))
+        self.assertFalse(mask.any())
+        self.assertTrue(
+            np.array_equal(confidence, np.zeros((8, 8), dtype=np.float32))
+        )
+
+    def test_bfloat16_diagnostics_are_promoted_for_numpy(self):
+        value = torch.tensor([0.25, 0.75], dtype=torch.bfloat16)
+        result = SAM3ProcessorAdapter._numpy(value)
+        self.assertEqual(result.dtype, np.float32)
+        self.assertTrue(np.allclose(result, [0.25, 0.75]))
 
 
 if __name__ == "__main__":

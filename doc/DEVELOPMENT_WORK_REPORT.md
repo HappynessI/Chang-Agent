@@ -1,5 +1,40 @@
 # Change-Agent 开发工作报告
 
+## 2026-07-19：修复 SAM3 隔离 worker 的 CUDA 混合精度上下文
+
+迁移后的首个 A800 单卡 smoke 作业 `40907` 已进入 fresh SAM3 初始化，但在 fused
+ViT MLP 中因 BF16 激活与 FP32 权重不一致而失败。根因是隔离的 segmentation
+worker 没有像 SAM3 官方推理示例一样进入 CUDA autocast 上下文，并非数据或模型
+文件损坏。
+
+现已将 SAM3 的双时相文本初始化和 box 推理包在局部 autocast 中：支持 BF16 的
+GPU 使用 BF16，否则回退 FP16；CPU 路径保持空上下文。已增加 CPU、BF16 和 FP16
+回退的单元测试。对应 GPU 资源已由 Slurm 释放；最终闭环成功后，失败诊断目录已
+按输出清理要求删除。
+
+后续作业 `40909` 已通过 fused MLP，说明混合精度修复生效；它进一步发现 SAM3
+在某个时相没有检测到 building 时会返回显式的空数组。Adapter 旧逻辑对空数组
+执行 `max`，现改为输出同图尺寸的全零 mask 和 confidence；只有完全缺少任何
+mask 输出字段时仍抛出集成错误。该边界已有回归测试，资源已释放；失败诊断目录
+已在最终闭环成功后删除。
+
+作业 `40910` 随后完成了 SAM3 推理，仅在持久化 BF16 诊断 Tensor 时失败；PyTorch
+不能把 BF16 storage 直接暴露给 NumPy。现仅在诊断序列化边界将 BF16 提升为
+FP32，不改变模型推理精度或 mask 计算，并用真实 BF16 Tensor 增加回归测试。
+GPU 已释放；失败诊断目录已在最终闭环成功后删除。
+
+最终单卡作业 `40911` 在一张 A800 上用 114 秒完成三个固定 LEVIR-CD 样本，Slurm
+状态为 `COMPLETED (0:0)`，释放记录为 `squeue_entry_after_completion=0`。保守选择
+结果的汇总 IoU/F1 为 `0.69744116`/`0.82175592`。本轮验证了：不带
+`coordinate_frame` 的 point 可执行；重试耗尽不再触发合成 box；未提升或面积跳变
+过大的 candidate 会回滚，最终 selected prediction 不受污染。
+
+仍需后续解决的模型策略问题是：共 10 个 Agent 输出缺少必需坐标；6 次 Verifier
+定位全部退化为整图；`test_85_16` 的第三个候选在闭环结束后计算出的 IoU 从
+`0.30658070` 提升到 `0.38875878`，但在线 GT-free Verifier 分数始终为 0，因此被
+保守策略拒绝。完整审计见
+`outputs/change_agent_levir_gpu_smoke_20260719_030624/CLOSED_LOOP_AUDIT.md`。
+
 ## 2026-07-18：向 Verifier 暴露双时相 predicted object mask
 
 此前 Qwen Verifier 只能看到 T1/T2 原图和最终 current change mask，无法直接判断

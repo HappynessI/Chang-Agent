@@ -82,11 +82,21 @@ class RuleBasedVerifier:
             )
 
         delta = score - previous_score if previous_score is not None else 0.0
+        comparison = (
+            "initial"
+            if previous_state is None
+            else "better"
+            if delta > 0
+            else "worse"
+            if delta < 0
+            else "unchanged"
+        )
         target_view = _target_view(state, previous_action)
         return VerifierOutput(
             quality_score=score,
             progress_score=delta,
             score_delta=delta,
+            comparison=comparison,
             error_type=error_type,
             target_view=target_view,
             error_region=region,

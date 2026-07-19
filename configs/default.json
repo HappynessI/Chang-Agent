@@ -13,9 +13,10 @@
   "t12_min_instance_area": 0,
   "cd_min_instance_area": 0,
   "verifier": {
-    "type": "qwen3vl_zero_shot",
+    "type": "qwen3vl_region_pairwise_zero_shot",
     "shared_agent_weights": true,
-    "accept_threshold": 0.82
+    "max_region_proposals": 6,
+    "decision": "categorical_better_worse_unchanged_uncertain"
   },
   "seed": 42
 }

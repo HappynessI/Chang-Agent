@@ -155,6 +155,13 @@ class GroundingModelQwen3VL:
             for name in ("positive_point", "negative_point", "box")
         )
         verifier_invalid = observation.feedback is not None and not observation.feedback.verifier_valid
+        initial_finish_authorized = bool(
+            observation.feedback is not None
+            and observation.feedback.verifier_valid
+            and observation.feedback.comparison == "initial"
+            and observation.feedback.error_type == "none"
+            and observation.feedback.stop
+        )
         finish_rule = (
             "Verifier feedback is invalid and cannot authorize finish. Do not finish from "
             "this feedback; recheck the visual evidence and choose a segmentation tool action."
@@ -163,6 +170,9 @@ class GroundingModelQwen3VL:
             "At least one segmentation tool action has already run; finish is allowed only "
             "if the current mask is credible."
             if has_tool_action
+            else "The initial Verifier found no actionable error; finish is allowed without "
+            "a redundant tool action."
+            if initial_finish_authorized
             else "No segmentation tool action has run yet. Finish is forbidden: choose a "
             "positive_point, negative_point, or box action now."
         )
@@ -170,7 +180,9 @@ class GroundingModelQwen3VL:
             validation_error, previous_raw
         )
         format_example = GroundingModelQwen3VL._recommended_action_example(
-            observation, finish_allowed=has_tool_action and not verifier_invalid
+            observation,
+            finish_allowed=(has_tool_action or initial_finish_authorized)
+            and not verifier_invalid,
         )
         return (
             "You refine a change-detection result. The inputs above are T1, T2, the current "

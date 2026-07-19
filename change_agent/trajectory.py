@@ -41,6 +41,7 @@ class TrajectoryEntry:
             "quality_score": verifier["quality_score"],
             "progress_score": verifier["progress_score"],
             "score_delta": verifier["score_delta"],
+            "comparison": verifier["comparison"],
             "error_type": verifier["error_type"],
             "suggested_action": verifier["suggested_action"],
             "accept": verifier["accept"],
@@ -91,22 +92,54 @@ class Trajectory:
         ]
         if not accepted:
             return self.entries[0]
-        return max(accepted, key=lambda item: item.verifier.quality_score)
+        # Pairwise candidates form a monotonic accepted chain: only ``better`` is
+        # committed, so the latest accepted entry is the best without inventing an
+        # absolute scalar score. Legacy score-based verifiers retain old behavior.
+        if any(item.verifier.comparison is not None for item in accepted):
+            return accepted[-1]
+        return max(
+            accepted,
+            key=lambda item: (
+                item.verifier.quality_score
+                if item.verifier.quality_score is not None
+                else float("-inf")
+            ),
+        )
 
     @property
     def verifier_best_entry(self) -> TrajectoryEntry:
         if not self.entries:
             raise RuntimeError("trajectory is empty")
-        return max(self.entries, key=lambda item: item.verifier.quality_score)
+        pairwise_accepted = [
+            item
+            for item in self.entries
+            if item.execution.get("candidate_accepted", True)
+            and item.verifier.comparison in {"initial", "better"}
+        ]
+        if pairwise_accepted:
+            return pairwise_accepted[-1]
+        return max(
+            self.entries,
+            key=lambda item: (
+                item.verifier.quality_score
+                if item.verifier.quality_score is not None
+                else float("-inf")
+            ),
+        )
 
     def history_summary(self, limit: int = 4) -> str:
         recent = self.entries[-limit:]
         parts = []
         for item in recent:
             action = item.parsed_action.action if item.parsed_action else "reset"
+            score = (
+                f"{item.verifier.quality_score:.3f}"
+                if item.verifier.quality_score is not None
+                else "n/a"
+            )
             parts.append(
                 f"step={item.step_index}, action={action}, "
-                f"score={item.verifier.quality_score:.3f}, "
+                f"score={score}, comparison={item.verifier.comparison}, "
                 f"progress={item.verifier.progress_score}, error={item.verifier.error_type}, "
                 f"accepted={item.execution.get('candidate_accepted', True)}"
             )
