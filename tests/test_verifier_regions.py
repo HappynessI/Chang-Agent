@@ -3,7 +3,11 @@ import unittest
 import numpy as np
 
 from change_agent.state import ChangeState
-from change_agent.verifier_regions import attach_verifier_regions, build_verifier_regions
+from change_agent.verifier_regions import (
+    attach_verifier_regions,
+    build_candidate_delta_regions,
+    build_verifier_regions,
+)
 
 
 class VerifierRegionTest(unittest.TestCase):
@@ -52,6 +56,50 @@ class VerifierRegionTest(unittest.TestCase):
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0]["component_area"], 1)
         self.assertEqual(proposals[0]["change_pixels"], 1)
+
+    def test_candidate_delta_regions_keep_added_and_removed_polarity_separate(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        previous_mask[2:5, 2:5] = True
+        current_mask = np.zeros_like(previous_mask)
+        current_mask[20:25, 20:25] = True
+        previous = ChangeState(
+            image, image, "building", np.zeros_like(previous_mask), previous_mask, previous_mask
+        )
+        current = ChangeState(
+            image, image, "building", np.zeros_like(current_mask), current_mask, current_mask
+        )
+
+        proposals = build_candidate_delta_regions(current, previous, max_regions=2)
+
+        self.assertEqual({item["effect_kind"] for item in proposals}, {"added", "removed"})
+        self.assertTrue(
+            all(len(item["sources"]) == 1 for item in proposals)
+        )
+
+    def test_candidate_attachment_aggregates_each_delta_polarity_without_losing_pixels(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        current_mask = np.zeros_like(previous_mask)
+        current_mask[2:4, 2:4] = True
+        current_mask[10:12, 10:12] = True
+        current_mask[20:22, 20:22] = True
+        previous = ChangeState(
+            image, image, "building", np.zeros_like(previous_mask), previous_mask, previous_mask
+        )
+        current = ChangeState(
+            image, image, "building", np.zeros_like(current_mask), current_mask, current_mask
+        )
+
+        proposals = attach_verifier_regions(current, previous, max_regions=6)
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0]["effect_kind"], "added")
+        self.assertEqual(proposals[0]["component_area"], 12)
+        self.assertEqual(
+            current.evidence["verifier_mask_facts"]["candidate_delta_uncovered_pixels"],
+            0,
+        )
 
 
 if __name__ == "__main__":

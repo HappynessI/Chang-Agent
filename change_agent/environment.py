@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Mapping, Protocol
 
 import numpy as np
@@ -93,6 +95,7 @@ class ChangeAgentEnvironment:
         self._accepted_point_clicks: dict[
             str, list[tuple[tuple[int, int], bool]]
         ] = {"t1": [], "t2": []}
+        self._rejected_action_signatures: set[str] = set()
 
     def reset(
         self, t1_image: np.ndarray, t2_image: np.ndarray, query: str
@@ -126,6 +129,7 @@ class ChangeAgentEnvironment:
             "t2": np.array(self.state.t2_mask, dtype=bool, copy=True),
         }
         self._accepted_point_clicks = {"t1": [], "t2": []}
+        self._rejected_action_signatures = set()
         self.trajectory = Trajectory(
             self.trajectory.run_metadata,
             selection_policy=self.selection_policy,
@@ -179,10 +183,19 @@ class ChangeAgentEnvironment:
             and not self._initial_finish_authorized()
         ):
             raise ActionValidationError("finish is forbidden before a segmentation tool action")
+        action_signature = self._action_signature(self.state, action)
+        if (
+            action.action != "finish"
+            and action_signature in self._rejected_action_signatures
+        ):
+            raise ActionValidationError(
+                "action exactly repeats a previously rejected action on the same accepted state"
+            )
         previous_state = self.state.clone()
         previous_feedback = self.feedback
         next_index = self.state.step_index + 1
         execution: dict[str, Any] = {}
+        execution["action_signature"] = action_signature
         if raw_payload is not None:
             execution["raw_action_payload"] = raw_payload
         if coordinate_warning is not None:
@@ -312,6 +325,8 @@ class ChangeAgentEnvironment:
             reject_callback = getattr(self.verifier, "on_candidate_rejected", None)
             if callable(reject_callback):
                 reject_callback(previous_feedback)
+            if action.action != "finish":
+                self._rejected_action_signatures.add(action_signature)
         self.done = (
             next_index >= self.max_steps
             or (
@@ -354,6 +369,20 @@ class ChangeAgentEnvironment:
         if evidence:
             result["verifier_evidence"] = evidence
         return result
+
+    @staticmethod
+    def _action_signature(state: ChangeState, action: AgentAction) -> str:
+        digest = hashlib.sha256()
+        for mask in (state.t1_mask, state.t2_mask, state.change_mask):
+            value = np.ascontiguousarray(mask, dtype=np.uint8)
+            digest.update(str(value.shape).encode("ascii"))
+            digest.update(value.tobytes())
+        digest.update(
+            json.dumps(
+                action.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        return digest.hexdigest()
 
     def _initial_finish_authorized(self) -> bool:
         """Allow a verified, error-free initial state to finish without a no-op tool."""

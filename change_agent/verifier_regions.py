@@ -26,12 +26,22 @@ def attach_verifier_regions(
     state. The Verifier selects/classifies these proposals; it does not invent boxes.
     """
 
-    proposals = build_verifier_regions(
-        state,
-        previous_state,
-        max_regions=max_regions,
-        min_component_area=min_component_area,
-        padding_ratio=padding_ratio,
+    proposals = (
+        build_verifier_regions(
+            state,
+            None,
+            max_regions=max_regions,
+            min_component_area=min_component_area,
+            padding_ratio=padding_ratio,
+        )
+        if previous_state is None
+        else build_candidate_delta_regions(
+            state,
+            previous_state,
+            max_regions=min(max_regions, 2),
+            min_component_area=min_component_area,
+            padding_ratio=padding_ratio,
+        )
     )
     temporal_difference = np.logical_xor(state.t1_mask, state.t2_mask)
     candidate_delta = (
@@ -50,9 +60,103 @@ def attach_verifier_regions(
         "t2_mask_pixels": int(state.t2_mask.sum()),
         "temporal_difference_pixels": int(temporal_difference.sum()),
         "candidate_delta_pixels": int(candidate_delta.sum()),
+        "candidate_added_pixels": int(
+            np.logical_and(state.change_mask, ~previous_state.change_mask).sum()
+        )
+        if previous_state is not None
+        else 0,
+        "candidate_removed_pixels": int(
+            np.logical_and(previous_state.change_mask, ~state.change_mask).sum()
+        )
+        if previous_state is not None
+        else 0,
+        "candidate_delta_covered_pixels": int(
+            sum(item["component_area"] for item in proposals)
+        )
+        if previous_state is not None
+        else 0,
         "proposal_count": len(proposals),
     }
+    if previous_state is not None:
+        covered = int(state.evidence["verifier_mask_facts"]["candidate_delta_covered_pixels"])
+        state.evidence["verifier_mask_facts"]["candidate_delta_uncovered_pixels"] = max(
+            0, int(candidate_delta.sum()) - covered
+        )
     return proposals
+
+
+def build_candidate_delta_regions(
+    state: ChangeState,
+    previous_state: ChangeState,
+    *,
+    max_regions: int = 2,
+    min_component_area: int = 1,
+    padding_ratio: float = 0.25,
+) -> list[dict[str, Any]]:
+    """Build compact, polarity-preserving panels for the actual candidate edit.
+
+    All added pixels share one panel and all removed pixels share another. The two
+    polarities are never merged, so the Verifier can label the complete edit without
+    reconsidering unchanged regions or narrating every small fragment.
+    """
+
+    if max_regions < 1:
+        raise ValueError("max_regions must be positive")
+    if min_component_area < 1:
+        raise ValueError("min_component_area must be positive")
+    if padding_ratio < 0:
+        raise ValueError("padding_ratio must be non-negative")
+
+    change = np.asarray(state.change_mask, dtype=bool)
+    previous = np.asarray(previous_state.change_mask, dtype=bool)
+    candidate_added = np.logical_and(change, ~previous)
+    candidate_removed = np.logical_and(previous, ~change)
+    temporal_difference = np.logical_xor(state.t1_mask, state.t2_mask)
+    raw: list[tuple[str, np.ndarray]] = []
+    for effect_kind, mask in (
+        ("added", candidate_added),
+        ("removed", candidate_removed),
+    ):
+        if mask.any():
+            # One proposal per polarity covers every changed pixel.  A point or box
+            # can fragment into several small components after matching/rebuild; asking
+            # the 2B model to narrate each fragment recreates the oversized protocol.
+            raw.append((effect_kind, mask))
+    raw.sort(key=lambda item: int(item[1].sum()), reverse=True)
+
+    height, width = change.shape
+    result: list[dict[str, Any]] = []
+    for index, (effect_kind, component) in enumerate(raw[:max_regions]):
+        crop_box = _padded_box(_mask_box(component), (height, width), padding_ratio)
+        x1, y1, x2, y2 = crop_box
+        crop = np.zeros_like(change)
+        crop[y1 : y2 + 1, x1 : x2 + 1] = True
+        result.append(
+            {
+                "region_id": f"d{index}",
+                "effect_kind": effect_kind,
+                "sources": [f"candidate_{effect_kind}"],
+                "component_area": int(component.sum()),
+                "box_pixels": list(crop_box),
+                "box_normalized": list(
+                    pixel_box_to_normalized(crop_box, (width, height))
+                ),
+                "change_pixels": int(np.logical_and(change, crop).sum()),
+                "temporal_difference_pixels": int(
+                    np.logical_and(temporal_difference, crop).sum()
+                ),
+                "candidate_delta_pixels": int(component.sum()),
+                "candidate_added_pixels": int(component.sum())
+                if effect_kind == "added"
+                else 0,
+                "candidate_removed_pixels": int(component.sum())
+                if effect_kind == "removed"
+                else 0,
+                "t1_mask_pixels": int(np.logical_and(state.t1_mask, crop).sum()),
+                "t2_mask_pixels": int(np.logical_and(state.t2_mask, crop).sum()),
+            }
+        )
+    return result
 
 
 def build_verifier_regions(

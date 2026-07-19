@@ -171,7 +171,7 @@ def replay_run(
         }
     summary = _summary(samples)
     return {
-        "decision_mode": "region_classification_then_categorical_pairwise",
+        "decision_mode": "compact_delta_effect_then_programmatic_comparison",
         "gt_policy": "GT opened only after verifier output for each candidate",
         "run_dir": str(run_dir),
         "samples": samples,
@@ -232,11 +232,59 @@ def _candidate_masks(
             run_dir / "tool_runs" / sample / "point_{:03d}".format(step["step_index"] - 1) / "output_mask.npy"
         )
     result = np.asarray(np.load(output_mask), dtype=bool)
+    target_initial = t1 if target == "t1" else t2
+    action_name = parsed["action"]
+    if action_name == "positive_point":
+        coordinate = tuple(parsed["coordinate"])
+        result = np.logical_or(
+            target_initial, _component_containing(result, coordinate)
+        )
+    elif action_name == "negative_point":
+        coordinate = tuple(parsed["coordinate"])
+        result = np.logical_and(
+            target_initial, ~_component_containing(target_initial, coordinate)
+        )
+    elif action_name == "box":
+        x1, y1, x2, y2 = parsed["box"]
+        composed = np.array(target_initial, copy=True)
+        composed[y1 : y2 + 1, x1 : x2 + 1] = result[
+            y1 : y2 + 1, x1 : x2 + 1
+        ]
+        result = composed
     if target == "t1":
         t1 = result
     else:
         t2 = result
     return t1, t2
+
+
+def _component_containing(
+    mask: np.ndarray, coordinate: tuple[int, int]
+) -> np.ndarray:
+    source = np.asarray(mask, dtype=bool)
+    x, y = coordinate
+    component = np.zeros_like(source)
+    if not (0 <= x < source.shape[1] and 0 <= y < source.shape[0]) or not source[y, x]:
+        return component
+    component[y, x] = True
+    stack = [(x, y)]
+    while stack:
+        current_x, current_y = stack.pop()
+        for next_x, next_y in (
+            (current_x - 1, current_y),
+            (current_x + 1, current_y),
+            (current_x, current_y - 1),
+            (current_x, current_y + 1),
+        ):
+            if (
+                0 <= next_x < source.shape[1]
+                and 0 <= next_y < source.shape[0]
+                and source[next_y, next_x]
+                and not component[next_y, next_x]
+            ):
+                component[next_y, next_x] = True
+                stack.append((next_x, next_y))
+    return component
 
 
 def _make_state(

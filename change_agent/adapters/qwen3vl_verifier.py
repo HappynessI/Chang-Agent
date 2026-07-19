@@ -1,7 +1,9 @@
-"""Region-grounded, pairwise Qwen3-VL Change Verifier."""
+"""Compact region diagnosis and programmatic candidate-effect verification."""
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -38,13 +40,18 @@ class _PairwiseDecision:
     feedback: str
 
 
-class Qwen3VLZeroShotVerifier:
-    """Classify Environment proposals, then compare candidate vs accepted state.
+@dataclass(frozen=True)
+class _EffectJudgment:
+    region_id: str
+    effect: str
 
-    The model never predicts an absolute quality scalar or a continuous progress
-    scalar. Environment-owned boxes make every actionable diagnosis local and
-    auditable; candidate commit is controlled by a separate categorical pairwise
-    decision.
+
+class Qwen3VLZeroShotVerifier:
+    """Classify initial regions and candidate delta effects with compact outputs.
+
+    Qwen never predicts an absolute score or a pairwise comparison. Environment-owned
+    boxes make every decision local and auditable; candidate ``better/worse`` is
+    derived from added/removed effect labels by deterministic runtime rules.
     """
 
     ERROR_TYPES = {
@@ -61,6 +68,13 @@ class Qwen3VLZeroShotVerifier:
         "uncertain",
     }
     COMPARISONS = {"better", "worse", "unchanged", "uncertain"}
+    EFFECT_LABELS = {
+        "added_supported",
+        "added_unsupported",
+        "removed_supported",
+        "removed_unsupported",
+        "uncertain",
+    }
     VIEWS = {"t1", "t2"}
 
     def __init__(
@@ -68,7 +82,7 @@ class Qwen3VLZeroShotVerifier:
         *,
         model: Any,
         processor: Any,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 256,
         accept_threshold: float = 0.82,
         max_retries: int = 2,
         **legacy_localization_options: Any,
@@ -87,10 +101,14 @@ class Qwen3VLZeroShotVerifier:
         self.legacy_localization_options = dict(legacy_localization_options)
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
+        self._candidate_cache: dict[
+            str, tuple[VerifierOutput, dict[str, Any]]
+        ] = {}
 
     def reset(self) -> None:
         self._last_valid_output = None
         self.last_evidence = {}
+        self._candidate_cache = {}
 
     def on_candidate_rejected(self, previous_feedback: VerifierOutput) -> None:
         self._last_valid_output = (
@@ -105,6 +123,9 @@ class Qwen3VLZeroShotVerifier:
         previous_state: ChangeState | None = None,
     ) -> VerifierOutput:
         del previous_score
+        if previous_state is not None:
+            return self._verify_candidate(state, previous_action, previous_state)
+
         proposals = state.evidence.get("verifier_region_proposals")
         if not isinstance(proposals, list):
             # Standalone verifier calls (unit tests/smokes) still get the exact same
@@ -145,44 +166,14 @@ class Qwen3VLZeroShotVerifier:
                 previous_action=previous_action,
             )
 
-        decision = _PairwiseDecision("initial", "Initial state; no pairwise ranking was requested.")
-        pairwise_errors: list[str] = []
-        pairwise_attempts: list[dict[str, Any]] = []
-        if previous_state is not None:
-            decision = None  # type: ignore[assignment]
-            for _ in range(self.max_retries):
-                raw = self._generate_messages(
-                    self.build_pairwise_messages(
-                        state,
-                        previous_state,
-                        previous_action,
-                        regional_analysis,
-                        pairwise_errors[-1:],
-                    )
-                )
-                try:
-                    payload = self._extract_json_object(raw)
-                    parsed = self._parse_pairwise_payload(payload)
-                    self._validate_pairwise_state(state, previous_state, parsed)
-                    decision = parsed
-                    pairwise_attempts.append({"raw": raw, "output": payload})
-                    break
-                except (TypeError, ValueError, KeyError) as error:
-                    pairwise_errors.append(str(error))
-                    pairwise_attempts.append({"raw": raw, "error": str(error)})
-            if decision is None:
-                return self._invalid_output(
-                    region_errors + pairwise_errors,
-                    region_attempts=region_attempts,
-                    pairwise_attempts=pairwise_attempts,
-                    previous_action=previous_action,
-                )
-
+        decision = _PairwiseDecision(
+            "initial", "Initial state; no candidate effect ranking was requested."
+        )
         output = self._derive_output(regional_analysis, decision)
         self._last_valid_output = output
         self.last_evidence = {
-            "type": "qwen3vl_region_pairwise_zero_shot",
-            "decision_mode": "categorical_pairwise_no_absolute_or_progress_score",
+            "type": "qwen3vl_compact_region_zero_shot",
+            "decision_mode": "compact_regions_then_programmatic_delta_effect",
             "gt_available": False,
             "verifier_valid": True,
             "localization_valid": output.localization_valid,
@@ -198,11 +189,154 @@ class Qwen3VLZeroShotVerifier:
                 for item in regional_analysis.judgments
             ],
             "region_attempts": region_attempts,
-            "pairwise_attempts": pairwise_attempts,
+            "effect_attempts": [],
+            "pairwise_attempts": [],
             "comparison": decision.comparison,
-            "validation_errors": region_errors + pairwise_errors,
+            "validation_errors": region_errors,
         }
         return output
+
+    def _verify_candidate(
+        self,
+        state: ChangeState,
+        previous_action: AgentAction | None,
+        previous_state: ChangeState,
+    ) -> VerifierOutput:
+        fingerprint = self._candidate_fingerprint(
+            state, previous_state, previous_action
+        )
+        cached = self._candidate_cache.get(fingerprint)
+        if cached is not None:
+            output, evidence = cached
+            self.last_evidence = copy.deepcopy(evidence)
+            self.last_evidence["cache_hit"] = True
+            self._last_valid_output = output if output.verifier_valid else None
+            return output
+
+        if self._states_identical(state, previous_state):
+            previous = self._last_valid_output
+            output = VerifierOutput(
+                quality_score=None,
+                progress_score=None,
+                score_delta=0.0,
+                comparison="unchanged",
+                error_type=previous.error_type if previous else "uncertain_region",
+                target_view=(
+                    previous.target_view
+                    if previous
+                    else previous_action.target_view if previous_action else "t2"
+                ),
+                error_region=previous.error_region if previous else None,
+                suggested_action=previous.suggested_action if previous else None,
+                feedback="Candidate masks are identical to the accepted state.",
+                accept=bool(previous and previous.accept),
+                verifier_valid=True,
+                localization_valid=bool(previous and previous.localization_valid),
+                stop=bool(previous and previous.stop),
+            )
+            self.last_evidence = {
+                "type": "qwen3vl_compact_delta_effect_zero_shot",
+                "decision_mode": "programmatic_identical_state",
+                "candidate_fingerprint": fingerprint,
+                "cache_hit": False,
+                "comparison": "unchanged",
+                "effect_attempts": [],
+                "validation_errors": [],
+                "gt_available": False,
+                "verifier_valid": True,
+                "localization_valid": output.localization_valid,
+            }
+            self._cache_candidate(fingerprint, output)
+            return output
+
+        proposals = list(state.evidence.get("verifier_region_proposals", []))
+        facts = dict(state.evidence.get("verifier_mask_facts", {}))
+        effect_errors: list[str] = []
+        effect_attempts: list[dict[str, Any]] = []
+        judgments: tuple[_EffectJudgment, ...] | None = None
+        uncovered = int(facts.get("candidate_delta_uncovered_pixels", 0))
+        if uncovered:
+            effect_errors.append(
+                f"candidate delta has {uncovered} pixels outside the compact proposal set"
+            )
+        elif not proposals:
+            effect_errors.append("candidate delta has no auditable proposal")
+        else:
+            for _ in range(self.max_retries):
+                raw = self._generate_messages(
+                    self.build_effect_messages(
+                        state,
+                        previous_state,
+                        previous_action,
+                        proposals,
+                        facts,
+                        effect_errors[-1:],
+                    )
+                )
+                try:
+                    payload = self._extract_json_object(raw)
+                    judgments = self._parse_effect_payload(payload, proposals)
+                    effect_attempts.append({"raw": raw, "output": payload})
+                    break
+                except (TypeError, ValueError, KeyError) as error:
+                    effect_errors.append(str(error))
+                    effect_attempts.append({"raw": raw, "error": str(error)})
+
+        if judgments is None:
+            output = self._invalid_output(
+                effect_errors,
+                region_attempts=[],
+                pairwise_attempts=[],
+                previous_action=previous_action,
+            )
+            self.last_evidence.update(
+                {
+                    "type": "qwen3vl_compact_delta_effect_zero_shot",
+                    "decision_mode": "programmatic_delta_effect",
+                    "candidate_fingerprint": fingerprint,
+                    "cache_hit": False,
+                    "effect_attempts": effect_attempts,
+                    "mask_facts": facts,
+                    "region_proposals": proposals,
+                }
+            )
+            self._cache_candidate(fingerprint, output)
+            return output
+
+        comparison = self._comparison_from_effects(judgments)
+        output = self._derive_effect_output(
+            judgments, proposals, previous_action, comparison
+        )
+        self._last_valid_output = output
+        self.last_evidence = {
+            "type": "qwen3vl_compact_delta_effect_zero_shot",
+            "decision_mode": "programmatic_delta_effect",
+            "candidate_fingerprint": fingerprint,
+            "cache_hit": False,
+            "gt_available": False,
+            "verifier_valid": True,
+            "localization_valid": output.localization_valid,
+            "mask_facts": facts,
+            "region_proposals": proposals,
+            "effect_judgments": [
+                {"region_id": item.region_id, "effect": item.effect}
+                for item in judgments
+            ],
+            "effect_attempts": effect_attempts,
+            "pairwise_attempts": [],
+            "comparison": comparison,
+            "validation_errors": effect_errors,
+        }
+        self._cache_candidate(fingerprint, output)
+        return output
+
+    def _cache_candidate(
+        self, fingerprint: str, output: VerifierOutput
+    ) -> None:
+        self._candidate_cache[fingerprint] = (
+            output,
+            copy.deepcopy(self.last_evidence),
+        )
 
     def _invalid_output(
         self,
@@ -218,8 +352,8 @@ class Qwen3VLZeroShotVerifier:
         if retained:
             messages.append(f"Previous valid feedback retained: {retained}")
         self.last_evidence = {
-            "type": "qwen3vl_region_pairwise_zero_shot",
-            "decision_mode": "categorical_pairwise_no_absolute_or_progress_score",
+            "type": "qwen3vl_compact_region_zero_shot",
+            "decision_mode": "compact_regions_then_programmatic_delta_effect",
             "region_attempts": region_attempts,
             "pairwise_attempts": pairwise_attempts,
             "validation_errors": errors,
@@ -310,18 +444,16 @@ class Qwen3VLZeroShotVerifier:
             "change is added (background T1/building T2) or disappeared (building T1/background "
             "T2). Unchanged buildings/background are not change. Predicted temporal masks are "
             "supporting predictions, not GT; verify against RGB crops. For each exact region_id, "
-            "return verdict true_change when existing white change pixels are supported, "
-            "false_positive when white change pixels are unsupported, false_negative when a "
-            "real change is missing from the current white mask, or uncertain. target_view must "
-            "be t1 or t2 for false_positive/false_negative and should be null otherwise. Return "
-            "exactly one JSON object in the preferred form {\"regions\": [<one judgment per "
-            "proposal>]}, where each item contains only region_id, verdict, target_view, and "
-            "one-sentence feedback. A keyed object using every supplied region ID as the only "
-            "top-level keys (for example {\"r0\": {<judgment>}, \"r1\": {<judgment>}}) is also "
-            "accepted. Cover every supplied "
-            "region_id exactly once. Do not output quality_score, progress_score, comparison, "
-            "region_id exactly once. Do not output quality_score, progress_score, comparison, "
-            "coordinates, accept, action, or GT claims.\n"
+            "return true_change when existing white change pixels are supported, false_positive "
+            "when existing white pixels are unsupported, false_negative only when a real change "
+            "is absent from the current white mask, or uncertain. false_negative is allowed only "
+            "when the proposal sources include temporal_difference_missing; it is forbidden for "
+            "an ordinary white change component. target_view must be t1 or "
+            "t2 for false_positive/false_negative and null otherwise. Return exactly one compact "
+            "JSON object mapping every exact region_id to [verdict,target_view], for example "
+            "{\"r0\":[\"true_change\",null],\"r1\":[\"false_positive\",\"t2\"]}. "
+            "Do not output feedback sentences, scores, comparison, coordinates, actions, GT "
+            "claims, or extra keys.\n"
             f"Exact global mask facts (authoritative, not inferred visually): "
             f"{json.dumps(facts, ensure_ascii=False)}\n"
             f"OmniOVCD matching summary (supporting evidence, not GT): "
@@ -349,68 +481,56 @@ class Qwen3VLZeroShotVerifier:
         content.append({"type": "text", "text": prompt})
         return [{"role": "user", "content": content}]
 
-    def build_pairwise_messages(
+    def build_effect_messages(
         self,
         state: ChangeState,
         previous_state: ChangeState,
         previous_action: AgentAction | None,
-        analysis: _RegionalAnalysis,
+        proposals: list[dict[str, Any]],
+        facts: dict[str, Any],
         previous_errors: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         correction = (
-            f"Your previous comparison was invalid: {previous_errors[-1]}. Correct it.\n"
+            f"Your previous effect labels were invalid: {previous_errors[-1]}. Correct them.\n"
             if previous_errors
             else ""
         )
-        summary = [
-            {
-                "region_id": item.region_id,
-                "verdict": item.verdict,
-                "target_view": item.target_view,
-                "feedback": item.feedback,
-            }
-            for item in analysis.judgments
-        ]
         prompt = (
-            "Compare only the previous accepted final change mask with the new candidate. "
-            "Decide whether the candidate is better, worse, unchanged, or uncertain based on "
-            "whether the action removes false positives or recovers false negatives without "
-            "damaging correct change regions. This is a categorical pairwise gate, not absolute "
-            "scoring. Return exactly one JSON object with only comparison ('better', 'worse', "
-            "'unchanged', or 'uncertain') and feedback (one concise sentence). Do not output any "
-            "quality/progress score, diagnosis fields, action, accept, or coordinates.\n"
-            f"Candidate regional judgments: {json.dumps(summary, ensure_ascii=False)}\n"
+            "Judge only the pixels changed by the candidate action. Each supplied delta proposal "
+            "has effect_kind added or removed and exact pixel counts. Confirm temporal building "
+            "change from the T1/T2 RGB crops; predicted masks are supporting predictions, not GT. "
+            "For an added proposal output added_supported when the newly white change pixels are "
+            "a real temporal building change, added_unsupported when they are not, or uncertain. "
+            "For a removed proposal output removed_supported when the removed pixels were a real "
+            "change that should have stayed white, removed_unsupported when the removed pixels were "
+            "false change, or uncertain. Return exactly one compact JSON object mapping every exact "
+            "region_id to one label string, for example "
+            "{\"d0\":\"added_supported\",\"d1\":\"removed_unsupported\"}. "
+            "Do not output feedback sentences, comparison, scores, actions, coordinates, or extra keys.\n"
+            f"Exact candidate delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
             f"{correction}"
         )
-        added = np.logical_and(state.change_mask, ~previous_state.change_mask)
-        removed = np.logical_and(previous_state.change_mask, ~state.change_mask)
         content: list[dict[str, Any]] = [
             {"type": "text", "text": "Fixed T1 original image:"},
             {"type": "image", "image": self._as_image(state.t1_image)},
             {"type": "text", "text": "Fixed T2 original image:"},
             {"type": "image", "image": self._as_image(state.t2_image)},
-            {"type": "text", "text": "Previous accepted T1 object mask:"},
-            {"type": "image", "image": self._mask_image(previous_state.t1_mask)},
-            {"type": "text", "text": "Previous accepted T2 object mask:"},
-            {"type": "image", "image": self._mask_image(previous_state.t2_mask)},
             {"type": "text", "text": "Previous accepted final change mask:"},
             {"type": "image", "image": self._mask_image(previous_state.change_mask)},
-            {"type": "text", "text": "Candidate T1 object mask:"},
-            {"type": "image", "image": self._mask_image(state.t1_mask)},
-            {"type": "text", "text": "Candidate T2 object mask:"},
-            {"type": "image", "image": self._mask_image(state.t2_mask)},
             {"type": "text", "text": "Candidate final change mask:"},
             {"type": "image", "image": self._mask_image(state.change_mask)},
-            {"type": "text", "text": "Candidate-added change pixels:"},
-            {"type": "image", "image": self._mask_image(added)},
-            {"type": "text", "text": "Candidate-removed change pixels:"},
-            {"type": "image", "image": self._mask_image(removed)},
         ]
-        for proposal in state.evidence.get("verifier_region_proposals", []):
+        for proposal in proposals:
             content.extend(
                 [
-                    {"type": "text", "text": f"Candidate local proposal {proposal['region_id']}:"},
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
+                            f"{json.dumps(proposal, ensure_ascii=False)}"
+                        ),
+                    },
                     {
                         "type": "image",
                         "image": self._region_panel(state, proposal, previous_state),
@@ -450,12 +570,13 @@ class Qwen3VLZeroShotVerifier:
         seen: set[str] = set()
         feedback_text: list[str] = []
         for value in values:
-            if not isinstance(value, dict) or set(value) != {
-                "region_id",
-                "verdict",
-                "target_view",
-                "feedback",
-            }:
+            required = {"region_id", "verdict", "target_view"}
+            allowed = required | {"feedback"}
+            if (
+                not isinstance(value, dict)
+                or not required.issubset(value)
+                or set(value) - allowed
+            ):
                 raise ValueError("each region judgment has unexpected or missing fields")
             region_id = value["region_id"]
             if region_id not in by_id or region_id in seen:
@@ -469,11 +590,22 @@ class Qwen3VLZeroShotVerifier:
                     raise ValueError("actionable region judgment requires target_view t1/t2")
             elif target_view is not None and target_view not in self.VIEWS:
                 raise ValueError("non-actionable region judgment has invalid target_view")
-            feedback = value["feedback"]
+            feedback = value.get("feedback")
+            if feedback is None:
+                feedback = f"{region_id} classified as {verdict}."
             if not isinstance(feedback, str) or not feedback.strip():
-                raise TypeError("region feedback must be a non-empty string")
+                raise TypeError("region feedback must be a non-empty string when supplied")
             if verdict in {"true_change", "false_positive"} and not by_id[region_id]["change_pixels"]:
                 raise ValueError(f"{verdict} requires white change pixels in the proposal")
+            if (
+                verdict == "false_negative"
+                and "temporal_difference_missing"
+                not in by_id[region_id].get("sources", [])
+            ):
+                raise ValueError(
+                    "false_negative is impossible without a mask-derived missing-change "
+                    "proposal"
+                )
             seen.add(region_id)
             feedback_text.append(feedback)
             judgments.append(
@@ -493,13 +625,12 @@ class Qwen3VLZeroShotVerifier:
     def _normalize_region_values(
         payload: dict[str, Any], expected_ids: list[str]
     ) -> list[dict[str, Any]]:
-        """Accept the canonical list form and Qwen's keyed-object form.
+        """Normalize compact output and legacy verbose forms.
 
-        The prompt asks for ``{"regions": [...]}``, but Qwen3-VL commonly
-        emits a compact object keyed by the requested region IDs, e.g.
-        ``{"r0": {...}, "r1": {...}}``.  Both forms carry the same
-        per-region schema; normalize them before applying the strict checks
-        below.  Ordering is always restored to Environment proposal order.
+        The current prompt asks for ``{"r0": [verdict, view]}``. Older saved
+        responses used either ``{"regions": [...]}`` or region-keyed objects;
+        retaining those parsers keeps replay artifacts readable. Ordering is always
+        restored to Environment proposal order.
         """
         if set(payload) == {"regions"}:
             values = payload["regions"]
@@ -508,6 +639,19 @@ class Qwen3VLZeroShotVerifier:
             return values
 
         expected = set(expected_ids)
+        if set(payload) == expected and all(
+            isinstance(payload[region_id], (list, tuple))
+            and len(payload[region_id]) == 2
+            for region_id in expected_ids
+        ):
+            return [
+                {
+                    "region_id": region_id,
+                    "verdict": payload[region_id][0],
+                    "target_view": payload[region_id][1],
+                }
+                for region_id in expected_ids
+            ]
         if set(payload) == expected and all(
             isinstance(payload[region_id], dict) for region_id in expected_ids
         ):
@@ -521,7 +665,7 @@ class Qwen3VLZeroShotVerifier:
             return values
 
         raise ValueError(
-            "region response must use {regions: [...]} or a complete region-id keyed object"
+            "region response must use compact region pairs or a complete legacy form"
         )
 
     @staticmethod
@@ -580,30 +724,141 @@ class Qwen3VLZeroShotVerifier:
             judgments, error_type, target_view, region, f"{facts} {detail}"
         )
 
-    def _parse_pairwise_payload(self, payload: dict[str, Any]) -> _PairwiseDecision:
-        if set(payload) != {"comparison", "feedback"}:
-            raise ValueError("pairwise response must contain only comparison and feedback")
-        comparison = payload["comparison"]
-        if comparison not in self.COMPARISONS:
-            raise ValueError("unsupported pairwise comparison")
-        feedback = payload["feedback"]
-        if not isinstance(feedback, str) or not feedback.strip():
-            raise TypeError("pairwise feedback must be a non-empty string")
-        return _PairwiseDecision(comparison, feedback.strip())
+    def _parse_effect_payload(
+        self, payload: dict[str, Any], proposals: list[dict[str, Any]]
+    ) -> tuple[_EffectJudgment, ...]:
+        expected = [item["region_id"] for item in proposals]
+        if set(payload) != set(expected):
+            raise ValueError("effect response must cover every delta region exactly once")
+        by_id = {item["region_id"]: item for item in proposals}
+        result: list[_EffectJudgment] = []
+        for region_id in expected:
+            effect = payload[region_id]
+            if not isinstance(effect, str) or effect not in self.EFFECT_LABELS:
+                raise ValueError("unsupported candidate effect label")
+            effect_kind = by_id[region_id].get("effect_kind")
+            if effect_kind == "added" and effect.startswith("removed_"):
+                raise ValueError("added delta region cannot receive a removed effect label")
+            if effect_kind == "removed" and effect.startswith("added_"):
+                raise ValueError("removed delta region cannot receive an added effect label")
+            result.append(_EffectJudgment(region_id, effect))
+        return tuple(result)
 
     @staticmethod
-    def _validate_pairwise_state(
-        state: ChangeState,
-        previous_state: ChangeState,
-        decision: _PairwiseDecision,
-    ) -> None:
-        identical = (
+    def _comparison_from_effects(
+        judgments: tuple[_EffectJudgment, ...]
+    ) -> str:
+        beneficial = {"added_supported", "removed_unsupported"}
+        harmful = {"added_unsupported", "removed_supported"}
+        labels = {item.effect for item in judgments}
+        if labels & harmful:
+            return "worse"
+        if "uncertain" in labels or not labels:
+            return "uncertain"
+        if labels <= beneficial:
+            return "better"
+        return "uncertain"
+
+    @staticmethod
+    def _derive_effect_output(
+        judgments: tuple[_EffectJudgment, ...],
+        proposals: list[dict[str, Any]],
+        previous_action: AgentAction | None,
+        comparison: str,
+    ) -> VerifierOutput:
+        by_id = {item["region_id"]: item for item in proposals}
+        target_view = previous_action.target_view if previous_action else "t2"
+        if comparison == "better":
+            return VerifierOutput(
+                quality_score=None,
+                progress_score=None,
+                score_delta=0.0,
+                comparison="better",
+                error_type="none",
+                target_view=target_view,
+                error_region=None,
+                suggested_action="finish",
+                feedback=(
+                    "All inspected candidate delta components have beneficial effect labels; "
+                    "the comparison was derived by the runtime."
+                ),
+                accept=True,
+                verifier_valid=True,
+                localization_valid=True,
+                stop=True,
+            )
+
+        selected = next(
+            (
+                item
+                for item in judgments
+                if item.effect in {"added_unsupported", "removed_supported"}
+            ),
+            judgments[0],
+        )
+        region = tuple(by_id[selected.region_id]["box_normalized"])
+        if selected.effect == "added_unsupported":
+            error_type = "false_positive_change"
+            suggested_action = "negative_point"
+        elif selected.effect == "removed_supported":
+            error_type = "false_negative"
+            suggested_action = "positive_point"
+        else:
+            error_type = "uncertain_region"
+            suggested_action = "box"
+        return VerifierOutput(
+            quality_score=None,
+            progress_score=None,
+            score_delta=0.0,
+            comparison=comparison,
+            error_type=error_type,
+            target_view=target_view,
+            error_region=region,
+            suggested_action=suggested_action,
+            feedback=(
+                f"Runtime-derived candidate comparison={comparison}; "
+                f"{selected.region_id} effect={selected.effect}."
+            ),
+            accept=False,
+            verifier_valid=True,
+            localization_valid=True,
+            stop=False,
+        )
+
+    @staticmethod
+    def _states_identical(state: ChangeState, previous_state: ChangeState) -> bool:
+        return (
             np.array_equal(state.t1_mask, previous_state.t1_mask)
             and np.array_equal(state.t2_mask, previous_state.t2_mask)
             and np.array_equal(state.change_mask, previous_state.change_mask)
         )
-        if identical and decision.comparison != "unchanged":
-            raise ValueError("identical previous/candidate masks require comparison=unchanged")
+
+    @staticmethod
+    def _candidate_fingerprint(
+        state: ChangeState,
+        previous_state: ChangeState,
+        previous_action: AgentAction | None,
+    ) -> str:
+        digest = hashlib.sha256()
+        for array in (
+            previous_state.t1_mask,
+            previous_state.t2_mask,
+            previous_state.change_mask,
+            state.t1_mask,
+            state.t2_mask,
+            state.change_mask,
+        ):
+            value = np.ascontiguousarray(array, dtype=np.uint8)
+            digest.update(str(value.shape).encode("ascii"))
+            digest.update(value.tobytes())
+        digest.update(
+            json.dumps(
+                previous_action.to_dict() if previous_action else None,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        return digest.hexdigest()
 
     @staticmethod
     def _claims_empty(text: str) -> bool:

@@ -38,6 +38,7 @@ class AuditRuntimeTest(unittest.TestCase):
         metadata = default_run_metadata()
         self.assertIsNotNone(metadata["git_commit"])
         self.assertIsInstance(metadata["git_dirty"], bool)
+        self.assertRegex(metadata["git_worktree_sha256"], r"^[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

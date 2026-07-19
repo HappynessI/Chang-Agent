@@ -232,9 +232,41 @@ class EnvironmentTest(unittest.TestCase):
         self.environment.reset(self.image1, self.image2, "building")
         raw = '{"target_view":"t1","action":"positive_point","coordinate":[100,200]}'
         self.environment.step(raw)
-        self.environment.step(raw)
+        self.environment.step(
+            '{"target_view":"t1","action":"positive_point","coordinate":[240,240]}'
+        )
         warning = self.environment.trajectory.entries[2].execution["coordinate_warning"]
         self.assertIn("not auto-corrected to pixels", warning)
+
+    def test_exact_rejected_action_cannot_repeat_on_same_live_state(self):
+        initial_feedback = VerifierOutput(
+            comparison="initial",
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="positive_point",
+            feedback="Initial feedback.",
+        )
+        rejected_feedback = VerifierOutput(
+            comparison="worse",
+            error_type="false_positive_change",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="negative_point",
+            feedback="Candidate is worse.",
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(Point(), self.box),
+            SequenceVerifier([initial_feedback, rejected_feedback]),
+            max_steps=3,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        action = AgentAction("t2", "positive_point", coordinate=(0, 0))
+        environment.step(action)
+
+        with self.assertRaisesRegex(ActionValidationError, "exactly repeats"):
+            environment.step(action)
 
     def test_initial_selection_policy_keeps_initial_state(self):
         environment = ChangeAgentEnvironment(

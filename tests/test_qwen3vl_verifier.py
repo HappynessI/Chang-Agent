@@ -46,17 +46,14 @@ def make_state(end=8):
 
 
 def region_payload(state, verdict="true_change", feedback="The white region is supported."):
+    del feedback
     proposals = state.evidence["verifier_region_proposals"]
     return {
-        "regions": [
-            {
-                "region_id": item["region_id"],
-                "verdict": verdict,
-                "target_view": "t2" if verdict in {"false_positive", "false_negative"} else None,
-                "feedback": feedback,
-            }
-            for item in proposals
+        item["region_id"]: [
+            verdict,
+            "t2" if verdict in {"false_positive", "false_negative"} else None,
         ]
+        for item in proposals
     }
 
 
@@ -96,7 +93,7 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("white pixels", output.feedback)
         self.assertEqual(
             verifier.last_evidence["decision_mode"],
-            "categorical_pairwise_no_absolute_or_progress_score",
+            "compact_regions_then_programmatic_delta_effect",
         )
 
     def test_false_positive_uses_environment_box_instead_of_model_localization(self):
@@ -133,15 +130,15 @@ class QwenVerifierTest(unittest.TestCase):
                 '```json {"r0": {"verdict": "true_change"}'
             )
 
-    def test_candidate_pairwise_request_outputs_only_categorical_comparison(self):
+    def test_candidate_effect_labels_programmatically_derive_comparison(self):
         previous = make_state(7)
         state = make_state(8)
         attach_verifier_regions(state, previous)
         processor = FakeProcessor(
-            [
-                region_payload(state),
-                {"comparison": "better", "feedback": "The added edge completes the building."},
-            ]
+            {
+                item["region_id"]: "added_supported"
+                for item in state.evidence["verifier_region_proposals"]
+            }
         )
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
 
@@ -155,34 +152,108 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.comparison, "better")
         self.assertIsNone(output.quality_score)
         self.assertIsNone(output.progress_score)
-        pairwise_text = " ".join(
+        effect_text = " ".join(
             item["text"]
-            for item in processor.messages_history[1][0]["content"]
+            for item in processor.messages_history[0][0]["content"]
             if item["type"] == "text"
         )
-        self.assertIn("categorical pairwise gate", pairwise_text)
-        self.assertIn("Do not output any quality/progress score", pairwise_text)
-        self.assertIn("Previous accepted T1 object mask:", pairwise_text)
-        self.assertIn("Candidate T2 object mask:", pairwise_text)
-        pairwise_panels = [
+        self.assertIn("Judge only the pixels changed", effect_text)
+        self.assertIn("Do not output feedback sentences", effect_text)
+        effect_panels = [
             item["image"]
-            for item in processor.messages_history[1][0]["content"]
+            for item in processor.messages_history[0][0]["content"]
             if item["type"] == "image" and item["image"].size == (384, 384)
         ]
-        self.assertTrue(pairwise_panels)
-        panel = np.asarray(pairwise_panels[-1])
+        self.assertTrue(effect_panels)
+        panel = np.asarray(effect_panels[-1])
         self.assertTrue(np.any(panel[..., 0] > 0))
         self.assertTrue(np.any(panel[..., 1] > 0))
         self.assertTrue(np.any(panel[..., 2] > 0))
+
+    def test_unsupported_added_delta_is_programmatically_worse(self):
+        previous = make_state(7)
+        state = make_state(8)
+        attach_verifier_regions(state, previous)
+        payload = {
+            item["region_id"]: "added_unsupported"
+            for item in state.evidence["verifier_region_proposals"]
+        }
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=FakeProcessor(payload)
+        )
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "positive_point", coordinate=(7, 7)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "worse")
+        self.assertEqual(output.error_type, "false_positive_change")
+        self.assertEqual(output.suggested_action, "negative_point")
+
+    def test_identical_candidate_fingerprint_reuses_cached_effect_decision(self):
+        previous = make_state(7)
+        state = make_state(8)
+        attach_verifier_regions(state, previous)
+        payload = {
+            item["region_id"]: "added_unsupported"
+            for item in state.evidence["verifier_region_proposals"]
+        }
+        processor = FakeProcessor(payload)
+        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+        action = AgentAction("t2", "positive_point", coordinate=(7, 7))
+
+        first = verifier.verify(state, None, action, previous)
+        second = verifier.verify(state, None, action, previous)
+
+        self.assertEqual(first, second)
+        self.assertEqual(processor.call_count, 1)
+        self.assertTrue(verifier.last_evidence["cache_hit"])
+
+    def test_white_candidate_region_cannot_be_false_negative(self):
+        state = make_state()
+        attach_verifier_regions(state)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(region_payload(state, "false_negative")),
+            max_retries=1,
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "false_negative is impossible",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
+
+    def test_false_negative_requires_a_mask_derived_missing_proposal(self):
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        t1 = np.zeros((16, 16), dtype=bool)
+        t2 = np.zeros_like(t1)
+        t2[4:8, 4:8] = True
+        state = ChangeState(image, image, "building", t1, t2, np.zeros_like(t1))
+        attach_verifier_regions(state)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(region_payload(state, "false_negative")),
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_type, "false_negative")
 
     def test_nonempty_mask_claimed_empty_is_rejected_and_retried(self):
         state = make_state()
         attach_verifier_regions(state)
         processor = FakeProcessor(
             [
-                region_payload(
+                keyed_region_payload(
                     state,
-                    "false_negative",
+                    "true_change",
                     "The current change mask is empty and misses a building.",
                 ),
                 region_payload(state),
@@ -195,6 +266,7 @@ class QwenVerifierTest(unittest.TestCase):
         output = verifier.verify(state, None, None)
 
         self.assertTrue(output.verifier_valid)
+        self.assertEqual(processor.call_count, 2)
         self.assertEqual(processor.call_count, 2)
         self.assertIn(
             "not empty",
@@ -243,13 +315,7 @@ class QwenVerifierTest(unittest.TestCase):
         previous = make_state()
         state = previous.clone()
         attach_verifier_regions(state, previous)
-        processor = FakeProcessor(
-            [
-                region_payload(state),
-                {"comparison": "better", "feedback": "It is better."},
-                {"comparison": "unchanged", "feedback": "The masks are identical."},
-            ]
-        )
+        processor = FakeProcessor(region_payload(state))
         verifier = Qwen3VLZeroShotVerifier(
             model=FakeModel(), processor=processor, max_retries=2
         )
@@ -258,16 +324,15 @@ class QwenVerifierTest(unittest.TestCase):
 
         self.assertTrue(output.verifier_valid)
         self.assertEqual(output.comparison, "unchanged")
-        self.assertIn(
-            "identical",
-            " ".join(verifier.last_evidence["validation_errors"]),
-        )
+        self.assertEqual(verifier.last_evidence["decision_mode"], "programmatic_identical_state")
+        self.assertEqual(processor.call_count, 0)
 
     def test_unknown_region_id_is_invalid_and_cannot_authorize_finish(self):
         state = make_state()
         attach_verifier_regions(state)
         bad = region_payload(state)
-        bad["regions"][0]["region_id"] = "invented"
+        value = bad.pop(next(iter(bad)))
+        bad["invented"] = value
         verifier = Qwen3VLZeroShotVerifier(
             model=FakeModel(), processor=FakeProcessor(bad), max_retries=1
         )

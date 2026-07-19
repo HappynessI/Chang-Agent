@@ -25,8 +25,9 @@ The current code implements the v0–v3 research skeleton:
 - SimpleClick point and SAM3 box boundaries;
 - per-step instance extraction, default OmniOVCD overlap-presence matching, optional
   one-to-one greedy ablation, and change-mask reconstruction;
-- a region-grounded, categorical pairwise Qwen3-VL zero-shot Verifier that shares the
-  Agent model weights, plus a transparent rule Verifier ablation and a legacy trainable
+- a region-grounded Qwen3-VL zero-shot Verifier with compact initial labels and
+  programmatic candidate-delta comparison that shares the Agent model weights, plus a
+  transparent rule Verifier ablation and a legacy trainable
   frozen-feature Verifier head for offline quality/error-map/error-type experiments;
 - offline GT perturbations for Verifier supervision;
 - feedback-driven iteration, finish rejection, complete trajectory artifacts, and
@@ -61,30 +62,32 @@ separately validated latent/tool-ranking objective.
 
 ## Verifier feedback boundary
 
-- Before every verification, the Environment builds at most six auditable proposals
-  from current change-mask components, T1/T2 object-mask XOR components, and candidate
-  added/removed delta components. It records exact global and per-region pixel counts.
+- Initial verification uses at most six auditable proposals from current change-mask
+  components and T1/T2 object-mask XOR components. Candidate verification inspects only
+  the actual added/removed delta, caps it at two polarity-preserving aggregate panels, and
+  rejects a candidate when changed pixels fall outside that compact proposal set.
 - Qwen retains the five labeled full-image inputs, then receives an upscaled four-panel
   crop for every proposal: T1, T2, binary change, and color-coded T1/T2/change masks.
-  It classifies each exact `region_id` as `true_change`, `false_positive`,
-  `false_negative`, or `uncertain`; it cannot invent a localization box.
+  Initial responses map each exact `region_id` to the compact pair
+  `[verdict,target_view]`; per-region natural-language feedback is not requested.
 - Exact mask facts are authoritative. If `change_pixels>0`, a response claiming that
   the current mask is empty is rejected and retried. Even a one-pixel component is kept
   as a proposal and upscaled so white foreground cannot silently disappear visually.
-- The parser accepts both the preferred `{"regions": [...]}` response and the keyed
-  object form Qwen3-VL often emits (`{"r0": {...}, "r1": {...}}`), restoring
-  Environment proposal order and tolerating a harmless `target_view` on non-actionable
-  `true_change`/`uncertain` judgments.
-- For a post-action candidate, a second request outputs only categorical `better`,
-  `worse`, `unchanged`, or `uncertain` plus one sentence. Qwen does not predict
-  `quality_score` or continuous `progress_score`; those serialized fields are `null`.
+- An ordinary white change component cannot be labeled `false_negative`; that initial
+  label requires a `temporal_difference_missing` source. Candidate delta responses map
+  each `dN` directly to `added_supported`, `added_unsupported`, `removed_supported`,
+  `removed_unsupported`, or `uncertain`.
+- Qwen no longer outputs candidate `better/worse`. The runtime derives it
+  deterministically: supported additions and unsupported removals are beneficial;
+  unsupported additions and supported removals are harmful; uncertainty is rejected.
+  `quality_score` and `progress_score` remain `null`.
 - `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
   from region judgments and Environment boxes. False positives map to a negative point,
   false negatives to a positive point, mixed/uncertain results to a box, and fully
   supported proposals to finish. Invalid analysis cannot authorize an action or stop.
 - A valid, error-free initial state may finish without a redundant tool action. The
   saved-candidate replay challenge in `tools/replay_verifier_challenge.py` evaluates
-  pairwise decisions without exposing GT to the Verifier; GT is read only afterward to
+  delta-effect decisions without exposing GT to the Verifier; GT is read only afterward to
   score the decision.
 
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
@@ -95,6 +98,8 @@ absolute mask-area jump stays within the configured limit. Rejected candidates
 remain auditable in the trajectory, while the next Agent step resumes from the previous
 accepted state. If model action retries are exhausted, the episode stops without
 executing a synthetic SAM3 box action.
+Candidate decisions are cached by the SHA256 of previous masks, candidate masks, and
+action. An exact action rejected on an unchanged live state cannot execute again.
 
 The Agent prompt injects only the JSON example for the Verifier's current suggested
 action, keeping the Qwen3-VL-2B instruction short. Point examples always include
@@ -113,7 +118,7 @@ for a missing or malformed `coordinate`/`box` field.
 - Every tool result records target-mask XOR statistics: action ROI, changed and
   outside-ROI pixels, outside-ROI ratio, target-mask change ratio, largest changed
   component, and before/after component counts.
-- Candidate acceptance rejects non-`better` pairwise decisions, excessive outside-ROI
+- Candidate acceptance rejects non-`better` runtime-derived decisions, excessive outside-ROI
   changes, excessive target-mask changes, excessive component-count jumps, and excessive
   change-mask area jumps. Thresholds and categorical decisions are trajectory fields.
 - Actionable `error_region` always comes from the bounded Environment proposal set.
@@ -129,8 +134,9 @@ Each sample writes `episode_summary.json` with its stop reason, loop count,
 accepted/rejected candidates, tool count, invalid action attempts, elapsed time, and
 selected steps. Every invalid action attempt records loop/attempt indices, raw output,
 validation error, prompt SHA-256, and timestamp. Trajectory metadata resolves Git from
-the repository path and records commit plus dirty state. The run manifest records Python,
-platform, parent-process seeds, model metadata checksums, and deterministic-policy state.
+the repository path and records commit, dirty state, and a SHA256 fingerprint of tracked
+diffs plus untracked file contents. The run manifest records the same source fingerprint,
+Python, platform, parent-process seeds, model metadata checksums, and deterministic policy.
 Isolated segmentation workers are launched through `seeded_segmentation_worker.py`,
 which seeds Python, NumPy, and PyTorch before model construction and appends that seed
 record to each worker report.

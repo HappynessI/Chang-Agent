@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -175,6 +176,7 @@ def default_run_metadata() -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
         "git_dirty": _git_dirty(),
+        "git_worktree_sha256": _git_worktree_sha256(),
         "python": sys.version.split()[0],
         "platform": platform.platform(),
     }
@@ -187,6 +189,34 @@ def _git_commit() -> str | None:
 def _git_dirty() -> bool | None:
     status = _git_output(["status", "--short"])
     return bool(status) if status is not None else None
+
+
+def _git_worktree_sha256() -> str | None:
+    """Fingerprint tracked diffs and untracked file contents without storing them."""
+
+    root = Path(__file__).resolve().parents[1]
+    try:
+        diff = subprocess.run(
+            ["git", "-C", str(root), "diff", "--binary", "HEAD", "--", "."],
+            check=True,
+            capture_output=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
+            check=True,
+            capture_output=True,
+        ).stdout.split(b"\0")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    digest = hashlib.sha256(diff)
+    for raw_path in sorted(item for item in untracked if item):
+        path = root / raw_path.decode("utf-8", errors="surrogateescape")
+        digest.update(b"\0untracked\0")
+        digest.update(raw_path)
+        if path.is_file():
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _git_output(arguments: list[str]) -> str | None:

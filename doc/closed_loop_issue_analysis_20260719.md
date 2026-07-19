@@ -413,3 +413,28 @@ live mask，但当时仍存在两个底层问题：每次 point 都新建 `Click
 local clicked-component composition 与 locality gate 继续保留为最终安全边界。CPU
 回归覆盖 initial mask 的实际逐次传递、点击顺序重放、reject 不提交、T1/T2 会话隔离
 以及 accepted box 重置会话；真实模型效果仍需下一轮固定样本 GPU 闭环确认。
+
+## 11. 2026-07-19 Delta-effect Verifier 与重复候选修复
+
+对 `outputs/change_agent_levir_gpu_closed_loop_20260719_173613` 的复盘确认：
+`test_20_15` 的 149 个 candidate-added 白色像素被错误标成 false negative，
+`test_78_13` 的逐像素相同候选先后得到 worse/invalid/better，而 verbose 六区域 JSON
+仍可能在后部截断。本轮据此完成以下结构性修改：
+
+1. 初始区域输出压缩为 `region_id -> [verdict,target_view]`，不再要求每区域自然语言；
+   普通白色 change component 不允许标成 false negative，该标签必须来自
+   `temporal_difference_missing` proposal。
+2. 候选阶段只展示本次 candidate delta：新增像素聚合成一个 panel、删除像素聚合成
+   一个 panel。Qwen 只输出 added/removed supported/unsupported/uncertain 效果标签。
+3. `better/worse/uncertain` 完全由程序从效果标签推导，删除第二次 Qwen pairwise 自由
+   判断；任何 harmful 标签即 worse，任何 uncertain 即 uncertain，全部 beneficial 才
+   能 better。
+4. Verifier 按 previous masks、candidate masks 和 action 的 SHA256 缓存候选裁决；
+   Environment 同时禁止在未变化 live state 上再次执行完全相同的已拒绝动作。
+5. replay challenge 按线上局部 point/box composition 重建 temporal candidate mask；
+   Verifier 默认输出预算降为 256。Git 审计新增 tracked diff 与 untracked contents 的
+   `git_worktree_sha256`，避免再次只留下 `commit + dirty=true`。
+
+CPU 全量回归通过；没有在未重新确认迁移后 GPU 配额与通知策略的情况下启动 GPU
+任务。下一步应先 replay 上述 9 个存档候选，再跑固定三样本闭环，重点检查
+`test_85_16` 的 T1-empty 语义是否仍被模型误解。

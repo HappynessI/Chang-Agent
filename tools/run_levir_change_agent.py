@@ -30,6 +30,7 @@ from change_agent.adapters.subprocess_adapters import (
 from change_agent.environment import ChangeAgentEnvironment
 from change_agent.executor import ActionExecutor
 from change_agent.state import AgentObservation
+from change_agent.trajectory import default_run_metadata
 from change_agent.verifier import RuleBasedVerifier
 
 
@@ -69,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--verifier", choices=("qwen_zero_shot", "rule"), default="qwen_zero_shot"
     )
-    parser.add_argument("--verifier-max-new-tokens", type=int, default=512)
+    parser.add_argument("--verifier-max-new-tokens", type=int, default=256)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument("--verifier-retries", type=int, default=2)
     parser.add_argument("--device-map", default="auto")
@@ -176,11 +177,12 @@ def main() -> None:
                 "agent": "Qwen3-VL-2B-Instruct",
                 "verifier": args.verifier,
                 "verifier_decision_mode": (
-                    "region_classification_then_categorical_pairwise"
+                    "compact_initial_regions_then_programmatic_delta_effect"
                     if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
+                "verifier_max_delta_regions": min(args.verifier_max_regions, 2),
                 "verifier_min_region_area": args.verifier_min_region_area,
                 "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
                 "coordinate_protocol": "public normalized_0_1000; environment pixel_xy",
@@ -461,6 +463,7 @@ def _validate_inputs(args: argparse.Namespace) -> None:
 def _base_manifest(
     args: argparse.Namespace, seed_runtime: dict[str, Any]
 ) -> dict[str, Any]:
+    source = default_run_metadata()
     return {
         "status": "running",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -475,11 +478,12 @@ def _base_manifest(
         "verifier": args.verifier,
         "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
         "verifier_decision_mode": (
-            "region_classification_then_categorical_pairwise"
+            "compact_initial_regions_then_programmatic_delta_effect"
             if args.verifier == "qwen_zero_shot"
             else "legacy_rule_score"
         ),
         "verifier_max_regions": args.verifier_max_regions,
+        "verifier_max_delta_regions": min(args.verifier_max_regions, 2),
         "verifier_min_region_area": args.verifier_min_region_area,
         "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
         "coordinate_protocol": "Agent/Verifier normalized_0_1000; Environment pixel_xy",
@@ -500,6 +504,9 @@ def _base_manifest(
         "python": sys.version,
         "platform": platform.platform(),
         "model_identity": _model_identity(Path(args.model_path)),
+        "git_commit": source["git_commit"],
+        "git_dirty": source["git_dirty"],
+        "git_worktree_sha256": source["git_worktree_sha256"],
         "gt_policy": "label_cvt is opened only by evaluate_after_rollout after rollout_complete.json",
     }
 

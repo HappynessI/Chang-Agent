@@ -1,5 +1,39 @@
 # Development log
 
+## 2026-07-19 — compact delta-effect verifier and duplicate-candidate safety
+
+The `change_agent_levir_gpu_closed_loop_20260719_173613` audit exposed three
+structural failures: a white `candidate_added` component could be called a false
+negative, identical candidates received inconsistent pairwise labels, and six verbose
+region feedback sentences could exceed the Qwen3-VL-2B output budget.
+
+- Initial region output is now compact: each fixed `rN` maps to
+  `[verdict,target_view]`. Per-region prose is no longer requested. An ordinary white
+  component cannot be labeled `false_negative`; that label requires a
+  `temporal_difference_missing` proposal.
+- Candidate verification no longer repeats the initial six-region analysis or asks Qwen
+  to emit `better/worse`. The Environment supplies at most two actual delta panels—one
+  aggregating additions and one aggregating removals—preserves polarity, and asks only for `added_supported`,
+  `added_unsupported`, `removed_supported`, `removed_unsupported`, or `uncertain`.
+- The runtime derives comparison deterministically. Any harmful effect makes the
+  candidate worse, any uncertainty remains uncertain, and every inspected effect must
+  be beneficial before the candidate can be better. A delta with uninspected pixels is
+  invalid and therefore rejected.
+- Candidate decisions are cached by a SHA256 over previous masks, candidate masks, and
+  action. The Environment separately fingerprints actions and refuses an exact action
+  that was already rejected on the same live state.
+- Saved-candidate replay now reconstructs local point/box composition rather than using
+  a worker's raw full-image mask as the temporal candidate mask.
+- Verifier output budget defaults to 256 tokens. Trajectory and run-manifest source
+  metadata now includes `git_worktree_sha256`, covering tracked diffs and untracked file
+  contents without persisting the diff itself.
+
+CPU regressions cover compact initial labels, impossible white false negatives,
+programmatic beneficial/harmful comparisons, candidate cache hits, delta polarity and
+coverage, repeated-action rejection, and worktree fingerprinting. No GPU rollout was
+started as part of this implementation; current behavior still requires a saved-candidate
+replay followed by the fixed three-sample closed loop.
+
 ## 2026-07-19 — replay challenge, safe initial finish, and pairwise delta crops
 
 - Added `tools/replay_verifier_challenge.py`, which replays the saved tool candidates
