@@ -7,9 +7,11 @@ from tools.run_levir_change_agent import _execute_action_with_retries
 class InvalidAgent:
     def __init__(self):
         self.validation_errors = []
+        self.previous_raws = []
 
-    def generate_raw(self, observation, validation_error=None):
+    def generate_raw(self, observation, validation_error=None, previous_raw=None):
         self.validation_errors.append(validation_error)
+        self.previous_raws.append(previous_raw)
         return '{"target_view":"t2","action":"finish"}'
 
 
@@ -39,6 +41,10 @@ class RunnerActionProtocolTest(unittest.TestCase):
         self.assertEqual(agent.validation_errors[1:], [
             "finish is not authorized",
             "finish is not authorized",
+        ])
+        self.assertEqual(agent.previous_raws[1:], [
+            '{"target_view":"t2","action":"finish"}',
+            '{"target_view":"t2","action":"finish"}',
         ])
         self.assertTrue(all('"action":"finish"' in raw for raw in environment.calls))
 

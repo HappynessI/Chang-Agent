@@ -54,9 +54,12 @@ class GroundingModelQwen3VL:
         self.processor = processor
 
     def build_messages(
-        self, observation: AgentObservation, validation_error: str | None = None
+        self,
+        observation: AgentObservation,
+        validation_error: str | None = None,
+        previous_raw: str | None = None,
     ) -> list[dict[str, Any]]:
-        prompt = self._instruction(observation, validation_error)
+        prompt = self._instruction(observation, validation_error, previous_raw)
         return [
             {
                 "role": "user",
@@ -73,9 +76,12 @@ class GroundingModelQwen3VL:
         ]
 
     def generate_raw(
-        self, observation: AgentObservation, validation_error: str | None = None
+        self,
+        observation: AgentObservation,
+        validation_error: str | None = None,
+        previous_raw: str | None = None,
     ) -> str:
-        messages = self.build_messages(observation, validation_error)
+        messages = self.build_messages(observation, validation_error, previous_raw)
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -115,7 +121,9 @@ class GroundingModelQwen3VL:
 
     @staticmethod
     def _instruction(
-        observation: AgentObservation, validation_error: str | None = None
+        observation: AgentObservation,
+        validation_error: str | None = None,
+        previous_raw: str | None = None,
     ) -> str:
         feedback = observation.feedback.to_dict() if observation.feedback else None
         history = observation.history_summary or "none"
@@ -135,10 +143,11 @@ class GroundingModelQwen3VL:
             else "No segmentation tool action has run yet. Finish is forbidden: choose a "
             "positive_point, negative_point, or box action now."
         )
-        correction = (
-            f"Your previous action was rejected: {validation_error}. Return a corrected action.\n"
-            if validation_error
-            else ""
+        correction = GroundingModelQwen3VL._retry_instruction(
+            validation_error, previous_raw
+        )
+        format_example = GroundingModelQwen3VL._recommended_action_example(
+            observation, finish_allowed=has_tool_action and not verifier_invalid
         )
         return (
             "You refine a change-detection result. The three inputs above are explicitly "
@@ -148,12 +157,120 @@ class GroundingModelQwen3VL:
             "256x256 image, pixel center (128,128) is approximately (502,502). Return exactly one "
             "JSON object with target_view ('t1' or 't2') and action "
             "('positive_point', 'negative_point', 'box', or 'finish'). The coordinate protocol "
-            "is system-defined: do not output coordinate-frame or other configuration fields. "
-            "Point actions require coordinate:[x,y]; box actions require box:[x1,y1,x2,y2]; "
-            "finish requires neither.\n"
+            "is system-defined. Never output coordinate_frame or other configuration fields. "
+            "Return one JSON object and no explanation.\n"
             f"{correction}"
+            f"{format_example}"
             f"{finish_rule}\n"
             f"Query: {observation.query}\n"
             f"Verifier feedback: {json.dumps(feedback, ensure_ascii=False)}\n"
             f"History summary: {history}"
         )
+
+    @staticmethod
+    def _recommended_action_example(
+        observation: AgentObservation, *, finish_allowed: bool
+    ) -> str:
+        feedback = observation.feedback
+        if feedback is None or not feedback.verifier_valid:
+            return (
+                "Mandatory syntax: point actions require coordinate:[x,y]; box requires "
+                "box:[x1,y1,x2,y2]; finish contains neither coordinate nor box.\n"
+            )
+        action = feedback.suggested_action
+        target_view = feedback.target_view
+        if action in {"positive_point", "negative_point"}:
+            example = json.dumps(
+                {
+                    "target_view": target_view,
+                    "action": action,
+                    "coordinate": [620, 410],
+                },
+                separators=(",", ":"),
+            )
+            return (
+                "The Verifier recommends a point action. Your output must follow this "
+                f"structure:\n{example}\nThe numbers are an example only. Choose the actual "
+                "[x,y] from the image and error_region. Never omit coordinate.\n"
+            )
+        if action == "box":
+            example = json.dumps(
+                {
+                    "target_view": target_view,
+                    "action": "box",
+                    "box": [120, 180, 760, 820],
+                },
+                separators=(",", ":"),
+            )
+            return (
+                "The Verifier recommends a box action. Your output must follow this "
+                f"structure:\n{example}\nChoose the actual box from the visual evidence and "
+                "error_region. Never omit box.\n"
+            )
+        if action == "finish" and finish_allowed:
+            example = json.dumps(
+                {"target_view": target_view, "action": "finish"},
+                separators=(",", ":"),
+            )
+            return (
+                "The Verifier recommends finish. Your output must follow this structure:\n"
+                f"{example}\nFinish must contain neither coordinate nor box.\n"
+            )
+        return (
+            "A tool action is required now. Point actions must contain coordinate:[x,y]; "
+            "box must contain box:[x1,y1,x2,y2]. Never omit the required parameter.\n"
+        )
+
+    @staticmethod
+    def _retry_instruction(
+        validation_error: str | None, previous_raw: str | None
+    ) -> str:
+        if not validation_error:
+            return ""
+        payload = GroundingModelQwen3VL._extract_json_payload(previous_raw)
+        target_view = payload.get("target_view")
+        action = payload.get("action")
+        if target_view in {"t1", "t2"} and action in {
+            "positive_point",
+            "negative_point",
+        } and "coordinate" in validation_error:
+            reason = (
+                "omitted coordinate"
+                if "coordinate" not in payload
+                else "used an invalid coordinate"
+            )
+            return (
+                f"Your previous point action {reason}. Return exactly:\n"
+                f'{{"target_view":"{target_view}","action":"{action}",'
+                '"coordinate":[x,y]}\n'
+                "Replace x and y with numeric values in [0,1000]. Never omit coordinate.\n"
+            )
+        if target_view in {"t1", "t2"} and action == "box" and "box" in validation_error:
+            reason = "omitted box" if "box" not in payload else "used an invalid box"
+            return (
+                f"Your previous box action {reason}. Return exactly:\n"
+                f'{{"target_view":"{target_view}","action":"box",'
+                '"box":[x1,y1,x2,y2]}\n'
+                "Replace x1,y1,x2,y2 with ordered numeric values in [0,1000]. "
+                "Never omit box.\n"
+            )
+        return (
+            f"Your previous action was rejected: {validation_error}. Return one corrected "
+            "JSON object with every mandatory field and no explanation.\n"
+        )
+
+    @staticmethod
+    def _extract_json_payload(raw: str | None) -> dict[str, Any]:
+        if not raw:
+            return {}
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(raw):
+            if character != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(raw[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        return {}

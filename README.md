@@ -60,14 +60,20 @@ separately validated latent/tool-ranking objective.
 
 ## Verifier feedback boundary
 
-- Qwen's Verifier response is diagnostic only: it supplies quality, error type,
-  target view, optional error region, and text feedback.
-- The Verifier receives five explicitly labeled visual inputs: T1/T2 original images,
-  predicted T1/T2 object masks, and the current change mask. The predicted object masks
-  are model outputs rather than GT; the change mask is interpreted together with the
-  OmniOVCD matching summary.
-- When an actionable diagnosis omits `error_region`, the runtime sends a separate
-  localization request. If localization still fails, the result is marked with
+- Qwen's first Verifier response contains only absolute `quality_score`, independent
+  pairwise `progress_score`, error type, and concise feedback. `progress_score` is in
+  `[-1,1]`: positive means the candidate improved over the previous valid state,
+  negative means it regressed, and zero means no material change. Initial verification
+  has no comparison state and must return zero progress.
+- T1/T2 originals are fixed inputs. Candidate verification additionally receives the
+  previous valid T1/T2/change masks, candidate T1/T2/change masks, and the normalized
+  action that produced the candidate. The final candidate change mask is the primary
+  evaluation target; temporal object masks are supporting predictions rather than GT.
+- The prompt explicitly defines added buildings, disappeared buildings, unchanged
+  buildings, and unchanged background. Empty predicted T1 or T2 masks are not treated
+  as automatic errors; the original images and final change mask decide plausibility.
+- Every actionable diagnosis uses a separate localization request for `target_view`
+  and `error_region`. If localization fails, the result is marked with
   `verifier_valid=false` and `localization_valid=false`, exposes no suggested action,
   and cannot stop the episode; the previous valid feedback is retained for context.
 - `accept`, `stop`, and `suggested_action` are derived by the runtime. `none` maps to
@@ -78,11 +84,18 @@ separately validated latent/tool-ranking objective.
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
 policies. All attempted candidate masks are retained, and initial, verifier-best,
 last-attempted, and selected prediction masks are exported. A tool candidate is accepted
-only when the Verifier is valid, its score improves by more than `selection_epsilon`,
+only when the Verifier is valid, its pairwise progress exceeds `selection_epsilon`,
 and its absolute mask-area jump stays within the configured limit. Rejected candidates
 remain auditable in the trajectory, while the next Agent step resumes from the previous
 accepted state. If model action retries are exhausted, the episode stops without
 executing a synthetic SAM3 box action.
+
+The Agent prompt injects only the JSON example for the Verifier's current suggested
+action, keeping the Qwen3-VL-2B instruction short. Point examples always include
+`coordinate`, box examples always include `box`, finish examples include neither, and
+none includes `coordinate_frame`. On validation failure, the retry path also supplies
+the previous invalid payload and repeats an exact same-view/same-action repair template
+for a missing or malformed `coordinate`/`box` field.
 
 ## Local smoke commands
 

@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 
 from change_agent.adapters.qwen3vl_verifier import Qwen3VLZeroShotVerifier
-from change_agent.state import ChangeState
+from change_agent.state import AgentAction, ChangeState
 
 
 class FakeInputs(dict):
@@ -16,10 +16,12 @@ class FakeProcessor:
     def __init__(self, payload):
         self.payloads = payload if isinstance(payload, list) else [payload]
         self.messages = None
+        self.messages_history = []
         self.call_count = 0
 
     def apply_chat_template(self, messages, **kwargs):
         self.messages = messages
+        self.messages_history.append(messages)
         return FakeInputs(input_ids=np.zeros((1, 3), dtype=np.int64))
 
     def batch_decode(self, generated, **kwargs):
@@ -37,23 +39,28 @@ class FakeModel:
 
 class QwenVerifierTest(unittest.TestCase):
     def test_zero_shot_verifier_returns_normalized_structured_feedback(self):
-        payload = {
-            "quality_score": 0.4,
-            "error_type": "false_positive_change",
-            "target_view": "t2",
-            "error_region": [100, 200, 800, 900],
-            "suggested_action": "negative_point",
-            "feedback": "Remove unsupported changed-building regions.",
-            "accept": False,
-        }
-        processor = FakeProcessor(payload)
+        processor = FakeProcessor(
+            [
+                {
+                    "quality_score": 0.4,
+                    "progress_score": 0.12,
+                    "error_type": "false_positive_change",
+                    "feedback": "Remove unsupported changed-building regions.",
+                },
+                {"target_view": "t2", "error_region": [100, 200, 800, 900]},
+            ]
+        )
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
         image = np.zeros((16, 16, 3), dtype=np.uint8)
         mask = np.zeros((16, 16), dtype=bool)
         mask[4:8, 4:8] = True
         state = ChangeState(image, image, "building", mask, mask, mask)
-        output = verifier.verify(state, 0.5, None)
+        previous_mask = np.zeros_like(mask)
+        previous = ChangeState(image, image, "building", previous_mask, mask, mask)
+        action = AgentAction("t2", "positive_point", coordinate=(8, 5))
+        output = verifier.verify(state, 0.5, action, previous)
         self.assertEqual(output.error_region, (100, 200, 800, 900))
+        self.assertAlmostEqual(output.progress_score, 0.12)
         self.assertAlmostEqual(output.score_delta, -0.1)
         self.assertEqual(output.to_dict()["coordinate_space"], "normalized_0_1000")
         self.assertTrue(output.verifier_valid)
@@ -63,22 +70,29 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(verifier.last_evidence["type"], "qwen3vl_zero_shot")
         texts = [
             item["text"]
-            for item in processor.messages[0]["content"]
+            for item in processor.messages_history[0][0]["content"]
             if item["type"] == "text"
         ]
         self.assertEqual(
-            texts[:5],
+            texts[:8],
             [
-                "T1 original image:",
-                "T2 original image:",
-                "Predicted T1 object mask:",
-                "Predicted T2 object mask:",
-                "Current change mask:",
+                "Fixed T1 original image:",
+                "Fixed T2 original image:",
+                "Previous valid T1 object mask:",
+                "Previous valid T2 object mask:",
+                "Previous valid change mask:",
+                "Candidate T1 object mask:",
+                "Candidate T2 object mask:",
+                "Candidate final change mask (primary evaluation target):",
             ],
         )
         self.assertIn("ground-truth-free verifier", texts[-1])
-        self.assertIn("do not alternate views by rule", texts[-1])
-        self.assertIn("not GT", texts[-1])
+        self.assertIn("added building", texts[-1])
+        self.assertIn("unchanged background", texts[-1])
+        self.assertIn("empty T1 or T2 mask does not automatically", texts[-1])
+        self.assertIn("Judge the final candidate change mask first", texts[-1])
+        self.assertIn("progress_score", texts[-1])
+        self.assertIn('"coordinate": [533, 333]', texts[-1])
 
     def test_invalid_outputs_use_auditable_safe_fallback(self):
         processor = FakeProcessor({"quality_score": 0.5})
@@ -102,14 +116,11 @@ class QwenVerifierTest(unittest.TestCase):
             [
                 {
                     "quality_score": 0.95,
+                    "progress_score": 0.0,
                     "error_type": "false_negative",
-                    "target_view": "t1",
-                    "error_region": None,
                     "feedback": "A building is missing from the change mask.",
-                    "accept": True,
-                    "suggested_action": "finish",
                 },
-                {"error_region": [100, 200, 800, 900]},
+                {"target_view": "t1", "error_region": [100, 200, 800, 900]},
             ]
         )
         verifier = Qwen3VLZeroShotVerifier(
@@ -128,17 +139,14 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertFalse(output.stop)
         self.assertTrue(output.verifier_valid)
         self.assertTrue(output.localization_valid)
-        self.assertIn("only error_region", processor.messages[0]["content"][-1]["text"])
+        self.assertIn("only target_view", processor.messages[0]["content"][-1]["text"])
 
     def test_accept_and_action_are_derived_from_none_diagnosis(self):
         payload = {
             "quality_score": 0.95,
+            "progress_score": 0.0,
             "error_type": "none",
-            "target_view": "t2",
-            "error_region": [100, 200, 800, 900],
             "feedback": "The mask is credible.",
-            "accept": False,
-            "suggested_action": "negative_point",
         }
         processor = FakeProcessor(payload)
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
@@ -157,16 +165,15 @@ class QwenVerifierTest(unittest.TestCase):
             [
                 {
                     "quality_score": 0.4,
+                    "progress_score": 0.0,
                     "error_type": "false_positive_change",
-                    "target_view": "t2",
-                    "error_region": [100, 200, 800, 900],
                     "feedback": "Remove the unsupported changed region.",
                 },
+                {"target_view": "t2", "error_region": [100, 200, 800, 900]},
                 {
                     "quality_score": 0.3,
+                    "progress_score": -0.2,
                     "error_type": "false_positive_change",
-                    "target_view": "t2",
-                    "error_region": None,
                     "feedback": "There is still an unsupported region.",
                 },
                 {"not_error_region": [1, 2, 3, 4]},
@@ -179,7 +186,7 @@ class QwenVerifierTest(unittest.TestCase):
         mask = np.zeros((16, 16), dtype=bool)
         state = ChangeState(image, image, "building", mask, mask, mask)
         first = verifier.verify(state, None, None)
-        second = verifier.verify(state, first.quality_score, None)
+        second = verifier.verify(state, first.quality_score, None, state)
 
         self.assertTrue(first.verifier_valid)
         self.assertFalse(second.verifier_valid)
@@ -188,6 +195,30 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertFalse(second.stop)
         self.assertEqual(second.quality_score, first.quality_score)
         self.assertIn(first.feedback, second.feedback)
+
+    def test_initial_progress_must_be_zero(self):
+        processor = FakeProcessor(
+            {
+                "quality_score": 0.7,
+                "progress_score": 0.2,
+                "error_type": "none",
+                "feedback": "The mask appears credible.",
+            }
+        )
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=processor, max_retries=1
+        )
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=bool)
+        state = ChangeState(image, image, "building", mask, mask, mask)
+        output = verifier.verify(state, None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertEqual(output.progress_score, 0.0)
+        self.assertIn(
+            "progress_score must be 0.0",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
 
 
 if __name__ == "__main__":

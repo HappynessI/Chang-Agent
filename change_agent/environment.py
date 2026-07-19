@@ -87,7 +87,7 @@ class ChangeAgentEnvironment:
             initialized.update,
             step_index=0,
         )
-        self.feedback = self.verifier.verify(self.state, None, None)
+        self.feedback = self.verifier.verify(self.state, None, None, None)
         execution = self._with_verifier_evidence(
             {"event": "reset", "candidate_accepted": True}
         )
@@ -182,7 +182,7 @@ class ChangeAgentEnvironment:
             execution.update(result.evidence)
 
         verifier_output = self.verifier.verify(
-            candidate, self.feedback.quality_score, action
+            candidate, self.feedback.quality_score, action, previous_state
         )
         previous_area_ratio = float(previous_state.change_mask.mean())
         candidate_area_ratio = float(candidate.change_mask.mean())
@@ -191,8 +191,13 @@ class ChangeAgentEnvironment:
         if not verifier_output.verifier_valid:
             rejection_reasons.append("verifier_invalid")
         if action.action != "finish":
-            if verifier_output.score_delta <= self.selection_epsilon:
-                rejection_reasons.append("score_did_not_improve")
+            ranking_progress = (
+                verifier_output.progress_score
+                if verifier_output.progress_score is not None
+                else verifier_output.score_delta
+            )
+            if ranking_progress <= self.selection_epsilon:
+                rejection_reasons.append("progress_did_not_improve")
             if area_delta > self.max_selection_area_delta:
                 rejection_reasons.append("mask_area_delta_exceeded")
         candidate_accepted = not rejection_reasons
@@ -203,6 +208,11 @@ class ChangeAgentEnvironment:
                 "previous_area_ratio": previous_area_ratio,
                 "candidate_area_ratio": candidate_area_ratio,
                 "candidate_area_delta": area_delta,
+                "ranking_progress": (
+                    verifier_output.progress_score
+                    if verifier_output.progress_score is not None
+                    else verifier_output.score_delta
+                ),
             }
         )
         execution = self._with_verifier_evidence(execution)

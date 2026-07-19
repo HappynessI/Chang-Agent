@@ -20,18 +20,17 @@ from ..state import AgentAction, ChangeState, VerifierOutput
 @dataclass(frozen=True)
 class _Diagnostic:
     quality_score: float
+    progress_score: float
     error_type: str
-    target_view: str
-    error_region: tuple[int, int, int, int] | None
     feedback: str
 
 
 class Qwen3VLZeroShotVerifier:
     """Judge a candidate mask without GT and return safe structured feedback.
 
-    Qwen supplies only the visual diagnosis. Localization is requested separately
-    when an actionable diagnosis has no region, and action/accept/stop fields are
-    derived deterministically by the runtime.
+    Qwen first supplies absolute quality, pairwise progress, error type, and feedback.
+    Actionable errors are localized in a separate request, while action/accept/stop
+    fields are derived deterministically by the runtime.
     """
 
     ERROR_TYPES = {
@@ -83,20 +82,37 @@ class Qwen3VLZeroShotVerifier:
         state: ChangeState,
         previous_score: float | None,
         previous_action: AgentAction | None,
+        previous_state: ChangeState | None = None,
     ) -> VerifierOutput:
         errors: list[str] = []
         primary_raw = ""
         for _ in range(self.max_retries):
-            primary_raw = self._generate_raw(state, previous_score, previous_action, errors[-1:])
+            primary_raw = self._generate_raw(
+                state,
+                previous_score,
+                previous_action,
+                previous_state,
+                errors[-1:],
+            )
             try:
                 payload = self._extract_json_object(primary_raw)
                 diagnostic = self._parse_diagnostic_payload(payload)
+                if previous_state is None and diagnostic.progress_score != 0.0:
+                    raise ValueError(
+                        "progress_score must be 0.0 when no previous valid state is shown"
+                    )
             except (TypeError, ValueError, KeyError) as error:
                 errors.append(str(error))
                 continue
 
             if diagnostic.error_type == "none":
-                output = self._derive_output(diagnostic, previous_score, localization_valid=True)
+                output = self._derive_output(
+                    diagnostic,
+                    previous_score,
+                    target_view=(previous_action.target_view if previous_action else "t2"),
+                    error_region=None,
+                    localization_valid=True,
+                )
                 return self._record_valid(
                     output,
                     {
@@ -107,34 +123,21 @@ class Qwen3VLZeroShotVerifier:
                     },
                 )
 
-            if diagnostic.error_region is not None:
-                output = self._derive_output(diagnostic, previous_score, localization_valid=True)
-                return self._record_valid(
-                    output,
-                    {
-                        "raw_output": primary_raw,
-                        "parsed_output": payload,
-                        "diagnostic_payload": payload,
-                        "validation_errors": errors,
-                    },
-                )
-
-            # Keep the semantic diagnosis and ask a much smaller second question:
-            # only localize the already identified error.
+            # Keep scoring separate from localization so the first stage can focus
+            # on final-mask quality and pairwise progress.
             localization_errors: list[str] = []
-            localization_raw = self._generate_localization_raw(state, diagnostic)
+            localization_raw = self._generate_localization_raw(
+                state, previous_state, previous_action, diagnostic
+            )
             try:
                 localization_payload = self._extract_json_object(localization_raw)
-                region = self._parse_localization_payload(localization_payload)
-                localized = _Diagnostic(
-                    diagnostic.quality_score,
-                    diagnostic.error_type,
-                    diagnostic.target_view,
-                    region,
-                    diagnostic.feedback,
-                )
+                target_view, region = self._parse_localization_payload(localization_payload)
                 output = self._derive_output(
-                    localized, previous_score, localization_valid=True
+                    diagnostic,
+                    previous_score,
+                    target_view=target_view,
+                    error_region=region,
+                    localization_valid=True,
                 )
                 return self._record_valid(
                     output,
@@ -156,10 +159,11 @@ class Qwen3VLZeroShotVerifier:
                     primary_raw,
                     localization_raw,
                     payload,
+                    previous_action,
                 )
 
         return self._invalid_output(
-            previous_score, None, errors, primary_raw, None, None
+            previous_score, None, errors, primary_raw, None, None, previous_action
         )
 
     def _record_valid(
@@ -183,6 +187,7 @@ class Qwen3VLZeroShotVerifier:
         primary_raw: str,
         localization_raw: str | None,
         diagnostic_payload: dict[str, Any] | None,
+        previous_action: AgentAction | None,
     ) -> VerifierOutput:
         previous = self._last_valid_output
         retained = previous.feedback if previous is not None else None
@@ -205,7 +210,7 @@ class Qwen3VLZeroShotVerifier:
         base_view = (
             previous.target_view
             if previous is not None
-            else diagnostic.target_view if diagnostic is not None else "t2"
+            else previous_action.target_view if previous_action is not None else "t2"
         )
         self.last_evidence = {
             "type": "qwen3vl_zero_shot",
@@ -220,6 +225,7 @@ class Qwen3VLZeroShotVerifier:
         }
         return VerifierOutput(
             quality_score=float(base_score),
+            progress_score=0.0,
             score_delta=0.0,
             error_type=base_type,
             target_view=base_view,
@@ -237,6 +243,8 @@ class Qwen3VLZeroShotVerifier:
         diagnostic: _Diagnostic,
         previous_score: float | None,
         *,
+        target_view: str,
+        error_region: tuple[int, int, int, int] | None,
         localization_valid: bool,
     ) -> VerifierOutput:
         if diagnostic.error_type == "none":
@@ -245,9 +253,9 @@ class Qwen3VLZeroShotVerifier:
             region = None
             accept = diagnostic.quality_score >= self.accept_threshold
         else:
-            if diagnostic.error_region is None:
+            if error_region is None:
                 raise ValueError("actionable diagnosis requires a localized error_region")
-            region = diagnostic.error_region
+            region = error_region
             suggested_action = self._suggested_action(diagnostic.error_type)
             accept = False
         delta = (
@@ -257,9 +265,10 @@ class Qwen3VLZeroShotVerifier:
         )
         return VerifierOutput(
             quality_score=diagnostic.quality_score,
+            progress_score=diagnostic.progress_score,
             score_delta=delta,
             error_type=diagnostic.error_type,
-            target_view=diagnostic.target_view,
+            target_view=target_view,
             error_region=region,
             suggested_action=suggested_action,
             feedback=diagnostic.feedback,
@@ -282,28 +291,39 @@ class Qwen3VLZeroShotVerifier:
         state: ChangeState,
         previous_score: float | None,
         previous_action: AgentAction | None,
+        previous_state: ChangeState | None,
         previous_errors: list[str],
     ) -> str:
         return self._generate_messages(
-            self.build_messages(state, previous_score, previous_action, previous_errors)
+            self.build_messages(
+                state, previous_score, previous_action, previous_state, previous_errors
+            )
         )
 
     def _generate_localization_raw(
-        self, state: ChangeState, diagnostic: _Diagnostic
+        self,
+        state: ChangeState,
+        previous_state: ChangeState | None,
+        previous_action: AgentAction | None,
+        diagnostic: _Diagnostic,
     ) -> str:
+        public_action = self._public_action(previous_action, state.image_size)
         prompt = (
             "The first-stage verifier diagnosed an actionable error but did not localize it. "
-            "Return exactly one JSON object with only error_region: [x1,y1,x2,y2]. "
+            "Return exactly one JSON object with only target_view ('t1' or 't2') and "
+            "error_region: [x1,y1,x2,y2]. "
             "Use normalized [0,1000] XYXY coordinates. Do not output quality, accept, "
             "action, or prose. The region should cover the suspected error in the candidate "
             "change mask. For false_positive_change, localize a region that mainly overlaps "
             "the current white change mask; for false_negative, localize a region mainly "
             "outside the current white mask.\n"
             f"error_type: {diagnostic.error_type}\n"
-            f"target_view: {diagnostic.target_view}\n"
-            f"diagnosis: {diagnostic.feedback}"
+            f"diagnosis: {diagnostic.feedback}\n"
+            f"Action that produced the candidate: {json.dumps(public_action, ensure_ascii=False)}"
         )
-        return self._generate_messages(self._visual_messages(state, prompt))
+        return self._generate_messages(
+            self._visual_messages(state, prompt, previous_state)
+        )
 
     def _generate_messages(self, messages: list[dict[str, Any]]) -> str:
         inputs = self.processor.apply_chat_template(
@@ -328,6 +348,7 @@ class Qwen3VLZeroShotVerifier:
         state: ChangeState,
         previous_score: float | None,
         previous_action: AgentAction | None,
+        previous_state: ChangeState | None = None,
         previous_errors: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         previous = self._public_action(previous_action, state.image_size)
@@ -339,79 +360,108 @@ class Qwen3VLZeroShotVerifier:
         )
         prompt = (
             "You are the diagnostic stage of a zero-shot, ground-truth-free verifier for "
-            "building change detection. Compare T1 and T2 directly and judge whether the "
-            "white regions in the candidate change mask represent real temporal building "
-            "changes, not merely buildings present in one image. Diagnose false positives "
-            "and false negatives. Select target_view as the temporal semantic mask that "
-            "should be edited; do not alternate views by rule. All regions use normalized "
-            "[0,1000] XYXY coordinates, never image pixels. Return exactly one JSON object. "
-            "The predicted T1/T2 object masks are model outputs, not GT; the current change "
-            "mask is reconstructed from those masks and OmniOVCD matching evidence. Use all "
-            "five visual inputs to attribute additions, disappearances, and mismatches. "
-            "Return only quality_score (0.0 to 1.0), error_type ('none', "
+            "building change detection. Use these four explicit temporal relations: "
+            "(1) added building = background in T1 and building in T2; "
+            "(2) disappeared building = building in T1 and background in T2; "
+            "(3) unchanged building = building in both T1 and T2; "
+            "(4) unchanged background = background in both T1 and T2. "
+            "Only added and disappeared buildings belong in the final change mask; both "
+            "unchanged relations must be background in that mask. Avoid the ambiguous phrase "
+            "'exists in only one image': identify whether the relation is added or disappeared. "
+            "Judge the final candidate change mask first. Predicted T1/T2 object masks are "
+            "supporting model outputs, not GT, and an empty T1 or T2 mask does not automatically "
+            "mean an error. Compare the original images directly before deciding whether an "
+            "empty temporal mask is plausible. Diagnose false positives and false negatives. "
+            "Return exactly one JSON object with only quality_score (0.0 to 1.0), "
+            "progress_score (-1.0 to 1.0), error_type ('none', "
             "'false_positive_change', 'false_negative', 'mixed_error', or 'uncertain_region'), "
-            "target_view ('t1' or 't2'), error_region ([x1,y1,x2,y2] or null), and feedback "
-            "(one concise sentence). If an error exists but its location is unclear, set "
-            "error_region to null; a separate localization request will follow. Do not "
-            "output accept or suggested_action. For false_positive_change, localize a "
-            "region that mainly overlaps the current white change mask; for false_negative, "
-            "localize a region mainly outside the current white mask. Do not use or assume GT.\n"
+            "and feedback (one concise sentence). quality_score measures the absolute quality "
+            "of the candidate final change mask. progress_score independently compares the "
+            "candidate with the previous valid state: positive means improved, negative means "
+            "worse, and zero means no material change. If no previous valid state is shown, "
+            "progress_score must be 0.0. Do not output target_view, error_region, accept, or "
+            "suggested_action; actionable errors are localized in a separate stage. Do not use "
+            "or assume GT.\n"
             f"Query: {state.query}\n"
-            f"Change-mask area ratio: {float(state.change_mask.mean()):.6f}\n"
+            f"Candidate change-mask area ratio: {float(state.change_mask.mean()):.6f}\n"
+            f"Previous valid change-mask area ratio: "
+            f"{float(previous_state.change_mask.mean()) if previous_state is not None else None}\n"
             f"Matching summary: {json.dumps(matching, ensure_ascii=False, default=str)}\n"
             f"Previous score: {previous_score}\n"
-            f"Previous action (normalized public coordinates): "
+            f"Action that produced the candidate (normalized public coordinates): "
             f"{json.dumps(previous, ensure_ascii=False)}\n"
             f"{correction}"
         )
-        return self._visual_messages(state, prompt)
+        return self._visual_messages(state, prompt, previous_state)
 
     @staticmethod
-    def _visual_messages(state: ChangeState, prompt: str) -> list[dict[str, Any]]:
+    def _visual_messages(
+        state: ChangeState,
+        prompt: str,
+        previous_state: ChangeState | None = None,
+    ) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": "Fixed T1 original image:"},
+            {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t1_image)},
+            {"type": "text", "text": "Fixed T2 original image:"},
+            {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t2_image)},
+        ]
+        if previous_state is not None:
+            content.extend(
+                [
+                    {"type": "text", "text": "Previous valid T1 object mask:"},
+                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(previous_state.t1_mask)},
+                    {"type": "text", "text": "Previous valid T2 object mask:"},
+                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(previous_state.t2_mask)},
+                    {"type": "text", "text": "Previous valid change mask:"},
+                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(previous_state.change_mask)},
+                ]
+            )
+        content.extend(
+            [
+                {"type": "text", "text": "Candidate T1 object mask:"},
+                {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t1_mask)},
+                {"type": "text", "text": "Candidate T2 object mask:"},
+                {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t2_mask)},
+                {"type": "text", "text": "Candidate final change mask (primary evaluation target):"},
+                {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.change_mask)},
+                {"type": "text", "text": prompt},
+            ]
+        )
         return [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "T1 original image:"},
-                    {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t1_image)},
-                    {"type": "text", "text": "T2 original image:"},
-                    {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t2_image)},
-                    {"type": "text", "text": "Predicted T1 object mask:"},
-                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t1_mask)},
-                    {"type": "text", "text": "Predicted T2 object mask:"},
-                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t2_mask)},
-                    {"type": "text", "text": "Current change mask:"},
-                    {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.change_mask)},
-                    {"type": "text", "text": prompt},
-                ],
+                "content": content,
             }
         ]
 
     def _parse_diagnostic_payload(self, payload: dict[str, Any]) -> _Diagnostic:
-        required = {"quality_score", "error_type", "target_view", "feedback"}
+        required = {"quality_score", "progress_score", "error_type", "feedback"}
         missing = required - set(payload)
         if missing:
             raise ValueError(f"diagnostic fields missing: {sorted(missing)}")
+        extra = set(payload) - required
+        if extra:
+            raise ValueError(f"unexpected diagnostic fields: {sorted(extra)}")
         score = payload["quality_score"]
         if isinstance(score, bool) or not isinstance(score, (int, float)):
             raise TypeError("quality_score must be numeric")
         score = float(score)
         if not 0 <= score <= 1:
             raise ValueError("quality_score must be in [0, 1]")
+        progress = payload["progress_score"]
+        if isinstance(progress, bool) or not isinstance(progress, (int, float)):
+            raise TypeError("progress_score must be numeric")
+        progress = float(progress)
+        if not -1 <= progress <= 1:
+            raise ValueError("progress_score must be in [-1, 1]")
         error_type = payload["error_type"]
-        target_view = payload["target_view"]
         if error_type not in self.ERROR_TYPES:
             raise ValueError("unsupported error_type")
-        if target_view not in self.VIEWS:
-            raise ValueError("target_view must be t1 or t2")
         feedback = payload["feedback"]
         if not isinstance(feedback, str) or not feedback.strip():
             raise TypeError("feedback must be a non-empty string")
-        region = None
-        region_value = payload.get("error_region")
-        if region_value is not None:
-            region = self._parse_region(region_value)
-        return _Diagnostic(score, error_type, target_view, region, feedback.strip())
+        return _Diagnostic(score, progress, error_type, feedback.strip())
 
     @staticmethod
     def _parse_region(region_value: Any) -> tuple[int, int, int, int]:
@@ -426,10 +476,17 @@ class Qwen3VLZeroShotVerifier:
 
     def _parse_localization_payload(
         self, payload: dict[str, Any]
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[str, tuple[int, int, int, int]]:
+        expected = {"target_view", "error_region"}
+        extra = set(payload) - expected
+        if extra:
+            raise ValueError(f"unexpected localization fields: {sorted(extra)}")
+        target_view = payload.get("target_view")
+        if target_view not in self.VIEWS:
+            raise ValueError("localization target_view must be t1 or t2")
         if "error_region" not in payload:
             raise ValueError("localization response must contain error_region")
-        return self._parse_region(payload["error_region"])
+        return target_view, self._parse_region(payload["error_region"])
 
     @staticmethod
     def _extract_json_object(raw: str) -> dict[str, Any]:

@@ -44,6 +44,7 @@ class AgentAction:
 class VerifierOutput:
     quality_score: float
     score_delta: float = 0.0
+    progress_score: float | None = None
     error_type: str = "none"
     target_view: TargetView = "t2"
     error_region: tuple[int, int, int, int] | None = None
@@ -57,6 +58,8 @@ class VerifierOutput:
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.quality_score) <= 1.0:
             raise ValueError("quality_score must be in [0, 1]")
+        if self.progress_score is not None and not -1.0 <= float(self.progress_score) <= 1.0:
+            raise ValueError("progress_score must be in [-1, 1]")
         if self.error_region is not None:
             validate_normalized_box(self.error_region)
         if self.stop is None:
@@ -69,6 +72,9 @@ class VerifierOutput:
     def to_dict(self) -> dict[str, Any]:
         return {
             "quality_score": float(self.quality_score),
+            "progress_score": (
+                float(self.progress_score) if self.progress_score is not None else None
+            ),
             "score_delta": float(self.score_delta),
             "error_type": self.error_type,
             "target_view": self.target_view,

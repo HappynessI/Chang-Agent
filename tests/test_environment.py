@@ -46,7 +46,7 @@ class Box:
 
 
 class EvidenceVerifier:
-    def verify(self, state, previous_score, previous_action):
+    def verify(self, state, previous_score, previous_action, previous_state=None):
         # A matched T1/T2 instance produces an empty change mask and the best score.
         score = 0.9 if not state.change_mask.any() else 0.3
         delta = 0 if previous_score is None else score - previous_score
@@ -64,8 +64,10 @@ class EvidenceVerifier:
 class SequenceVerifier:
     def __init__(self, outputs):
         self.outputs = iter(outputs)
+        self.previous_states = []
 
-    def verify(self, state, previous_score, previous_action):
+    def verify(self, state, previous_score, previous_action, previous_state=None):
+        self.previous_states.append(previous_state.clone() if previous_state else None)
         return next(self.outputs)
 
 
@@ -170,6 +172,11 @@ class EnvironmentTest(unittest.TestCase):
         self.assertIn("verifier_invalid", rejected.execution["candidate_rejection_reasons"])
         self.assertFalse(np.array_equal(rejected.state.change_mask, accepted_mask))
         self.assertTrue(np.array_equal(environment.state.change_mask, accepted_mask))
+        self.assertTrue(
+            np.array_equal(
+                environment.verifier.previous_states[1].change_mask, accepted_mask
+            )
+        )
         self.assertEqual(environment.state.step_index, 1)
         self.assertIs(environment.feedback, initial_feedback)
         self.assertEqual(environment.trajectory.best_entry.step_index, 0)

@@ -16,6 +16,7 @@ class Verifier(Protocol):
         state: ChangeState,
         previous_score: float | None,
         previous_action: AgentAction | None,
+        previous_state: ChangeState | None = None,
     ) -> VerifierOutput: ...
 
 
@@ -37,6 +38,7 @@ class RuleBasedVerifier:
         state: ChangeState,
         previous_score: float | None,
         previous_action: AgentAction | None,
+        previous_state: ChangeState | None = None,
     ) -> VerifierOutput:
         mask = state.change_mask
         ratio = float(mask.mean())
@@ -83,6 +85,7 @@ class RuleBasedVerifier:
         target_view = _target_view(state, previous_action)
         return VerifierOutput(
             quality_score=score,
+            progress_score=delta,
             score_delta=delta,
             error_type=error_type,
             target_view=target_view,

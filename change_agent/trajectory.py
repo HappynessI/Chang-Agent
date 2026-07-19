@@ -39,6 +39,7 @@ class TrajectoryEntry:
             "tool": self.execution.get("tool"),
             "tool_input": _json_safe(self.execution.get("tool_input")),
             "quality_score": verifier["quality_score"],
+            "progress_score": verifier["progress_score"],
             "score_delta": verifier["score_delta"],
             "error_type": verifier["error_type"],
             "suggested_action": verifier["suggested_action"],
@@ -105,7 +106,8 @@ class Trajectory:
             action = item.parsed_action.action if item.parsed_action else "reset"
             parts.append(
                 f"step={item.step_index}, action={action}, "
-                f"score={item.verifier.quality_score:.3f}, error={item.verifier.error_type}, "
+                f"score={item.verifier.quality_score:.3f}, "
+                f"progress={item.verifier.progress_score}, error={item.verifier.error_type}, "
                 f"accepted={item.execution.get('candidate_accepted', True)}"
             )
         return "; ".join(parts)

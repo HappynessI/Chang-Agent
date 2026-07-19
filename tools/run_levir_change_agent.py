@@ -267,15 +267,17 @@ def _execute_action_with_retries(
     """Try only model-produced actions and leave state unchanged on exhaustion."""
 
     validation_error = None
+    previous_raw = None
     errors: list[dict[str, str]] = []
     for _ in range(retries):
-        raw = qwen.generate_raw(observation, validation_error)
+        raw = qwen.generate_raw(observation, validation_error, previous_raw)
         try:
             next_observation, _ = environment.step(raw)
             return next_observation, errors, True
         except ActionValidationError as error:
             errors.append({"raw_agent_output": raw, "error": str(error)})
             validation_error = str(error)
+            previous_raw = raw
     return observation, errors, False
 
 
