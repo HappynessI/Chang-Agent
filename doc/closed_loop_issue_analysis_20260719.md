@@ -578,3 +578,22 @@ GPU 作业 `41407`（`outputs/change_agent_levir_gpu_closed_loop_20260719_145637
 只审计，确保小型有益删除不会被旧抽象标签误杀；任一组件或总 delta 超过 5% 时，两类
 证据必须一致，否则程序将 final effect 改为 uncertain 并拒绝。这会直接拦截本轮
 684/4342=15.75% 的有害删除，同时不拦截已知 135/14752=0.92% 的有益删除。
+
+## 18. 2026-07-19 验收闭环结果
+
+GPU 作业 `41410`（`outputs/change_agent_levir_gpu_closed_loop_20260719_151344`）在提交
+`c87b707` 上成功完成，耗时 115 秒。三个样本的 initial audit coverage 均为 1.0，组件
+数量/批次数分别为 8/2、8/2、19/4；进入 candidate Verifier 的 delta 也保持 1.0 覆盖。
+
+`test_78_13` 精确选择 135-pixel 小组件，在 t1 执行 negative point。该组件离线 GT
+重叠为 0，删除后 TP/FN 保持 11506/430，FP 从 3246 降至 3111，IoU 从 0.75787116
+提升至 0.76467070。其 delta 仅占 previous change mask 的 0.915%，所以即使旧
+mask-context 仍误报 removed_true_change，clean-RGB 的 building/building 判断仍能按
+设计放行 removed_false_positive，证明“不要过滤有益小修改”的目标已经实现。
+
+与此同时，`test_20_15` 的 352-pixel 删除占 6.53%，mask-context 与 RGB 冲突后被
+large-delta consensus gate 改为 uncertain；离线 IoU 虽会降至 0.78909026，但候选没有
+进入 live state。`test_85_16` 的全图 positive candidate 被面积、locality 和 target-mask
+变化硬门拒绝。两者最终都保留 initial。最终聚合 IoU/F1 为 0.70117909/0.82434482，
+高于 initial 的 0.69744116/0.82175592，并且三个样本均未低于各自 initial。本轮结果
+达到既定验收条件，可作为下一阶段回归基线。

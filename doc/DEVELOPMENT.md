@@ -1,5 +1,31 @@
 # Development log
 
+## 2026-07-19 — accepted three-sample GPU validation
+
+GPU job `41410` (`change_agent_levir_gpu_closed_loop_20260719_151344`) validated commit
+`c87b707` on one GPU and completed successfully in 115 seconds. The run meets the
+closed-loop acceptance criteria:
+
+- Aggregate conservative-selected IoU is `0.70117909`, above the fixed initial baseline
+  `0.69744116` by `0.00373793`; F1 improves from `0.82175592` to `0.82434482`.
+- Every sample's selected IoU is at least its initial IoU. `test_20_15` remains
+  `0.84638554`, `test_85_16` remains `0.30658070`, and `test_78_13` improves from
+  `0.75787116` to `0.76467070`.
+- `test_78_13` accepts a 135-pixel pure false-positive removal. TP/FN remain
+  `11506/430`, FP falls from `3246` to `3111`, and the candidate finishes normally.
+- Initial audit coverage is exactly `1.0` for all samples. Their 8, 8, and 19 components
+  are processed in 2, 2, and 4 batches. Every candidate that reaches semantic
+  verification also records exact delta coverage `1.0`.
+- The size-aware guard rejects the harmful `test_20_15` 352-pixel deletion: it represents
+  6.53% of the previous change mask and mask-context disagrees with clean RGB, so its
+  final effect is `uncertain`. The global `test_85_16` candidate is rejected earlier by
+  area, locality, and target-mask-change gates. Both samples retain their initial masks.
+
+This is the first post-migration run to accept a genuinely beneficial saved candidate,
+improve aggregate IoU, preserve every per-sample baseline, and maintain exact initial
+and candidate audit coverage simultaneously. The result is accepted; further changes
+should use this output and commit as the regression baseline.
+
 ## 2026-07-19 — full initial batching and size-aware semantic consensus
 
 GPU job `41407` (`change_agent_levir_gpu_closed_loop_20260719_145637`) completed on one
