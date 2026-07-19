@@ -31,7 +31,7 @@ class VerifierRegionTest(unittest.TestCase):
             1.0,
         )
 
-    def test_candidate_delta_sources_have_priority_and_region_limit(self):
+    def test_initial_components_are_not_dropped_by_per_batch_limit(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         previous_mask = np.zeros((32, 32), dtype=bool)
         previous_mask[2:5, 2:5] = True
@@ -44,11 +44,10 @@ class VerifierRegionTest(unittest.TestCase):
             image, image, "building", np.zeros_like(current_mask), current_mask, current_mask
         )
 
-        proposals = build_verifier_regions(current, previous, max_regions=1)
+        proposals = build_verifier_regions(current, max_regions=1)
 
-        self.assertEqual(len(proposals), 1)
-        self.assertIn("candidate_added", proposals[0]["sources"])
-        self.assertGreater(proposals[0]["candidate_delta_pixels"], 0)
+        self.assertEqual(len(proposals), 2)
+        self.assertEqual([item["batch_index"] for item in proposals], [0, 1])
 
     def test_single_white_pixel_is_never_lost_by_min_area_filter(self):
         image = np.zeros((16, 16, 3), dtype=np.uint8)
@@ -82,7 +81,7 @@ class VerifierRegionTest(unittest.TestCase):
             all(len(item["sources"]) == 1 for item in proposals)
         )
 
-    def test_initial_coverage_counts_exact_components_not_padded_boxes(self):
+    def test_initial_batching_covers_exact_components_not_padded_boxes(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         t1 = np.zeros((32, 32), dtype=bool)
         t2 = np.zeros_like(t1)
@@ -95,11 +94,13 @@ class VerifierRegionTest(unittest.TestCase):
         )
         facts = state.evidence["verifier_mask_facts"]
 
-        self.assertEqual(len(proposals), 1)
+        self.assertEqual(len(proposals), 2)
         self.assertEqual(facts["initial_audit_pixels"], 8)
-        self.assertEqual(facts["initial_audit_covered_pixels"], 4)
-        self.assertEqual(facts["initial_audit_uncovered_pixels"], 4)
-        self.assertEqual(facts["initial_audit_coverage_ratio"], 0.5)
+        self.assertEqual(facts["initial_audit_covered_pixels"], 8)
+        self.assertEqual(facts["initial_audit_uncovered_pixels"], 0)
+        self.assertEqual(facts["initial_audit_coverage_ratio"], 1.0)
+        self.assertEqual(facts["proposal_config"]["max_regions_per_batch"], 1)
+        self.assertEqual(facts["proposal_config"]["batch_count"], 2)
 
     def test_candidate_attachment_keeps_components_separate_with_full_coverage(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)

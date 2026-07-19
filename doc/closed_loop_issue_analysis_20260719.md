@@ -555,3 +555,26 @@ padded box。
 `0.31390233`，但其中恰好 48 像素为 GT change、48 像素为 FP，并非“全部有益候选”。
 因此不能为放行它而降低 mixed/uncertain 的安全门；下一轮应首先验证黄色轮廓能否修正
 initial component 语义，以及精确锚点能否在语义正确时产生非空局部编辑。
+
+## 17. 2026-07-19 精确错误动作与初始全量分批修复
+
+GPU 作业 `41407`（`outputs/change_agent_levir_gpu_closed_loop_20260719_145637`）验证了
+精确锚点确实会命中组件，但也把 Verifier 的语义错误从“无效空操作”放大成了真实有害
+编辑。`test_85_16` 的 r0 共 684 像素，negative point 精确删除整个组件；candidate RGB
+把 T1/T2 都判为 building，程序推导 `removed_false_positive` 并接受。闭环后 GT 审计
+显示其中 636 像素属于真实变化，IoU 从 `0.30658070` 降至 `0.16696629`，聚合 IoU 降至
+`0.67360342`。这是语义安全失败，不是 locality 或 coverage 失败。
+
+同一离线审计也给出了正确的改进方向。旧初始 proposal 按面积从大到小只取六个，导致
+真正低风险的小型 FP 根本不可见：`test_78_13` 的 127/135/177/254 像素组件均为纯 FP，
+`test_85_16` 的多个 83–173 像素组件也为纯 FP。继续优先最大 FP 判断，会让一次 2B 模型
+错误删除主变化区域；简单恢复“mask-context 一票否决”又会重新过滤已知的 135-pixel
+有益删除。
+
+修复采用分级证据而非统一放宽或统一收紧：初始 proposal 像 candidate delta 一样保留
+全部连通分量，六个只表示每次 Qwen call 的 batch size；所有 batch 成功才形成诊断。
+同类可行动错误优先选择面积最小的组件，以最小化单次判断错误的损失。candidate delta
+小于等于 previous change mask 的 5% 时，继续由 clean-RGB 时相事实决定，mask-context
+只审计，确保小型有益删除不会被旧抽象标签误杀；任一组件或总 delta 超过 5% 时，两类
+证据必须一致，否则程序将 final effect 改为 uncertain 并拒绝。这会直接拦截本轮
+684/4342=15.75% 的有害删除，同时不拦截已知 135/14752=0.92% 的有益删除。

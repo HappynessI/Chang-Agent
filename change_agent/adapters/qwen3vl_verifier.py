@@ -64,7 +64,7 @@ class Qwen3VLZeroShotVerifier:
     runtime rules. Mask-context effect labels are retained only as audit evidence.
     """
 
-    SCHEMA_VERSION = "outlined_rgb_temporal_state_batched_effect_v6"
+    SCHEMA_VERSION = "full_batched_guarded_rgb_temporal_effect_v7"
     CANDIDATE_EVIDENCE_MODES = ("mask_context", "rgb_temporal_state")
     ERROR_TYPES = {
         "none",
@@ -92,12 +92,17 @@ class Qwen3VLZeroShotVerifier:
         max_new_tokens: int = 1024,
         accept_threshold: float = 0.82,
         max_retries: int = 2,
+        max_delta_component_ratio_without_consensus: float = 0.05,
         **legacy_localization_options: Any,
     ):
         if not 0 <= accept_threshold <= 1:
             raise ValueError("accept_threshold must be in [0, 1]")
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
+        if not 0 <= max_delta_component_ratio_without_consensus <= 1:
+            raise ValueError(
+                "max_delta_component_ratio_without_consensus must be in [0, 1]"
+            )
         self.model = model
         self.processor = processor
         self.max_new_tokens = max_new_tokens
@@ -105,6 +110,9 @@ class Qwen3VLZeroShotVerifier:
         # threshold and records this explicitly in evidence.
         self.accept_threshold = accept_threshold
         self.max_retries = max_retries
+        self.max_delta_component_ratio_without_consensus = (
+            max_delta_component_ratio_without_consensus
+        )
         self.legacy_localization_options = dict(legacy_localization_options)
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
@@ -153,32 +161,68 @@ class Qwen3VLZeroShotVerifier:
         temporal_judgments: tuple[_TemporalStateJudgment, ...] | None = None
         derivation_detail: list[dict[str, Any]] = []
         regional_analysis: _RegionalAnalysis | None = None
-        for _ in range(self.max_retries):
-            raw = self._generate_messages(
-                self.build_messages(
-                    state,
-                    None,
-                    previous_action,
-                    previous_state,
-                    region_errors[-1:],
+        proposal_config = mask_facts.get("proposal_config", {})
+        batch_size = int(
+            proposal_config.get("max_regions_per_batch") or len(proposals)
+        )
+        all_temporal: list[_TemporalStateJudgment] = []
+        batches_valid = batch_size > 0
+        if not batches_valid:
+            region_errors.append("initial audit batch size must be positive")
+        for batch_index, start in enumerate(
+            range(0, len(proposals), max(batch_size, 1))
+        ):
+            batch = proposals[start : start + batch_size]
+            batch_errors: list[str] = []
+            batch_temporal: tuple[_TemporalStateJudgment, ...] | None = None
+            for _ in range(self.max_retries):
+                raw = self._generate_messages(
+                    self.build_messages(
+                        state,
+                        None,
+                        previous_action,
+                        previous_state,
+                        batch_errors[-1:],
+                        proposals_override=batch,
+                    )
                 )
-            )
-            try:
-                payload = self._extract_json_object(raw)
-                temporal_judgments = self._parse_temporal_state_payload(
-                    payload, proposals
-                )
-                judgments, derivation_detail = self._initial_judgments_from_temporal_states(
-                    temporal_judgments, proposals, state
-                )
-                regional_analysis = self._derive_regional_analysis(
-                    judgments, proposals, mask_facts, previous_action
-                )
-                region_attempts.append({"raw": raw, "output": payload})
+                try:
+                    payload = self._extract_json_object(raw)
+                    batch_temporal = self._parse_temporal_state_payload(payload, batch)
+                    region_attempts.append(
+                        {
+                            "batch_index": batch_index,
+                            "region_ids": [item["region_id"] for item in batch],
+                            "raw": raw,
+                            "output": payload,
+                        }
+                    )
+                    break
+                except (TypeError, ValueError, KeyError) as error:
+                    message = f"initial batch {batch_index}: {error}"
+                    batch_errors.append(str(error))
+                    region_errors.append(message)
+                    region_attempts.append(
+                        {
+                            "batch_index": batch_index,
+                            "region_ids": [item["region_id"] for item in batch],
+                            "raw": raw,
+                            "error": str(error),
+                        }
+                    )
+            if batch_temporal is None:
+                batches_valid = False
                 break
-            except (TypeError, ValueError, KeyError) as error:
-                region_errors.append(str(error))
-                region_attempts.append({"raw": raw, "error": str(error)})
+            all_temporal.extend(batch_temporal)
+
+        if batches_valid:
+            temporal_judgments = tuple(all_temporal)
+            judgments, derivation_detail = self._initial_judgments_from_temporal_states(
+                temporal_judgments, proposals, state
+            )
+            regional_analysis = self._derive_regional_analysis(
+                judgments, proposals, mask_facts, previous_action
+            )
 
         if regional_analysis is None:
             return self._invalid_output(
@@ -414,6 +458,47 @@ class Qwen3VLZeroShotVerifier:
                     batch_effects, batch_fusion = self._effects_from_temporal_states(
                         batch_temporal, mask_judgments, batch
                     )
+                    previous_change_pixels = max(
+                        int(previous_state.change_mask.sum()), 1
+                    )
+                    total_delta_ratio = (
+                        int(facts.get("candidate_delta_pixels", 0))
+                        / previous_change_pixels
+                    )
+                    guarded_effects: list[_EffectJudgment] = []
+                    proposal_by_id = {item["region_id"]: item for item in batch}
+                    for effect, item in zip(batch_effects, batch_fusion):
+                        component_ratio = (
+                            int(proposal_by_id[effect.region_id]["component_area"])
+                            / previous_change_pixels
+                        )
+                        consensus_required = (
+                            max(component_ratio, total_delta_ratio)
+                            > self.max_delta_component_ratio_without_consensus
+                        )
+                        final_effect = effect.effect
+                        if (
+                            consensus_required
+                            and item["mask_context_agreement"] is not True
+                        ):
+                            final_effect = "uncertain"
+                        item.update(
+                            {
+                                "component_to_previous_change_ratio": component_ratio,
+                                "total_delta_to_previous_change_ratio": total_delta_ratio,
+                                "consensus_required": consensus_required,
+                                "final_effect": final_effect,
+                                "decision_source": (
+                                    "rgb_temporal_state_with_large_delta_consensus"
+                                    if consensus_required
+                                    else "rgb_temporal_state"
+                                ),
+                            }
+                        )
+                        guarded_effects.append(
+                            _EffectJudgment(effect.region_id, final_effect)
+                        )
+                    batch_effects = tuple(guarded_effects)
                     all_temporal.extend(batch_temporal)
                     all_effects.extend(batch_effects)
                     fusion_detail.extend(
@@ -585,9 +670,15 @@ class Qwen3VLZeroShotVerifier:
         previous_action: AgentAction | None,
         previous_state: ChangeState | None = None,
         previous_errors: list[str] | None = None,
+        *,
+        proposals_override: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         del previous_score, previous_action, previous_state
-        proposals = list(state.evidence.get("verifier_region_proposals", []))
+        proposals = (
+            list(proposals_override)
+            if proposals_override is not None
+            else list(state.evidence.get("verifier_region_proposals", []))
+        )
         correction = (
             f"Your previous temporal-state response was invalid: "
             f"{previous_errors[-1]}. Correct it.\n"
@@ -819,7 +910,7 @@ class Qwen3VLZeroShotVerifier:
         if error_type == "none" and uncovered:
             error_type = "uncertain_region"
         selected = (
-            max(candidates, key=lambda item: lookup[item.region_id]["component_area"])
+            min(candidates, key=lambda item: lookup[item.region_id]["component_area"])
             if candidates
             else None
         )
@@ -1175,6 +1266,9 @@ class Qwen3VLZeroShotVerifier:
             "action": previous_action.to_dict() if previous_action else None,
             "max_new_tokens": self.max_new_tokens,
             "max_retries": self.max_retries,
+            "max_delta_component_ratio_without_consensus": (
+                self.max_delta_component_ratio_without_consensus
+            ),
             "candidate_evidence_modes": self.CANDIDATE_EVIDENCE_MODES,
             "model": getattr(getattr(self.model, "config", None), "_name_or_path", None),
             "proposals": proposals,

@@ -20,7 +20,7 @@ def attach_verifier_regions(
     min_component_area: int = 4,
     padding_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
-    """Attach a small deterministic proposal set and exact mask facts to ``state``.
+    """Attach deterministic full-coverage proposals and exact mask facts to ``state``.
 
     Proposals come from current change components, T1/T2 semantic-mask difference,
     and (for edited candidates) the change-mask delta against the previous accepted
@@ -78,16 +78,19 @@ def attach_verifier_regions(
         else 0,
         "proposal_count": len(proposals),
         "proposal_config": {
-            "schema_version": "component_delta_batched_v3",
+            "schema_version": "full_component_batched_v4",
             "max_regions": max_regions if previous_state is None else max_delta_regions,
             "max_regions_per_batch": (
-                None if previous_state is None else max_delta_regions
+                max_regions if previous_state is None else max_delta_regions
             ),
             "total_component_count": len(proposals),
             "batch_count": (
-                0
-                if previous_state is None or not proposals
-                else (len(proposals) + max_delta_regions - 1) // max_delta_regions
+                0 if not proposals else (
+                    (len(proposals) + max_regions - 1) // max_regions
+                    if previous_state is None
+                    else (len(proposals) + max_delta_regions - 1)
+                    // max_delta_regions
+                )
             ),
             "min_component_area": min_component_area,
             "padding_ratio": padding_ratio,
@@ -233,6 +236,8 @@ def build_verifier_regions(
     min_component_area: int = 4,
     padding_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
+    """Return every initial audit component, grouped by ``max_regions`` per batch."""
+
     if max_regions < 1:
         raise ValueError("max_regions must be positive")
     if min_component_area < 1:
@@ -263,12 +268,6 @@ def build_verifier_regions(
             key=lambda item: int(item.sum()),
             reverse=True,
         )
-        if components and int(components[0].sum()) < min_component_area:
-            components = components[:1]
-        else:
-            components = [
-                item for item in components if int(item.sum()) >= min_component_area
-            ]
         for component in components:
             raw.append(
                 {
@@ -297,8 +296,6 @@ def build_verifier_regions(
                 duplicate["component_area"], item["area"]
             )
             continue
-        if len(selected) >= max_regions:
-            continue
         selected.append(
             {
                 "box": item["box"],
@@ -321,6 +318,7 @@ def build_verifier_regions(
         result.append(
             {
                 "region_id": f"r{index}",
+                "batch_index": index // max_regions,
                 "sources": sorted(item["sources"]),
                 "audit_kind": (
                     "present"

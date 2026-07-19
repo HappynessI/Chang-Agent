@@ -1,5 +1,39 @@
 # Development log
 
+## 2026-07-19 — full initial batching and size-aware semantic consensus
+
+GPU job `41407` (`change_agent_levir_gpu_closed_loop_20260719_145637`) completed on one
+GPU in 140 seconds with exact component anchors, but exposed an unsafe interaction
+between proposal ordering and fallible RGB semantics. In `test_85_16`, Qwen labeled the
+largest 684-pixel component unchanged in both temporal images. The exact negative point
+therefore removed all 684 pixels, candidate verification called the removal beneficial,
+and selected IoU fell from `0.30658070` to `0.16696629`; aggregate IoU fell from the
+baseline `0.69744116` to `0.67360342`. The edit was genuinely local and fully audited,
+so locality and coverage gates could not detect the semantic error.
+
+Post-rollout GT analysis, performed only after completion, showed that 636/684 removed
+pixels were true change. It also showed the complementary opportunity hidden by the
+old largest-six initial cap: `test_78_13` contains 127-, 135-, 177-, and 254-pixel pure
+false-positive components, and `test_85_16` contains multiple 83–173-pixel pure false
+positives. These safer components never reached the initial Qwen call.
+
+- Initial proposals now retain every connected component and use the configured six as
+  a per-call batch size, matching the already full-coverage candidate protocol. Exact
+  initial coverage is therefore `1.0`; one invalid batch invalidates the full diagnosis.
+- When several judgments yield actionable errors, programmatic selection chooses the
+  smallest component rather than the largest. Exact Environment seeds remain mandatory.
+- Small candidate edits remain decidable from the clean-RGB temporal facts even when the
+  advisory mask-context label disagrees, preserving the prior 135-pixel beneficial case.
+  If any component or the complete delta exceeds 5% of the previous change-mask area,
+  however, mask-context and RGB effects must agree; otherwise its final effect becomes
+  `uncertain` and is rejected.
+- Schema/cache and configuration metadata are bumped to record full initial batching and
+  the 0.05 unilateral-evidence threshold. The output ceiling remains 1024 tokens.
+
+Regression coverage includes two-batch initial full coverage, smallest-component action
+selection, rejection of a large cross-evidence disagreement, and acceptance of a small
+beneficial edit despite the same advisory disagreement.
+
 ## 2026-07-19 — exact component anchors and outlined RGB correspondence
 
 GPU job `41396` (`change_agent_levir_gpu_closed_loop_20260719_143908`) completed on one

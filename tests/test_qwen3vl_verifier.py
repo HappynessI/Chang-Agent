@@ -106,6 +106,26 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_region, (*seed, *seed))
         self.assertEqual(processor.call_count, 1)
 
+    def test_initial_action_prioritizes_smallest_actionable_component(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        t1 = np.zeros((32, 32), dtype=bool)
+        t2 = np.zeros_like(t1)
+        t2[2:12, 2:12] = True
+        t2[24:27, 24:27] = True
+        state = ChangeState(image, image, "building", t1, t2, t2)
+        proposals = attach_verifier_regions(state)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(region_payload(state, "background", "background")),
+        )
+
+        output = verifier.verify(state, None, None)
+
+        smallest = min(proposals, key=lambda item: item["component_area"])
+        seed = tuple(smallest["component_seed_normalized"])
+        self.assertEqual(output.error_region, (*seed, *seed))
+        self.assertEqual(smallest["component_area"], 9)
+
     def test_unchanged_building_component_adds_missing_temporal_mask(self):
         state = make_state()
         proposals = attach_verifier_regions(state)
@@ -154,7 +174,7 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("Predicted masks", prompt)
         self.assertIn("intentionally hidden", prompt)
 
-    def test_uncovered_initial_audit_pixels_cannot_authorize_finish(self):
+    def test_initial_components_are_verified_in_separate_full_coverage_batches(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         t1 = np.zeros((32, 32), dtype=bool)
         t2 = np.zeros_like(t1)
@@ -162,17 +182,27 @@ class QwenVerifierTest(unittest.TestCase):
         t2[25:28, 25:28] = True
         state = ChangeState(image, image, "building", t1, t2, t2)
         attach_verifier_regions(state, max_regions=1, padding_ratio=0.0)
+        proposals = state.evidence["verifier_region_proposals"]
         verifier = Qwen3VLZeroShotVerifier(
-            model=FakeModel(), processor=FakeProcessor(region_payload(state))
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    {item["region_id"]: ["background", "building"]}
+                    for item in proposals
+                ]
+            ),
         )
 
         output = verifier.verify(state, None, None)
 
-        self.assertEqual(output.error_type, "uncertain_region")
-        self.assertEqual(output.suggested_action, "box")
-        self.assertFalse(output.accept)
-        self.assertFalse(output.stop)
-        self.assertIsNotNone(output.error_region)
+        self.assertEqual(output.error_type, "none")
+        self.assertTrue(output.accept)
+        self.assertTrue(output.stop)
+        self.assertEqual(verifier.processor.call_count, 2)
+        self.assertEqual(
+            state.evidence["verifier_mask_facts"]["initial_audit_coverage_ratio"],
+            1.0,
+        )
 
     def test_truncated_top_level_json_is_not_misread_as_nested_region(self):
         with self.assertRaisesRegex(ValueError, "incomplete JSON object"):
@@ -231,7 +261,7 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertNotIn("candidate_added_pixels", temporal_state_text)
         self.assertTrue(
             all(
-                item["decision_source"] == "rgb_temporal_state"
+                item["decision_source"].startswith("rgb_temporal_state")
                 for item in verifier.last_evidence["effect_fusion"]
             )
         )
@@ -257,9 +287,9 @@ class QwenVerifierTest(unittest.TestCase):
             previous,
         )
 
-        self.assertEqual(output.comparison, "worse")
-        self.assertEqual(output.error_type, "false_positive_change")
-        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertEqual(output.comparison, "uncertain")
+        self.assertEqual(output.error_type, "uncertain_region")
+        self.assertEqual(output.suggested_action, "box")
 
     def test_four_delta_components_are_fully_verified_in_two_batches(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
@@ -368,7 +398,11 @@ class QwenVerifierTest(unittest.TestCase):
                 temporal_payload(state, "building", "building"),
             ]
         )
-        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=processor,
+            max_delta_component_ratio_without_consensus=1.0,
+        )
 
         output = verifier.verify(
             state,
@@ -402,7 +436,10 @@ class QwenVerifierTest(unittest.TestCase):
             ]
         )
         verifier = Qwen3VLZeroShotVerifier(
-            model=FakeModel(), processor=processor, max_retries=2
+            model=FakeModel(),
+            processor=processor,
+            max_retries=2,
+            max_delta_component_ratio_without_consensus=1.0,
         )
 
         output = verifier.verify(
@@ -428,6 +465,77 @@ class QwenVerifierTest(unittest.TestCase):
                 for error in verifier.last_evidence["validation_errors"]
             )
         )
+
+    def test_large_delta_requires_mask_and_rgb_effect_consensus(self):
+        previous = make_state(8)
+        state = make_state(7)
+        attach_verifier_regions(state, previous)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    effect_payload(state, "removed_true_change"),
+                    temporal_payload(state, "building", "building"),
+                ]
+            ),
+            max_delta_component_ratio_without_consensus=0.05,
+        )
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "negative_point", coordinate=(7, 7)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "uncertain")
+        self.assertFalse(output.accept)
+        self.assertEqual(
+            verifier.last_evidence["effect_judgments"][0]["effect"], "uncertain"
+        )
+        fusion = verifier.last_evidence["effect_fusion"][0]
+        self.assertTrue(fusion["consensus_required"])
+        self.assertEqual(fusion["final_effect"], "uncertain")
+
+    def test_small_beneficial_delta_is_not_filtered_by_advisory_disagreement(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        previous_mask[2:22, 2:22] = True
+        previous_mask[28:30, 28:30] = True
+        current_mask = previous_mask.copy()
+        current_mask[28:30, 28:30] = False
+        previous = ChangeState(
+            image, image, "building", np.zeros_like(previous_mask), previous_mask,
+            previous_mask,
+        )
+        state = ChangeState(
+            image, image, "building", np.zeros_like(current_mask), current_mask,
+            current_mask,
+        )
+        attach_verifier_regions(state, previous)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    effect_payload(state, "removed_true_change"),
+                    temporal_payload(state, "building", "building"),
+                ]
+            ),
+            max_delta_component_ratio_without_consensus=0.05,
+        )
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "negative_point", coordinate=(28, 28)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "better")
+        self.assertTrue(output.accept)
+        fusion = verifier.last_evidence["effect_fusion"][0]
+        self.assertFalse(fusion["consensus_required"])
+        self.assertFalse(fusion["mask_context_agreement"])
 
     def test_uncertain_rgb_temporal_state_is_rejected(self):
         previous = make_state(7)

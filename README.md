@@ -62,11 +62,12 @@ separately validated latent/tool-ranking objective.
 
 ## Verifier feedback boundary
 
-- Initial verification uses at most six auditable proposals from current change-mask
-  components and T1/T2 object-mask XOR components. Candidate verification keeps every
-  added/removed delta connected component, assigns stable `dN` identifiers, and sends at
-  most three components per Qwen batch. The batch size is not a global coverage cap;
-  covered delta pixels must still equal the complete candidate delta.
+- Initial verification keeps every auditable connected component from the current
+  change mask and T1/T2 object-mask XOR, assigns stable `rN` identifiers, and sends at
+  most six components per Qwen batch. Candidate verification likewise keeps every
+  added/removed delta component, assigns stable `dN` identifiers, and sends at most
+  three per batch. Neither batch size is a lossy global cap; covered pixels must equal
+  the complete initial audit or candidate delta.
 - Initial Qwen calls see T1/T2 RGB with a one-pixel yellow ring outside the exact audit
   component, plus its binary geometry and raw RGB difference. The ring never overwrites
   audited RGB pixels or enters the difference image. Predicted masks, change status,
@@ -82,6 +83,8 @@ separately validated latent/tool-ranking objective.
 - Target view, suggested action, and point coordinate are derived rather than generated.
   Point feedback carries the exact connected-component seed as a degenerate normalized
   `error_region`; the Agent is instructed to copy that Environment-owned anchor exactly.
+  When several actionable components have the same error class, the runtime starts with
+  the smallest component to bound the impact of an imperfect visual judgment.
   For example, an
   unchanged background in one spurious predicted view maps to a negative point there,
   while an unchanged building missing from the opposite predicted view maps to a
@@ -97,7 +100,11 @@ separately validated latent/tool-ranking objective.
   elementary temporal states. Runtime code combines
   those states with added/removed polarity to derive the effect. A mask-context
   disagreement or malformed advisory response remains auditable but cannot filter an
-  RGB-supported beneficial edit; mixed/uncertain RGB evidence still rejects safely.
+  RGB-supported small beneficial edit; mixed/uncertain RGB evidence still rejects safely.
+  If the complete delta or any one component exceeds 5% of the previous change mask,
+  mask-context and RGB effects must agree. This large-edit consensus guard prevents one
+  uncertain semantic judgment from deleting a dominant component while preserving the
+  small false-positive corrections observed in prior runs.
 - `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
   from RGB states, predicted-mask occupancy, and Environment boxes. False negatives map
   to a positive point; false positives use either a negative point for a spurious object
