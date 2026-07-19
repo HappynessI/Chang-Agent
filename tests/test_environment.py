@@ -65,8 +65,10 @@ class SequenceVerifier:
     def __init__(self, outputs):
         self.outputs = iter(outputs)
         self.previous_states = []
+        self.call_count = 0
 
     def verify(self, state, previous_score, previous_action, previous_state=None):
+        self.call_count += 1
         self.previous_states.append(previous_state.clone() if previous_state else None)
         return next(self.outputs)
 
@@ -165,7 +167,7 @@ class EnvironmentTest(unittest.TestCase):
         self.assertFalse(entry.execution["candidate_accepted"])
         self.assertEqual(entry.execution["pairwise_comparison"], "worse")
         self.assertIn(
-            "pairwise_candidate_not_better",
+            "candidate_effect_not_better",
             entry.execution["candidate_rejection_reasons"],
         )
 
@@ -189,10 +191,11 @@ class EnvironmentTest(unittest.TestCase):
             error_type="none",
             feedback="Candidate feedback.",
         )
+        verifier = SequenceVerifier([initial_feedback, candidate_feedback])
         environment = ChangeAgentEnvironment(
             Backend(),
             ActionExecutor(GlobalPoint(), self.box),
-            SequenceVerifier([initial_feedback, candidate_feedback]),
+            verifier,
             max_steps=3,
             max_selection_area_delta=1.0,
             max_locality_outside_ratio=0.0,
@@ -208,6 +211,8 @@ class EnvironmentTest(unittest.TestCase):
             "locality_outside_roi_exceeded",
             entry.execution["candidate_rejection_reasons"],
         )
+        self.assertTrue(entry.execution["verifier_skipped_by_hard_gate"])
+        self.assertEqual(verifier.call_count, 1)
 
     def test_verifier_feedback_declares_normalized_public_coordinates(self):
         observation = self.environment.reset(self.image1, self.image2, "building")
@@ -226,6 +231,8 @@ class EnvironmentTest(unittest.TestCase):
             self.assertEqual(
                 payload["steps"][1]["raw_action_payload"]["coordinate"], [0, 0]
             )
+            self.assertEqual(len(payload["steps"][1]["t1_mask_sha256"]), 64)
+            self.assertEqual(len(payload["steps"][1]["change_mask_sha256"]), 64)
             self.assertTrue((Path(directory) / "masks" / "step_001.npy").exists())
 
     def test_repeated_small_public_coordinates_are_warned_not_autocorrected(self):
@@ -339,10 +346,11 @@ class EnvironmentTest(unittest.TestCase):
             feedback="Candidate looks good.",
             accept=True,
         )
+        verifier = SequenceVerifier([initial_feedback, optimistic_feedback])
         environment = ChangeAgentEnvironment(
             Backend(),
             ActionExecutor(Point(), self.box),
-            SequenceVerifier([initial_feedback, optimistic_feedback]),
+            verifier,
             max_steps=3,
             max_selection_area_delta=0.0,
         )
@@ -357,7 +365,9 @@ class EnvironmentTest(unittest.TestCase):
             "mask_area_delta_exceeded",
             rejected.execution["candidate_rejection_reasons"],
         )
-        self.assertGreater(rejected.verifier.score_delta, 0)
+        self.assertEqual(rejected.verifier.comparison, "worse")
+        self.assertTrue(rejected.execution["verifier_skipped_by_hard_gate"])
+        self.assertEqual(verifier.call_count, 1)
         self.assertTrue(np.array_equal(environment.state.change_mask, accepted_mask))
         self.assertEqual(environment.trajectory.best_entry.step_index, 0)
 

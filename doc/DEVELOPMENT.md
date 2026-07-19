@@ -1,5 +1,25 @@
 # Development log
 
+## 2026-07-19 — component-safe delta audit and replay identity
+
+- Candidate deltas are no longer collapsed by polarity. Up to three connected components
+  receive separate panels and exact `delta_pixels`; explicit covered/uncovered counts and
+  `coverage_ratio` force conservative rejection if the panel budget cannot cover all edits.
+- Candidate labels are now unambiguous visual facts: `added_true_change`,
+  `added_false_change`, `removed_false_positive`, `removed_true_change`, `mixed`, and
+  `uncertain`. Mixed labels or a combination of beneficial and harmful components derives
+  `uncertain`; only uniformly beneficial components derive `better`.
+- Locality, area, and component-count hard gates run before Qwen, so candidates already
+  known unsafe consume no Verifier generation. The output ceiling remains 1024 tokens.
+- Decision keys now include original images, previous/candidate masks, pixel action, query,
+  schema version, model identity, generation settings, proposals, and exact region facts.
+  Cache evidence records `decision_key`, `decision_step`, `cache_hit`, and
+  `reused_from_step`.
+- Every trajectory step stores T1/T2/change-mask SHA256 values. Replay follows the original
+  accepted-state chain, uses the recorded matching configuration, and fails before Qwen if
+  any reconstructed candidate hash differs from the online trajectory. Ground truth is
+  opened only after all Verifier calls for a sample.
+
 ## 2026-07-19 — compact delta-effect verifier and duplicate-candidate safety
 
 The `change_agent_levir_gpu_closed_loop_20260719_173613` audit exposed three
@@ -12,9 +32,7 @@ region feedback sentences could exceed the Qwen3-VL-2B output budget.
   component cannot be labeled `false_negative`; that label requires a
   `temporal_difference_missing` proposal.
 - Candidate verification no longer repeats the initial six-region analysis or asks Qwen
-  to emit `better/worse`. The Environment supplies at most two actual delta panels—one
-  aggregating additions and one aggregating removals—preserves polarity, and asks only for `added_supported`,
-  `added_unsupported`, `removed_supported`, `removed_unsupported`, or `uncertain`.
+  to emit `better/worse`. The current component-safe protocol is documented above.
 - The runtime derives comparison deterministically. Any harmful effect makes the
   candidate worse, any uncertainty remains uncertain, and every inspected effect must
   be beneficial before the candidate can be better. A delta with uninspected pixels is

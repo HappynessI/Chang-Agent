@@ -136,7 +136,7 @@ class QwenVerifierTest(unittest.TestCase):
         attach_verifier_regions(state, previous)
         processor = FakeProcessor(
             {
-                item["region_id"]: "added_supported"
+                item["region_id"]: "added_true_change"
                 for item in state.evidence["verifier_region_proposals"]
             }
         )
@@ -175,7 +175,7 @@ class QwenVerifierTest(unittest.TestCase):
         state = make_state(8)
         attach_verifier_regions(state, previous)
         payload = {
-            item["region_id"]: "added_unsupported"
+            item["region_id"]: "added_false_change"
             for item in state.evidence["verifier_region_proposals"]
         }
         verifier = Qwen3VLZeroShotVerifier(
@@ -198,7 +198,7 @@ class QwenVerifierTest(unittest.TestCase):
         state = make_state(8)
         attach_verifier_regions(state, previous)
         payload = {
-            item["region_id"]: "added_unsupported"
+            item["region_id"]: "added_false_change"
             for item in state.evidence["verifier_region_proposals"]
         }
         processor = FakeProcessor(payload)
@@ -211,6 +211,70 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(processor.call_count, 1)
         self.assertTrue(verifier.last_evidence["cache_hit"])
+        self.assertEqual(
+            verifier.last_evidence["decision_key"],
+            verifier.last_evidence["candidate_fingerprint"],
+        )
+        self.assertEqual(verifier.last_evidence["reused_from_step"], state.step_index)
+
+    def test_candidate_decision_key_changes_with_context_and_schema(self):
+        previous = make_state(7)
+        state = make_state(8)
+        attach_verifier_regions(state, previous)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=FakeProcessor({})
+        )
+        proposals = state.evidence["verifier_region_proposals"]
+        facts = state.evidence["verifier_mask_facts"]
+        action = AgentAction("t2", "positive_point", coordinate=(7, 7))
+        baseline = verifier._candidate_fingerprint(
+            state, previous, action, proposals, facts
+        )
+
+        changed_query = state.clone()
+        changed_query.query = "warehouse"
+        self.assertNotEqual(
+            baseline,
+            verifier._candidate_fingerprint(
+                changed_query, previous, action, proposals, facts
+            ),
+        )
+        self.assertNotEqual(
+            baseline,
+            verifier._candidate_fingerprint(
+                state,
+                previous,
+                AgentAction("t2", "positive_point", coordinate=(6, 7)),
+                proposals,
+                facts,
+            ),
+        )
+        verifier.SCHEMA_VERSION = "compact_delta_effect_next"
+        self.assertNotEqual(
+            baseline,
+            verifier._candidate_fingerprint(
+                state, previous, action, proposals, facts
+            ),
+        )
+
+    def test_mixed_or_conflicting_delta_effects_are_conservatively_uncertain(self):
+        judgments = Qwen3VLZeroShotVerifier._comparison_from_effects
+        from change_agent.adapters.qwen3vl_verifier import _EffectJudgment
+
+        self.assertEqual(judgments((_EffectJudgment("d0", "mixed"),)), "uncertain")
+        self.assertEqual(
+            judgments(
+                (
+                    _EffectJudgment("d0", "added_true_change"),
+                    _EffectJudgment("d1", "added_false_change"),
+                )
+            ),
+            "uncertain",
+        )
+
+    def test_compact_effect_json_fits_a_small_output_budget(self):
+        payload = {f"d{index}": "added_true_change" for index in range(3)}
+        self.assertLess(len(json.dumps(payload, separators=(",", ":"))), 128)
 
     def test_white_candidate_region_cannot_be_false_negative(self):
         state = make_state()

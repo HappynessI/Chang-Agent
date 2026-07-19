@@ -16,6 +16,7 @@ def attach_verifier_regions(
     previous_state: ChangeState | None = None,
     *,
     max_regions: int = 6,
+    max_delta_regions: int = 3,
     min_component_area: int = 4,
     padding_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
@@ -38,7 +39,7 @@ def attach_verifier_regions(
         else build_candidate_delta_regions(
             state,
             previous_state,
-            max_regions=min(max_regions, 2),
+            max_regions=max_delta_regions,
             min_component_area=min_component_area,
             padding_ratio=padding_ratio,
         )
@@ -76,11 +77,21 @@ def attach_verifier_regions(
         if previous_state is not None
         else 0,
         "proposal_count": len(proposals),
+        "proposal_config": {
+            "schema_version": "component_delta_v2",
+            "max_regions": max_regions if previous_state is None else max_delta_regions,
+            "min_component_area": min_component_area,
+            "padding_ratio": padding_ratio,
+        },
     }
     if previous_state is not None:
         covered = int(state.evidence["verifier_mask_facts"]["candidate_delta_covered_pixels"])
+        total = int(candidate_delta.sum())
         state.evidence["verifier_mask_facts"]["candidate_delta_uncovered_pixels"] = max(
-            0, int(candidate_delta.sum()) - covered
+            0, total - covered
+        )
+        state.evidence["verifier_mask_facts"]["candidate_delta_coverage_ratio"] = (
+            covered / total if total else 1.0
         )
     return proposals
 
@@ -89,15 +100,15 @@ def build_candidate_delta_regions(
     state: ChangeState,
     previous_state: ChangeState,
     *,
-    max_regions: int = 2,
+    max_regions: int = 3,
     min_component_area: int = 1,
     padding_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
-    """Build compact, polarity-preserving panels for the actual candidate edit.
+    """Build compact, polarity-preserving component panels for a candidate edit.
 
-    All added pixels share one panel and all removed pixels share another. The two
-    polarities are never merged, so the Verifier can label the complete edit without
-    reconsidering unchanged regions or narrating every small fragment.
+    Connected components remain separate, so spatially distant or semantically mixed
+    edits cannot be collapsed into one label. Coverage facts force conservative
+    rejection when the configured component budget cannot inspect every changed pixel.
     """
 
     if max_regions < 1:
@@ -117,16 +128,16 @@ def build_candidate_delta_regions(
         ("added", candidate_added),
         ("removed", candidate_removed),
     ):
-        if mask.any():
-            # One proposal per polarity covers every changed pixel.  A point or box
-            # can fragment into several small components after matching/rebuild; asking
-            # the 2B model to narrate each fragment recreates the oversized protocol.
-            raw.append((effect_kind, mask))
+        components = sorted(
+            connected_components(mask), key=lambda item: int(item.sum()), reverse=True
+        )
+        raw.extend((effect_kind, component) for component in components)
     raw.sort(key=lambda item: int(item[1].sum()), reverse=True)
 
     height, width = change.shape
     result: list[dict[str, Any]] = []
     for index, (effect_kind, component) in enumerate(raw[:max_regions]):
+        seed_y, seed_x = np.argwhere(component)[0]
         crop_box = _padded_box(_mask_box(component), (height, width), padding_ratio)
         x1, y1, x2, y2 = crop_box
         crop = np.zeros_like(change)
@@ -137,6 +148,7 @@ def build_candidate_delta_regions(
                 "effect_kind": effect_kind,
                 "sources": [f"candidate_{effect_kind}"],
                 "component_area": int(component.sum()),
+                "component_seed_pixels": [int(seed_x), int(seed_y)],
                 "box_pixels": list(crop_box),
                 "box_normalized": list(
                     pixel_box_to_normalized(crop_box, (width, height))
@@ -146,6 +158,7 @@ def build_candidate_delta_regions(
                     np.logical_and(temporal_difference, crop).sum()
                 ),
                 "candidate_delta_pixels": int(component.sum()),
+                "delta_pixels": int(component.sum()),
                 "candidate_added_pixels": int(component.sum())
                 if effect_kind == "added"
                 else 0,

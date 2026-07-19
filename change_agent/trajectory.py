@@ -53,6 +53,9 @@ class TrajectoryEntry:
             "verifier": verifier,
             "execution": _json_safe(self.execution),
             "matching_evidence": _json_safe(self.state.evidence.get("matching")),
+            "t1_mask_sha256": mask_sha256(self.state.t1_mask),
+            "t2_mask_sha256": mask_sha256(self.state.t2_mask),
+            "change_mask_sha256": mask_sha256(self.state.change_mask),
             "change_mask_file": mask_file,
         }
 
@@ -180,6 +183,15 @@ def default_run_metadata() -> dict[str, Any]:
         "python": sys.version.split()[0],
         "platform": platform.platform(),
     }
+
+
+def mask_sha256(mask: np.ndarray) -> str:
+    """Hash mask values together with shape so replay identity is auditable."""
+
+    value = np.ascontiguousarray(mask, dtype=np.uint8)
+    digest = hashlib.sha256(str(value.shape).encode("ascii"))
+    digest.update(value.tobytes())
+    return digest.hexdigest()
 
 
 def _git_commit() -> str | None:

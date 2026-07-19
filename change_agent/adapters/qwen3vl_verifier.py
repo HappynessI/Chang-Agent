@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from .omniovcd_adapter import connected_components
 from ..coordinates import pixel_box_to_normalized, pixel_point_to_normalized
 from ..state import AgentAction, ChangeState, VerifierOutput
 from ..verifier_regions import attach_verifier_regions
@@ -54,6 +55,7 @@ class Qwen3VLZeroShotVerifier:
     derived from added/removed effect labels by deterministic runtime rules.
     """
 
+    SCHEMA_VERSION = "compact_delta_effect_v2"
     ERROR_TYPES = {
         "none",
         "false_positive_change",
@@ -69,10 +71,11 @@ class Qwen3VLZeroShotVerifier:
     }
     COMPARISONS = {"better", "worse", "unchanged", "uncertain"}
     EFFECT_LABELS = {
-        "added_supported",
-        "added_unsupported",
-        "removed_supported",
-        "removed_unsupported",
+        "added_true_change",
+        "added_false_change",
+        "removed_false_positive",
+        "removed_true_change",
+        "mixed",
         "uncertain",
     }
     VIEWS = {"t1", "t2"}
@@ -202,14 +205,17 @@ class Qwen3VLZeroShotVerifier:
         previous_action: AgentAction | None,
         previous_state: ChangeState,
     ) -> VerifierOutput:
+        proposals = list(state.evidence.get("verifier_region_proposals", []))
+        facts = dict(state.evidence.get("verifier_mask_facts", {}))
         fingerprint = self._candidate_fingerprint(
-            state, previous_state, previous_action
+            state, previous_state, previous_action, proposals, facts
         )
         cached = self._candidate_cache.get(fingerprint)
         if cached is not None:
             output, evidence = cached
             self.last_evidence = copy.deepcopy(evidence)
             self.last_evidence["cache_hit"] = True
+            self.last_evidence["reused_from_step"] = evidence.get("decision_step")
             self._last_valid_output = output if output.verifier_valid else None
             return output
 
@@ -238,6 +244,8 @@ class Qwen3VLZeroShotVerifier:
                 "type": "qwen3vl_compact_delta_effect_zero_shot",
                 "decision_mode": "programmatic_identical_state",
                 "candidate_fingerprint": fingerprint,
+                "decision_key": fingerprint,
+                "decision_step": state.step_index,
                 "cache_hit": False,
                 "comparison": "unchanged",
                 "effect_attempts": [],
@@ -249,8 +257,6 @@ class Qwen3VLZeroShotVerifier:
             self._cache_candidate(fingerprint, output)
             return output
 
-        proposals = list(state.evidence.get("verifier_region_proposals", []))
-        facts = dict(state.evidence.get("verifier_mask_facts", {}))
         effect_errors: list[str] = []
         effect_attempts: list[dict[str, Any]] = []
         judgments: tuple[_EffectJudgment, ...] | None = None
@@ -294,6 +300,8 @@ class Qwen3VLZeroShotVerifier:
                     "type": "qwen3vl_compact_delta_effect_zero_shot",
                     "decision_mode": "programmatic_delta_effect",
                     "candidate_fingerprint": fingerprint,
+                    "decision_key": fingerprint,
+                    "decision_step": state.step_index,
                     "cache_hit": False,
                     "effect_attempts": effect_attempts,
                     "mask_facts": facts,
@@ -312,6 +320,8 @@ class Qwen3VLZeroShotVerifier:
             "type": "qwen3vl_compact_delta_effect_zero_shot",
             "decision_mode": "programmatic_delta_effect",
             "candidate_fingerprint": fingerprint,
+            "decision_key": fingerprint,
+            "decision_step": state.step_index,
             "cache_hit": False,
             "gt_available": False,
             "verifier_valid": True,
@@ -499,13 +509,14 @@ class Qwen3VLZeroShotVerifier:
             "Judge only the pixels changed by the candidate action. Each supplied delta proposal "
             "has effect_kind added or removed and exact pixel counts. Confirm temporal building "
             "change from the T1/T2 RGB crops; predicted masks are supporting predictions, not GT. "
-            "For an added proposal output added_supported when the newly white change pixels are "
-            "a real temporal building change, added_unsupported when they are not, or uncertain. "
-            "For a removed proposal output removed_supported when the removed pixels were a real "
-            "change that should have stayed white, removed_unsupported when the removed pixels were "
-            "false change, or uncertain. Return exactly one compact JSON object mapping every exact "
+            "For an added proposal output added_true_change when the newly white pixels are real "
+            "temporal building change, added_false_change when they are false change, mixed when "
+            "the component contains both, or uncertain. For a removed proposal output "
+            "removed_false_positive when the removed pixels were false change, removed_true_change "
+            "when real change was wrongly removed, mixed when both occur, or uncertain. Return "
+            "exactly one compact JSON object mapping every exact "
             "region_id to one label string, for example "
-            "{\"d0\":\"added_supported\",\"d1\":\"removed_unsupported\"}. "
+            "{\"d0\":\"added_true_change\",\"d1\":\"removed_false_positive\"}. "
             "Do not output feedback sentences, comparison, scores, actions, coordinates, or extra keys.\n"
             f"Exact candidate delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
@@ -748,13 +759,15 @@ class Qwen3VLZeroShotVerifier:
     def _comparison_from_effects(
         judgments: tuple[_EffectJudgment, ...]
     ) -> str:
-        beneficial = {"added_supported", "removed_unsupported"}
-        harmful = {"added_unsupported", "removed_supported"}
+        beneficial = {"added_true_change", "removed_false_positive"}
+        harmful = {"added_false_change", "removed_true_change"}
         labels = {item.effect for item in judgments}
+        if labels & {"mixed", "uncertain"} or not labels:
+            return "uncertain"
+        if labels & beneficial and labels & harmful:
+            return "uncertain"
         if labels & harmful:
             return "worse"
-        if "uncertain" in labels or not labels:
-            return "uncertain"
         if labels <= beneficial:
             return "better"
         return "uncertain"
@@ -792,15 +805,15 @@ class Qwen3VLZeroShotVerifier:
             (
                 item
                 for item in judgments
-                if item.effect in {"added_unsupported", "removed_supported"}
+                if item.effect in {"added_false_change", "removed_true_change"}
             ),
             judgments[0],
         )
         region = tuple(by_id[selected.region_id]["box_normalized"])
-        if selected.effect == "added_unsupported":
+        if selected.effect == "added_false_change":
             error_type = "false_positive_change"
             suggested_action = "negative_point"
-        elif selected.effect == "removed_supported":
+        elif selected.effect == "removed_true_change":
             error_type = "false_negative"
             suggested_action = "positive_point"
         else:
@@ -833,14 +846,18 @@ class Qwen3VLZeroShotVerifier:
             and np.array_equal(state.change_mask, previous_state.change_mask)
         )
 
-    @staticmethod
     def _candidate_fingerprint(
+        self,
         state: ChangeState,
         previous_state: ChangeState,
         previous_action: AgentAction | None,
+        proposals: list[dict[str, Any]],
+        facts: dict[str, Any],
     ) -> str:
         digest = hashlib.sha256()
         for array in (
+            state.t1_image,
+            state.t2_image,
             previous_state.t1_mask,
             previous_state.t2_mask,
             previous_state.change_mask,
@@ -848,15 +865,22 @@ class Qwen3VLZeroShotVerifier:
             state.t2_mask,
             state.change_mask,
         ):
-            value = np.ascontiguousarray(array, dtype=np.uint8)
+            value = np.ascontiguousarray(array)
             digest.update(str(value.shape).encode("ascii"))
+            digest.update(str(value.dtype).encode("ascii"))
             digest.update(value.tobytes())
+        identity = {
+            "schema_version": self.SCHEMA_VERSION,
+            "query": state.query,
+            "action": previous_action.to_dict() if previous_action else None,
+            "max_new_tokens": self.max_new_tokens,
+            "max_retries": self.max_retries,
+            "model": getattr(getattr(self.model, "config", None), "_name_or_path", None),
+            "proposals": proposals,
+            "facts": facts,
+        }
         digest.update(
-            json.dumps(
-                previous_action.to_dict() if previous_action else None,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
         return digest.hexdigest()
 
@@ -933,6 +957,30 @@ class Qwen3VLZeroShotVerifier:
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
         change = np.asarray(state.change_mask[region], dtype=bool)
+        delta_component = None
+        if previous_state is not None and proposal.get("component_seed_pixels"):
+            if proposal.get("effect_kind") == "added":
+                full_delta = np.logical_and(
+                    state.change_mask, ~previous_state.change_mask
+                )
+            elif proposal.get("effect_kind") == "removed":
+                full_delta = np.logical_and(
+                    previous_state.change_mask, ~state.change_mask
+                )
+            else:
+                raise ValueError("delta proposal has no valid effect_kind")
+            seed_x, seed_y = proposal["component_seed_pixels"]
+            delta_component = next(
+                (
+                    component
+                    for component in connected_components(full_delta)
+                    if component[int(seed_y), int(seed_x)]
+                ),
+                None,
+            )
+            if delta_component is None:
+                raise ValueError("delta proposal seed does not identify a candidate component")
+            delta_component = delta_component[region]
         t1 = np.array(
             Qwen3VLZeroShotVerifier._as_image(state.t1_image[region]).convert("RGB"),
             copy=True,
@@ -941,9 +989,10 @@ class Qwen3VLZeroShotVerifier:
             Qwen3VLZeroShotVerifier._as_image(state.t2_image[region]).convert("RGB"),
             copy=True,
         )
+        overlay = change if delta_component is None else delta_component
         for image in (t1, t2):
-            image[change] = np.clip(
-                image[change].astype(np.float32) * 0.45 + np.array([140, 0, 140]),
+            image[overlay] = np.clip(
+                image[overlay].astype(np.float32) * 0.45 + np.array([140, 0, 140]),
                 0,
                 255,
             ).astype(np.uint8)
@@ -951,14 +1000,20 @@ class Qwen3VLZeroShotVerifier:
             change_rgb = np.repeat((change.astype(np.uint8) * 255)[..., None], 3, axis=2)
         else:
             previous_change = np.asarray(previous_state.change_mask[region], dtype=bool)
+            if delta_component is not None:
+                stable = np.logical_and(previous_change, change)
+                previous_change = np.logical_or(
+                    stable, np.logical_and(previous_change, delta_component)
+                )
+                change = np.logical_or(stable, np.logical_and(change, delta_component))
             change_rgb = np.zeros((*change.shape, 3), dtype=np.uint8)
             change_rgb[..., 0] = previous_change.astype(np.uint8) * 255
             change_rgb[..., 1] = change.astype(np.uint8) * 255
-            change_rgb[..., 2] = np.logical_xor(previous_change, change).astype(np.uint8) * 255
+            change_rgb[..., 2] = overlay.astype(np.uint8) * 255
         temporal = np.zeros((*change.shape, 3), dtype=np.uint8)
         temporal[..., 0] = np.asarray(state.t1_mask[region], dtype=np.uint8) * 255
         temporal[..., 1] = np.asarray(state.t2_mask[region], dtype=np.uint8) * 255
-        temporal[..., 2] = change.astype(np.uint8) * 255
+        temporal[..., 2] = overlay.astype(np.uint8) * 255
         tiles = [
             Image.fromarray(t1),
             Image.fromarray(t2),

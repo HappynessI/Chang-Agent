@@ -17,7 +17,7 @@
     "shared_agent_weights": true,
     "max_new_tokens": 1024,
     "max_region_proposals": 6,
-    "max_delta_region_proposals": 2,
+    "max_delta_region_proposals": 3,
     "decision": "programmatic_from_added_removed_effect_labels"
   },
   "seed": 42

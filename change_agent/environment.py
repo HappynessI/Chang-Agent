@@ -48,6 +48,7 @@ class ChangeAgentEnvironment:
         max_component_count_delta: int = 4,
         require_tool_before_finish: bool = True,
         verifier_max_regions: int = 6,
+        verifier_max_delta_regions: int = 3,
         verifier_min_region_area: int = 4,
         verifier_region_padding_ratio: float = 0.25,
     ):
@@ -61,7 +62,11 @@ class ChangeAgentEnvironment:
             raise ValueError("max_target_mask_change_ratio must be in [0, 1]")
         if max_component_count_delta < 0:
             raise ValueError("max_component_count_delta must be non-negative")
-        if verifier_max_regions < 1 or verifier_min_region_area < 1:
+        if (
+            verifier_max_regions < 1
+            or verifier_max_delta_regions < 1
+            or verifier_min_region_area < 1
+        ):
             raise ValueError("Verifier region limits must be positive")
         if verifier_region_padding_ratio < 0:
             raise ValueError("verifier_region_padding_ratio must be non-negative")
@@ -79,6 +84,7 @@ class ChangeAgentEnvironment:
         self.max_component_count_delta = max_component_count_delta
         self.require_tool_before_finish = require_tool_before_finish
         self.verifier_max_regions = verifier_max_regions
+        self.verifier_max_delta_regions = verifier_max_delta_regions
         self.verifier_min_region_area = verifier_min_region_area
         self.verifier_region_padding_ratio = verifier_region_padding_ratio
         self.trajectory = Trajectory(
@@ -239,15 +245,60 @@ class ChangeAgentEnvironment:
             )
             execution.update(result.evidence)
 
-        self._attach_verifier_regions(candidate, previous_state)
-        verifier_output = self.verifier.verify(
-            candidate, self.feedback.quality_score, action, previous_state
-        )
         previous_area_ratio = float(previous_state.change_mask.mean())
         candidate_area_ratio = float(candidate.change_mask.mean())
         area_delta = abs(candidate_area_ratio - previous_area_ratio)
-        rejection_reasons: list[str] = []
-        if not verifier_output.verifier_valid:
+        hard_rejection_reasons: list[str] = []
+        if action.action != "finish":
+            if area_delta > self.max_selection_area_delta:
+                hard_rejection_reasons.append("mask_area_delta_exceeded")
+            locality = execution.get("locality", {})
+            if locality.get("outside_roi_ratio", 0.0) > self.max_locality_outside_ratio:
+                hard_rejection_reasons.append("locality_outside_roi_exceeded")
+            if (
+                locality.get("target_mask_change_ratio", 0.0)
+                > self.max_target_mask_change_ratio
+            ):
+                hard_rejection_reasons.append("target_mask_change_exceeded")
+            if (
+                abs(locality.get("component_count_delta", 0))
+                > self.max_component_count_delta
+            ):
+                hard_rejection_reasons.append("component_count_delta_exceeded")
+
+        verifier_skipped = bool(hard_rejection_reasons)
+        if verifier_skipped:
+            verifier_output = VerifierOutput(
+                quality_score=None,
+                progress_score=None,
+                comparison="worse",
+                error_type=previous_feedback.error_type,
+                target_view=previous_feedback.target_view,
+                error_region=previous_feedback.error_region,
+                suggested_action=previous_feedback.suggested_action,
+                feedback=(
+                    "Candidate rejected before Qwen verification by hard runtime gates: "
+                    + ", ".join(hard_rejection_reasons)
+                ),
+                accept=False,
+                verifier_valid=True,
+                localization_valid=previous_feedback.localization_valid,
+                stop=False,
+            )
+            execution["verifier_evidence"] = {
+                "type": "runtime_hard_gate_precheck",
+                "verifier_skipped": True,
+                "rejection_reasons": list(hard_rejection_reasons),
+                "gt_available": False,
+            }
+        else:
+            self._attach_verifier_regions(candidate, previous_state)
+            verifier_output = self.verifier.verify(
+                candidate, self.feedback.quality_score, action, previous_state
+            )
+
+        rejection_reasons = list(hard_rejection_reasons)
+        if not verifier_skipped and not verifier_output.verifier_valid:
             rejection_reasons.append("verifier_invalid")
         if verifier_output.comparison is not None:
             ranking_progress = {
@@ -263,27 +314,12 @@ class ChangeAgentEnvironment:
                 if verifier_output.progress_score is not None
                 else verifier_output.score_delta
             )
-        if action.action != "finish":
+        if action.action != "finish" and not verifier_skipped:
             if verifier_output.comparison is not None:
                 if verifier_output.comparison != "better":
-                    rejection_reasons.append("pairwise_candidate_not_better")
+                    rejection_reasons.append("candidate_effect_not_better")
             elif ranking_progress <= self.selection_epsilon:
                 rejection_reasons.append("progress_did_not_improve")
-            if area_delta > self.max_selection_area_delta:
-                rejection_reasons.append("mask_area_delta_exceeded")
-            locality = execution.get("locality", {})
-            if locality.get("outside_roi_ratio", 0.0) > self.max_locality_outside_ratio:
-                rejection_reasons.append("locality_outside_roi_exceeded")
-            if (
-                locality.get("target_mask_change_ratio", 0.0)
-                > self.max_target_mask_change_ratio
-            ):
-                rejection_reasons.append("target_mask_change_exceeded")
-            if (
-                abs(locality.get("component_count_delta", 0))
-                > self.max_component_count_delta
-            ):
-                rejection_reasons.append("component_count_delta_exceeded")
         candidate_accepted = not rejection_reasons
         execution.update(
             {
@@ -294,9 +330,11 @@ class ChangeAgentEnvironment:
                 "candidate_area_delta": area_delta,
                 "ranking_progress": ranking_progress,
                 "pairwise_comparison": verifier_output.comparison,
+                "verifier_skipped_by_hard_gate": verifier_skipped,
             }
         )
-        execution = self._with_verifier_evidence(execution)
+        if not verifier_skipped:
+            execution = self._with_verifier_evidence(execution)
         if candidate_accepted:
             self.state = candidate
             self.feedback = verifier_output
@@ -403,6 +441,7 @@ class ChangeAgentEnvironment:
             state,
             previous_state,
             max_regions=self.verifier_max_regions,
+            max_delta_regions=self.verifier_max_delta_regions,
             min_component_area=self.verifier_min_region_area,
             padding_ratio=self.verifier_region_padding_ratio,
         )

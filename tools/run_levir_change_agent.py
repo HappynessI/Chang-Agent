@@ -59,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-target-mask-change-ratio", type=float, default=0.25)
     parser.add_argument("--max-component-count-delta", type=int, default=4)
     parser.add_argument("--verifier-max-regions", type=int, default=6)
+    parser.add_argument("--verifier-max-delta-regions", type=int, default=3)
     parser.add_argument("--verifier-min-region-area", type=int, default=4)
     parser.add_argument("--verifier-region-padding-ratio", type=float, default=0.25)
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
@@ -169,6 +170,7 @@ def main() -> None:
             max_target_mask_change_ratio=args.max_target_mask_change_ratio,
             max_component_count_delta=args.max_component_count_delta,
             verifier_max_regions=args.verifier_max_regions,
+            verifier_max_delta_regions=args.verifier_max_delta_regions,
             verifier_min_region_area=args.verifier_min_region_area,
             verifier_region_padding_ratio=args.verifier_region_padding_ratio,
             run_metadata={
@@ -182,12 +184,14 @@ def main() -> None:
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
-                "verifier_max_delta_regions": min(args.verifier_max_regions, 2),
+                "verifier_max_delta_regions": args.verifier_max_delta_regions,
                 "verifier_min_region_area": args.verifier_min_region_area,
                 "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
                 "coordinate_protocol": "public normalized_0_1000; environment pixel_xy",
                 "matching_mode": args.matching_mode,
                 "overlap_threshold": args.overlap_threshold,
+                "t12_min_instance_area": args.t12_min_instance_area,
+                "cd_min_instance_area": args.cd_min_instance_area,
                 "gt_available_during_rollout": False,
             },
         )
@@ -483,7 +487,7 @@ def _base_manifest(
             else "legacy_rule_score"
         ),
         "verifier_max_regions": args.verifier_max_regions,
-        "verifier_max_delta_regions": min(args.verifier_max_regions, 2),
+        "verifier_max_delta_regions": args.verifier_max_delta_regions,
         "verifier_min_region_area": args.verifier_min_region_area,
         "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
         "coordinate_protocol": "Agent/Verifier normalized_0_1000; Environment pixel_xy",

@@ -64,8 +64,8 @@ separately validated latent/tool-ranking objective.
 
 - Initial verification uses at most six auditable proposals from current change-mask
   components and T1/T2 object-mask XOR components. Candidate verification inspects only
-  the actual added/removed delta, caps it at two polarity-preserving aggregate panels, and
-  rejects a candidate when changed pixels fall outside that compact proposal set.
+  the actual added/removed delta as separate connected-component panels, capped at three,
+  and rejects a candidate when any changed pixel falls outside that proposal set.
 - Qwen retains the five labeled full-image inputs, then receives an upscaled four-panel
   crop for every proposal: T1, T2, binary change, and color-coded T1/T2/change masks.
   Initial responses map each exact `region_id` to the compact pair
@@ -75,11 +75,12 @@ separately validated latent/tool-ranking objective.
   as a proposal and upscaled so white foreground cannot silently disappear visually.
 - An ordinary white change component cannot be labeled `false_negative`; that initial
   label requires a `temporal_difference_missing` source. Candidate delta responses map
-  each `dN` directly to `added_supported`, `added_unsupported`, `removed_supported`,
-  `removed_unsupported`, or `uncertain`.
+  each `dN` directly to `added_true_change`, `added_false_change`,
+  `removed_false_positive`, `removed_true_change`, `mixed`, or `uncertain`.
 - Qwen no longer outputs candidate `better/worse`. The runtime derives it
-  deterministically: supported additions and unsupported removals are beneficial;
-  unsupported additions and supported removals are harmful; uncertainty is rejected.
+  deterministically: true-change additions and false-positive removals are beneficial;
+  false-change additions and true-change removals are harmful; mixed, conflicting, or
+  uncertain judgments are rejected.
   `quality_score` and `progress_score` remain `null`.
 - `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
   from region judgments and Environment boxes. False positives map to a negative point,
@@ -87,8 +88,8 @@ separately validated latent/tool-ranking objective.
   supported proposals to finish. Invalid analysis cannot authorize an action or stop.
 - A valid, error-free initial state may finish without a redundant tool action. The
   saved-candidate replay challenge in `tools/replay_verifier_challenge.py` evaluates
-  delta-effect decisions without exposing GT to the Verifier; GT is read only afterward to
-  score the decision.
+  delta-effect decisions without exposing GT to the Verifier. Replay reconstructs the
+  accepted-state chain and requires online/replay mask hashes to match before scoring.
 
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
 policies. All attempted candidate masks are retained, and initial, verifier-best,

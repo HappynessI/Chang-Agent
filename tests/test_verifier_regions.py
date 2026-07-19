@@ -77,7 +77,7 @@ class VerifierRegionTest(unittest.TestCase):
             all(len(item["sources"]) == 1 for item in proposals)
         )
 
-    def test_candidate_attachment_aggregates_each_delta_polarity_without_losing_pixels(self):
+    def test_candidate_attachment_keeps_components_separate_with_full_coverage(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         previous_mask = np.zeros((32, 32), dtype=bool)
         current_mask = np.zeros_like(previous_mask)
@@ -93,13 +93,38 @@ class VerifierRegionTest(unittest.TestCase):
 
         proposals = attach_verifier_regions(current, previous, max_regions=6)
 
-        self.assertEqual(len(proposals), 1)
-        self.assertEqual(proposals[0]["effect_kind"], "added")
-        self.assertEqual(proposals[0]["component_area"], 12)
+        self.assertEqual(len(proposals), 3)
+        self.assertTrue(all(item["effect_kind"] == "added" for item in proposals))
+        self.assertEqual(sum(item["component_area"] for item in proposals), 12)
         self.assertEqual(
             current.evidence["verifier_mask_facts"]["candidate_delta_uncovered_pixels"],
             0,
         )
+        self.assertEqual(
+            current.evidence["verifier_mask_facts"]["candidate_delta_coverage_ratio"],
+            1.0,
+        )
+
+    def test_component_budget_exposes_uncovered_delta_for_conservative_rejection(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        current_mask = np.zeros_like(previous_mask)
+        for offset in (2, 8, 14, 20):
+            current_mask[offset : offset + 2, offset : offset + 2] = True
+        previous = ChangeState(
+            image, image, "building", np.zeros_like(previous_mask), previous_mask, previous_mask
+        )
+        current = ChangeState(
+            image, image, "building", np.zeros_like(current_mask), current_mask, current_mask
+        )
+
+        proposals = attach_verifier_regions(current, previous, max_delta_regions=3)
+        facts = current.evidence["verifier_mask_facts"]
+
+        self.assertEqual(len(proposals), 3)
+        self.assertEqual(facts["candidate_delta_covered_pixels"], 12)
+        self.assertEqual(facts["candidate_delta_uncovered_pixels"], 4)
+        self.assertEqual(facts["candidate_delta_coverage_ratio"], 0.75)
 
 
 if __name__ == "__main__":

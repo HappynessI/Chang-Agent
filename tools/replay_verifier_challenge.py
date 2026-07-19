@@ -22,6 +22,7 @@ from change_agent.adapters.omniovcd_adapter import MaskPairProcessor
 from change_agent.adapters.qwen3vl_adapter import GroundingModelQwen3VL
 from change_agent.adapters.qwen3vl_verifier import Qwen3VLZeroShotVerifier
 from change_agent.state import AgentAction, ChangeState
+from change_agent.trajectory import mask_sha256
 from change_agent.verifier_regions import attach_verifier_regions
 
 
@@ -40,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--comparison-epsilon", type=float, default=1e-6)
     parser.add_argument("--max-regions", type=int, default=6)
+    parser.add_argument("--max-delta-regions", type=int, default=3)
     return parser.parse_args()
 
 
@@ -69,6 +71,7 @@ def main() -> None:
             query=args.query,
             comparison_epsilon=args.comparison_epsilon,
             max_regions=args.max_regions,
+            max_delta_regions=args.max_delta_regions,
         )
         temp_output.mkdir(parents=True, exist_ok=True)
         (temp_output / "replay_report.json").write_text(
@@ -87,12 +90,12 @@ def replay_run(
     query: str = "building",
     comparison_epsilon: float = 1e-6,
     max_regions: int = 6,
+    max_delta_regions: int = 3,
 ) -> dict[str, Any]:
     """Replay all saved tool candidates without exposing GT to ``verifier``."""
 
     if comparison_epsilon < 0:
         raise ValueError("comparison_epsilon must be non-negative")
-    metrics = json.loads((run_dir / "per_sample_metrics.json").read_text())
     samples: dict[str, Any] = {}
     for sample_file in SAMPLES:
         sample = Path(sample_file).stem
@@ -100,9 +103,14 @@ def replay_run(
         trajectory = json.loads(trajectory_path.read_text())
         image1 = np.asarray(Image.open(input_root / "A" / sample_file).convert("RGB"))
         image2 = np.asarray(Image.open(input_root / "B" / sample_file).convert("RGB"))
-        gt = np.asarray(Image.open(input_root / "label_cvt" / sample_file)) > 0
         initial_t1, initial_t2 = _initial_masks(run_dir, sample)
-        processor = MaskPairProcessor()
+        metadata = trajectory.get("metadata", {})
+        processor = MaskPairProcessor(
+            overlap_threshold=float(metadata.get("overlap_threshold", 0.25)),
+            matching_mode=metadata.get("matching_mode", "overlap_presence"),
+            t12_min_instance_area=int(metadata.get("t12_min_instance_area", 0)),
+            cd_min_instance_area=int(metadata.get("cd_min_instance_area", 0)),
+        )
         initial = _make_state(
             image1,
             image2,
@@ -111,13 +119,15 @@ def replay_run(
             initial_t2,
             processor,
         )
-        initial_iou = _iou(initial.change_mask, gt)
+        accepted = initial
+        verifier.reset()
         entries: list[dict[str, Any]] = []
+        pending_offline: list[tuple[dict[str, Any], np.ndarray, np.ndarray]] = []
         for step in trajectory["steps"][1:]:
             if not step.get("tool") or not step.get("parsed_action"):
                 continue
             candidate_t1, candidate_t2 = _candidate_masks(
-                run_dir, sample, step, initial_t1, initial_t2
+                run_dir, sample, step, accepted.t1_mask, accepted.t2_mask
             )
             candidate = _make_state(
                 image1,
@@ -134,45 +144,79 @@ def replay_run(
                     f"saved candidate mask shape {saved_change.shape} does not match "
                     f"reconstructed state {candidate.change_mask.shape}"
                 )
-            # Preserve the exact candidate presented in the original trajectory;
-            # T1/T2 masks are reconstructed from tool artifacts for the local
-            # temporal views, while this field is the persisted final mask.
-            candidate.change_mask = saved_change
-            # The previous state is the accepted initial state for this historical
-            # run: every saved tool candidate was rejected and rolled back.
-            verifier.reset()
-            attach_verifier_regions(candidate, initial, max_regions=max_regions)
-            action = _action_from_dict(step["parsed_action"])
-            output = verifier.verify(candidate, None, action, initial)
+            expected_hashes = {
+                "t1": step.get("t1_mask_sha256"),
+                "t2": step.get("t2_mask_sha256"),
+                "change": step.get("change_mask_sha256") or mask_sha256(saved_change),
+            }
+            actual_hashes = {
+                "t1": mask_sha256(candidate.t1_mask),
+                "t2": mask_sha256(candidate.t2_mask),
+                "change": mask_sha256(candidate.change_mask),
+            }
+            assert_replay_hashes(
+                expected_hashes,
+                actual_hashes,
+                context=f"{sample} step {step['step_index']}",
+            )
 
-            # GT is consulted only here, after the verifier has returned.
-            candidate_iou = _iou(candidate.change_mask, gt)
+            action = _action_from_dict(step["parsed_action"])
+            skipped = bool(
+                step.get("execution", {}).get("verifier_skipped_by_hard_gate")
+            )
+            output = None
+            evidence: dict[str, Any] = {}
+            if not skipped:
+                attach_verifier_regions(
+                    candidate,
+                    accepted,
+                    max_regions=max_regions,
+                    max_delta_regions=max_delta_regions,
+                )
+                output = verifier.verify(candidate, None, action, accepted)
+                evidence = getattr(verifier, "last_evidence", {})
+            entry = {
+                "step_index": step["step_index"],
+                "candidate_accepted_in_original_run": step.get("candidate_accepted"),
+                "verifier_skipped_by_hard_gate": skipped,
+                "replay_hash_match": True,
+                "replay_candidate_hashes": actual_hashes,
+                "verifier_output": output.to_dict() if output is not None else None,
+                "verifier_evidence": evidence,
+            }
+            entries.append(entry)
+            pending_offline.append((entry, accepted.change_mask.copy(), candidate.change_mask.copy()))
+            if step.get("candidate_accepted"):
+                accepted = candidate
+
+        # Ground truth is opened only after every Verifier call for this sample.
+        gt = np.asarray(Image.open(input_root / "label_cvt" / sample_file)) > 0
+        initial_iou = _iou(initial.change_mask, gt)
+        for entry, previous_change, candidate_change in pending_offline:
+            previous_iou = _iou(previous_change, gt)
+            candidate_iou = _iou(candidate_change, gt)
             expected = comparison_label(
-                candidate_iou - initial_iou, epsilon=comparison_epsilon
+                candidate_iou - previous_iou, epsilon=comparison_epsilon
             )
-            entries.append(
-                {
-                    "step_index": step["step_index"],
-                    "candidate_accepted_in_original_run": step.get("candidate_accepted"),
-                    "verifier_output": output.to_dict(),
-                    "verifier_evidence": getattr(verifier, "last_evidence", {}),
-                    "offline_after_verifier": {
-                        "initial_iou": initial_iou,
-                        "candidate_iou": candidate_iou,
-                        "expected_comparison": expected,
-                        "comparison_match": output.comparison == expected,
-                    },
-                }
-            )
+            output = entry["verifier_output"]
+            entry["offline_after_verifier"] = {
+                "previous_iou": previous_iou,
+                "candidate_iou": candidate_iou,
+                "expected_comparison": expected,
+                "comparison_match": (
+                    output["comparison"] == expected if output is not None else None
+                ),
+            }
         samples[sample] = {
             "initial_iou": initial_iou,
             "original_verifier_best_step": trajectory.get("verifier_best_step"),
             "entries": entries,
         }
     summary = _summary(samples)
+    metrics = json.loads((run_dir / "per_sample_metrics.json").read_text())
     return {
         "decision_mode": "compact_delta_effect_then_programmatic_comparison",
-        "gt_policy": "GT opened only after verifier output for each candidate",
+        "gt_policy": "GT opened only after every verifier output for a sample",
         "run_dir": str(run_dir),
         "samples": samples,
         "summary": summary,
@@ -203,6 +247,20 @@ def comparison_label(delta: float, *, epsilon: float = 1e-6) -> str:
     if delta < -epsilon:
         return "worse"
     return "unchanged"
+
+
+def assert_replay_hashes(
+    expected: dict[str, str | None], actual: dict[str, str], *, context: str
+) -> None:
+    mismatches = [
+        name
+        for name, expected_hash in expected.items()
+        if expected_hash is not None and expected_hash != actual.get(name)
+    ]
+    if mismatches:
+        raise ValueError(
+            f"replay candidate hash mismatch for {context}: " + ", ".join(mismatches)
+        )
 
 
 def _initial_masks(run_dir: Path, sample: str) -> tuple[np.ndarray, np.ndarray]:
@@ -337,6 +395,7 @@ def _summary(samples: dict[str, Any]) -> dict[str, Any]:
         entry["offline_after_verifier"]
         for sample in samples.values()
         for entry in sample["entries"]
+        if entry["offline_after_verifier"]["comparison_match"] is not None
     ]
     return {
         "candidate_count": len(rows),

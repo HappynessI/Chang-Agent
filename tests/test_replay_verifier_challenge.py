@@ -2,7 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.replay_verifier_challenge import atomic_output, comparison_label
+from tools.replay_verifier_challenge import (
+    assert_replay_hashes,
+    atomic_output,
+    comparison_label,
+)
 
 
 class ReplayVerifierChallengeTest(unittest.TestCase):
@@ -34,6 +38,14 @@ class ReplayVerifierChallengeTest(unittest.TestCase):
             atomic_output(output, write_success)
 
             self.assertTrue((output / "report.json").exists())
+
+    def test_replay_candidate_hash_mismatch_is_fatal(self):
+        with self.assertRaisesRegex(ValueError, "change"):
+            assert_replay_hashes(
+                {"t1": "same", "change": "online"},
+                {"t1": "same", "change": "replay"},
+                context="sample step 1",
+            )
 
 
 if __name__ == "__main__":
