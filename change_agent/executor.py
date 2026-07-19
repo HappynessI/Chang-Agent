@@ -17,6 +17,7 @@ class PointBackend(Protocol):
         initial_mask: np.ndarray,
         coordinate: tuple[int, int],
         is_positive: bool,
+        click_history: tuple[tuple[tuple[int, int], bool], ...] = (),
     ) -> np.ndarray: ...
 
 
@@ -55,6 +56,9 @@ class ActionExecutor:
         image: np.ndarray,
         initial_mask: np.ndarray,
         query: str,
+        *,
+        point_session_mask: np.ndarray | None = None,
+        point_click_history: tuple[tuple[tuple[int, int], bool], ...] = (),
     ) -> ExecutionResult:
         height, width = image.shape[:2]
         if initial_mask.shape != (height, width):
@@ -66,11 +70,21 @@ class ActionExecutor:
             x, y = action.coordinate
             if not (0 <= x < width and 0 <= y < height):
                 raise ValueError("pixel coordinate is outside the target image")
+            session_mask = (
+                initial_mask
+                if point_session_mask is None
+                else np.asarray(point_session_mask, dtype=bool)
+            )
+            if session_mask.shape != initial_mask.shape:
+                raise ValueError(
+                    "point session mask and target mask must have identical spatial size"
+                )
             raw_mask = self.point_backend.refine(
                 image,
-                initial_mask,
+                session_mask,
                 action.coordinate,
                 action.action == "positive_point",
+                point_click_history,
             )
             raw_mask = _validated_tool_mask(raw_mask, initial_mask.shape)
             roi = _point_roi(
@@ -90,6 +104,14 @@ class ActionExecutor:
             tool_input: dict[str, Any] = {
                 "coordinate": list(action.coordinate),
                 "is_positive": action.action == "positive_point",
+                "accepted_click_history": [
+                    {
+                        "coordinate": list(history_coordinate),
+                        "is_positive": history_is_positive,
+                    }
+                    for history_coordinate, history_is_positive in point_click_history
+                ],
+                "session_initial_mask_pixels": int(session_mask.sum()),
             }
         elif action.action == "box":
             if action.box is None:

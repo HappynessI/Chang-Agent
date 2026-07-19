@@ -35,7 +35,7 @@ class MockBackend:
 
 
 class MockPoint:
-    def refine(self, image, initial_mask, coordinate, is_positive):
+    def refine(self, image, initial_mask, coordinate, is_positive, click_history=()):
         result = initial_mask.copy()
         x, y = coordinate
         result[y, x] = is_positive

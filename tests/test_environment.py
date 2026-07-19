@@ -27,7 +27,7 @@ class Backend:
 
 
 class Point:
-    def refine(self, image, initial_mask, coordinate, is_positive):
+    def refine(self, image, initial_mask, coordinate, is_positive, click_history=()):
         output = initial_mask.copy()
         x, y = coordinate
         output[y, x] = is_positive
@@ -104,7 +104,7 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_locality_gate_rejects_global_point_component(self):
         class GlobalPoint:
-            def refine(self, image, initial_mask, coordinate, is_positive):
+            def refine(self, image, initial_mask, coordinate, is_positive, click_history=()):
                 return np.ones_like(initial_mask)
 
         initial_feedback = VerifierOutput(
@@ -288,6 +288,111 @@ class EnvironmentTest(unittest.TestCase):
                 EvidenceVerifier(),
                 inference_only=False,
             )
+
+    def test_point_session_replays_only_accepted_clicks_per_view(self):
+        class RecordingPoint:
+            def __init__(self):
+                self.calls = []
+
+            def refine(
+                self,
+                image,
+                initial_mask,
+                coordinate,
+                is_positive,
+                click_history=(),
+            ):
+                self.calls.append(
+                    (
+                        np.array(initial_mask, copy=True),
+                        coordinate,
+                        is_positive,
+                        click_history,
+                    )
+                )
+                output = np.array(initial_mask, copy=True)
+                x, y = coordinate
+                output[y, x] = is_positive
+                return output
+
+        point = RecordingPoint()
+        verifier = SequenceVerifier(
+            [
+                VerifierOutput(quality_score=0.2, suggested_action="positive_point"),
+                VerifierOutput(quality_score=0.4, progress_score=0.2),
+                VerifierOutput(quality_score=0.1, progress_score=-0.3),
+                VerifierOutput(quality_score=0.5, progress_score=0.1),
+            ]
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(point, self.box),
+            verifier,
+            max_steps=4,
+            max_selection_area_delta=1.0,
+            max_locality_outside_ratio=1.0,
+            max_target_mask_change_ratio=1.0,
+            max_component_count_delta=100,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+        environment.step(AgentAction("t2", "negative_point", coordinate=(1, 1)))
+        environment.step(AgentAction("t2", "positive_point", coordinate=(2, 2)))
+
+        self.assertEqual(point.calls[0][3], ())
+        self.assertEqual(point.calls[1][3], (((0, 0), True),))
+        self.assertEqual(point.calls[2][3], (((0, 0), True),))
+        self.assertTrue(all(not call[0].any() for call in point.calls))
+        self.assertFalse(
+            environment.trajectory.entries[2].execution["candidate_accepted"]
+        )
+
+    def test_accepted_box_starts_a_new_point_session(self):
+        class RecordingPoint:
+            def __init__(self):
+                self.calls = []
+
+            def refine(
+                self,
+                image,
+                initial_mask,
+                coordinate,
+                is_positive,
+                click_history=(),
+            ):
+                self.calls.append((np.array(initial_mask, copy=True), click_history))
+                output = np.array(initial_mask, copy=True)
+                x, y = coordinate
+                output[y, x] = is_positive
+                return output
+
+        point = RecordingPoint()
+        verifier = SequenceVerifier(
+            [
+                VerifierOutput(quality_score=0.2, suggested_action="positive_point"),
+                VerifierOutput(quality_score=0.3, progress_score=0.1),
+                VerifierOutput(quality_score=0.4, progress_score=0.1),
+                VerifierOutput(quality_score=0.5, progress_score=0.1),
+            ]
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(point, self.box),
+            verifier,
+            max_steps=4,
+            max_selection_area_delta=1.0,
+            max_locality_outside_ratio=1.0,
+            max_target_mask_change_ratio=1.0,
+            max_component_count_delta=100,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+        environment.step(AgentAction("t2", "box", box=(2, 2, 5, 5)))
+        box_mask = np.array(environment.state.t2_mask, copy=True)
+        environment.step(AgentAction("t2", "positive_point", coordinate=(6, 6)))
+
+        self.assertEqual(point.calls[1][1], ())
+        self.assertTrue(np.array_equal(point.calls[1][0], box_mask))
 
 
 if __name__ == "__main__":

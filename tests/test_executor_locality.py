@@ -10,7 +10,7 @@ class PointBackend:
     def __init__(self, output):
         self.output = output
 
-    def refine(self, image, initial_mask, coordinate, is_positive):
+    def refine(self, image, initial_mask, coordinate, is_positive, click_history=()):
         return self.output.copy()
 
 

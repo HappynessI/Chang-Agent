@@ -118,8 +118,19 @@ class SubprocessPointBackend(_SubprocessTool):
         initial_mask: np.ndarray,
         coordinate: tuple[int, int],
         is_positive: bool,
+        click_history: tuple[tuple[tuple[int, int], bool], ...] = (),
     ) -> np.ndarray:
         x, y = coordinate
+        history_args = [
+            value
+            for history_coordinate, history_is_positive in click_history
+            for value in (
+                "--history-click",
+                str(history_coordinate[0]),
+                str(history_coordinate[1]),
+                "1" if history_is_positive else "0",
+            )
+        ]
         return self._call(
             "point",
             image,
@@ -132,6 +143,7 @@ class SubprocessPointBackend(_SubprocessTool):
                 str(y),
                 "--is-positive",
                 "1" if is_positive else "0",
+                *history_args,
             ],
         )
 

@@ -252,9 +252,13 @@ runs should additionally pass config/checkpoint/GPU/software metadata through
 `add_geometric_prompt` for normalized box actions, while keeping processor state and
 features hidden from the Agent.
 
-`SimpleClickAdapter` wraps SegAgent's segmentation model and passes the current target
-view mask as the SimpleClick `prev_mask`. Every tool result is checked for shape before
-it can update Environment state.
+`SimpleClickAdapter` calls the underlying SimpleClick predictor directly so the point
+session's initial target-view mask is actually supplied as `prev_mask`. Because real
+tools run in isolated subprocesses, the Environment stores a separate T1/T2 session
+base mask and accepted click history; each worker reconstructs the Clicker and replays
+those clicks in order before applying the candidate click. Rejected candidates are not
+committed, and an accepted box starts a new point session from the box-edited mask.
+Every tool result is checked for shape and locality before it can update live state.
 
 The upstream OmniOVCD checkout contains three CPU-compatibility fixes used by the
 adapter smoke: device-aware SAM3 decoder coordinate caches, CPU-safe positional

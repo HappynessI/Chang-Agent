@@ -20,7 +20,6 @@ def rss_mb() -> float:
 
 def point(args: argparse.Namespace, image: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
     import torch
-    from evaltools.model_loader import SegmentationModel
     from third_party.SimpleClick.isegm.inference import utils
     from third_party.SimpleClick.isegm.inference.predictors import get_predictor
 
@@ -37,19 +36,29 @@ def point(args: argparse.Namespace, image: np.ndarray) -> tuple[np.ndarray, dict
         zoom_in_params={"target_size": (448, 448), "skip_clicks": -1},
         predictor_params={"optimize_after_n_clicks": 1},
     )
-    segmentation_model = SegmentationModel(predictor)
     initial_mask = np.asarray(np.load(args.initial_mask), dtype=bool)
-    result = SimpleClickAdapter(segmentation_model).refine(
+    click_history = tuple(
+        ((int(x), int(y)), bool(is_positive))
+        for x, y, is_positive in args.history_click
+    )
+    result = SimpleClickAdapter(predictor).refine(
         image,
         initial_mask,
         tuple(args.coordinate),
         bool(args.is_positive),
+        click_history,
     )
     return result, {
         "tool": "simpleclick",
         "checkpoint": args.checkpoint,
         "coordinate": args.coordinate,
         "is_positive": bool(args.is_positive),
+        "accepted_click_history": [
+            {"coordinate": list(coordinate), "is_positive": is_positive}
+            for coordinate, is_positive in click_history
+        ],
+        "session_click_count": len(click_history) + 1,
+        "initial_mask_pixels": int(initial_mask.sum()),
     }
 
 
@@ -155,6 +164,14 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--coordinate", nargs=2, type=int)
     parser.add_argument("--is-positive", type=int, choices=(0, 1))
+    parser.add_argument(
+        "--history-click",
+        action="append",
+        nargs=3,
+        type=int,
+        default=[],
+        metavar=("X", "Y", "IS_POSITIVE"),
+    )
     parser.add_argument("--bpe")
     parser.add_argument("--resolution", type=int, default=1008)
     parser.add_argument("--query")
@@ -164,6 +181,10 @@ def main() -> None:
         args.initial_mask is None or args.coordinate is None or args.is_positive is None
     ):
         parser.error("point requires --initial-mask, --coordinate, and --is-positive")
+    if args.mode == "point" and any(
+        is_positive not in (0, 1) for _, _, is_positive in args.history_click
+    ):
+        parser.error("point history IS_POSITIVE values must be 0 or 1")
     if args.mode == "box" and (args.bpe is None or args.query is None or args.box is None):
         parser.error("box requires --bpe, --query, and --box")
     if args.mode == "initialize" and (

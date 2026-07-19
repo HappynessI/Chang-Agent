@@ -78,6 +78,10 @@ class ChangeAgentEnvironment:
         self.feedback: VerifierOutput | None = None
         self.done = False
         self._small_coordinate_streak = 0
+        self._point_session_masks: dict[str, np.ndarray] = {}
+        self._accepted_point_clicks: dict[
+            str, list[tuple[tuple[int, int], bool]]
+        ] = {"t1": [], "t2": []}
 
     def reset(
         self, t1_image: np.ndarray, t2_image: np.ndarray, query: str
@@ -105,6 +109,11 @@ class ChangeAgentEnvironment:
         )
         self.done = False
         self._small_coordinate_streak = 0
+        self._point_session_masks = {
+            "t1": np.array(self.state.t1_mask, dtype=bool, copy=True),
+            "t2": np.array(self.state.t2_mask, dtype=bool, copy=True),
+        }
+        self._accepted_point_clicks = {"t1": [], "t2": []}
         self.trajectory = Trajectory(
             self.trajectory.run_metadata,
             selection_policy=self.selection_policy,
@@ -177,7 +186,16 @@ class ChangeAgentEnvironment:
             target_mask = (
                 self.state.t1_mask if action.target_view == "t1" else self.state.t2_mask
             )
-            result = self.executor.execute(action, target_image, target_mask, self.state.query)
+            result = self.executor.execute(
+                action,
+                target_image,
+                target_mask,
+                self.state.query,
+                point_session_mask=self._point_session_masks[action.target_view],
+                point_click_history=tuple(
+                    self._accepted_point_clicks[action.target_view]
+                ),
+            )
             t1_mask = result.mask if action.target_view == "t1" else self.state.t1_mask
             t2_mask = result.mask if action.target_view == "t2" else self.state.t2_mask
             evidence = dict(self.state.evidence)
@@ -246,6 +264,22 @@ class ChangeAgentEnvironment:
         if candidate_accepted:
             self.state = candidate
             self.feedback = verifier_output
+            if action.action in {"positive_point", "negative_point"}:
+                if action.coordinate is None:
+                    raise RuntimeError("accepted point action has no coordinate")
+                self._accepted_point_clicks[action.target_view].append(
+                    (action.coordinate, action.action == "positive_point")
+                )
+            elif action.action == "box":
+                accepted_target_mask = (
+                    candidate.t1_mask
+                    if action.target_view == "t1"
+                    else candidate.t2_mask
+                )
+                self._point_session_masks[action.target_view] = np.array(
+                    accepted_target_mask, dtype=bool, copy=True
+                )
+                self._accepted_point_clicks[action.target_view] = []
         else:
             # Keep the rejected candidate in the trajectory, but continue the
             # closed loop from the last accepted state and feedback.

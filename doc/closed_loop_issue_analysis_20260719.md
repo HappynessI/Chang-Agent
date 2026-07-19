@@ -387,3 +387,29 @@ calibration error、error-type macro F1、localization IoU，以及最终 accept
 global point rejection、full-image localization retry、FP region consistency、Agent mask
 输入、prompt hash、step/attempt audit、Git metadata、模型 metadata checksum 和父子进程
 seed 记录。正式有效性仍需下一轮固定三样本 GPU 闭环及闭环后 GT 审计确认。
+
+## 10. 2026-07-19 SimpleClick 会话与 initial mask 根因修复
+
+复查第二轮实现后确认，局部组合和 locality gate 只阻止了整图 prediction 直接写入
+live mask，但当时仍存在两个底层问题：每次 point 都新建 `Clicker`，且 SegAgent 的
+`SegmentationModel.get_prediction(..., mask=...)` 实际忽略 `mask` 参数。因此该版本
+不能称为真正的连续 SimpleClick 编辑。
+
+本轮从会话协议和 predictor 调用链修复：
+
+1. Environment 分别维护 T1/T2 的 point session initial mask 与已接受点击历史。
+2. 每次隔离 worker 从 session initial mask 开始，按顺序逐次重放历史点击，再执行
+   当前候选点击。这保留了隔离进程设计，同时等价重建 SimpleClick Clicker 会话。
+3. 候选只有通过 progress、area、locality 和 Verifier 门后才提交点击；被拒绝的点击
+   不会污染后续历史。
+4. accepted box 会以 box 编辑后的 mask 重开对应视图的 point session；另一视图的
+   session 不受影响。
+5. `SimpleClickAdapter` 绕过会吞掉 `mask` 的 SegAgent 包装方法，直接调用底层
+   `predictor.get_prediction(clicker, prev_mask=...)`，并设置 external-mask 所需的
+   `click_indx_offset=1`。
+6. worker report 与 action evidence 记录 session click count、accepted click history
+   和 session initial-mask 像素数，便于闭环后审计。
+
+local clicked-component composition 与 locality gate 继续保留为最终安全边界。CPU
+回归覆盖 initial mask 的实际逐次传递、点击顺序重放、reject 不提交、T1/T2 会话隔离
+以及 accepted box 重置会话；真实模型效果仍需下一轮固定样本 GPU 闭环确认。
