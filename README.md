@@ -3,8 +3,9 @@
 Change-Agent is a GT-free iterative change-detection research framework built around
 the existing `SegAgent` and `OmniOVCD` repositories. The runtime loop keeps T1/T2
 semantic masks, instances, matching, and model evidence inside the Environment. The
-Agent receives only T1, T2, the query, the current change mask, structured Verifier
-feedback, and a compact history.
+Agent receives T1, T2, the predicted T1/T2 object masks, the current change mask,
+structured Verifier feedback, and a compact history. These masks are model predictions,
+not GT.
 
 The implementation follows [`../CHANGE_AGENT_DEVELOPMENT_SPEC.md`](../CHANGE_AGENT_DEVELOPMENT_SPEC.md).
 
@@ -96,6 +97,36 @@ action, keeping the Qwen3-VL-2B instruction short. Point examples always include
 none includes `coordinate_frame`. On validation failure, the retry path also supplies
 the previous invalid payload and repeats an exact same-view/same-action repair template
 for a missing or malformed `coordinate`/`box` field.
+
+## Local editing and safety gates
+
+- A positive point merges only the tool-predicted connected component containing the
+  click. A negative point removes only the current-mask component containing the click.
+  Unrelated components from a global SimpleClick prediction are discarded.
+- A SAM3 box result replaces pixels only inside the requested pixel XYXY box; pixels
+  outside that ROI are copied from the previous target-view mask.
+- Every tool result records target-mask XOR statistics: action ROI, changed and
+  outside-ROI pixels, outside-ROI ratio, target-mask change ratio, largest changed
+  component, and before/after component counts.
+- Candidate acceptance rejects excessive outside-ROI changes, excessive target-mask
+  changes, and excessive component-count jumps in addition to the existing progress and
+  change-mask area gates. Thresholds are explicit runner arguments and trajectory fields.
+- Verifier localization rejects near-full-image regions unless the candidate delta is
+  itself broad. False-positive regions must overlap current white change pixels, while
+  false-negative regions must lie mostly outside them. Invalid localization is retried
+  with the exact consistency error before the Verifier is marked invalid.
+
+## Runtime audit
+
+Each sample writes `episode_summary.json` with its stop reason, loop count,
+accepted/rejected candidates, tool count, invalid action attempts, elapsed time, and
+selected steps. Every invalid action attempt records loop/attempt indices, raw output,
+validation error, prompt SHA-256, and timestamp. Trajectory metadata resolves Git from
+the repository path and records commit plus dirty state. The run manifest records Python,
+platform, parent-process seeds, model metadata checksums, and deterministic-policy state.
+Isolated segmentation workers are launched through `seeded_segmentation_worker.py`,
+which seeds Python, NumPy, and PyTorch before model construction and appends that seed
+record to each worker report.
 
 ## Local smoke commands
 

@@ -99,6 +99,7 @@ class QwenVerifierTest(unittest.TestCase):
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor, max_retries=2)
         image = np.zeros((16, 16, 3), dtype=np.uint8)
         mask = np.zeros((16, 16), dtype=bool)
+        mask[4:8, 4:8] = True
         state = ChangeState(image, image, "building", mask, mask, mask)
         output = verifier.verify(state, 0.4, None)
         self.assertEqual(output.quality_score, 0.4)
@@ -184,6 +185,7 @@ class QwenVerifierTest(unittest.TestCase):
         )
         image = np.zeros((16, 16, 3), dtype=np.uint8)
         mask = np.zeros((16, 16), dtype=bool)
+        mask[4:8, 4:8] = True
         state = ChangeState(image, image, "building", mask, mask, mask)
         first = verifier.verify(state, None, None)
         second = verifier.verify(state, first.quality_score, None, state)
@@ -195,6 +197,93 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertFalse(second.stop)
         self.assertEqual(second.quality_score, first.quality_score)
         self.assertIn(first.feedback, second.feedback)
+
+    def test_full_image_localization_is_retried_with_smaller_region(self):
+        processor = FakeProcessor(
+            [
+                {
+                    "quality_score": 0.4,
+                    "progress_score": 0.0,
+                    "error_type": "false_positive_change",
+                    "feedback": "Remove the unsupported region.",
+                },
+                {"target_view": "t2", "error_region": [0, 0, 1000, 1000]},
+                {"target_view": "t2", "error_region": [200, 200, 600, 600]},
+            ]
+        )
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=processor, max_retries=2
+        )
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=bool)
+        mask[4:8, 4:8] = True
+        state = ChangeState(image, image, "building", mask, mask, mask)
+
+        output = verifier.verify(state, None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_region, (200, 200, 600, 600))
+        self.assertEqual(processor.call_count, 3)
+        self.assertIn(
+            "degenerate/full-image",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
+
+    def test_false_positive_localization_must_overlap_white_change(self):
+        processor = FakeProcessor(
+            [
+                {
+                    "quality_score": 0.4,
+                    "progress_score": 0.0,
+                    "error_type": "false_positive_change",
+                    "feedback": "Remove the unsupported region.",
+                },
+                {"target_view": "t2", "error_region": [700, 700, 900, 900]},
+            ]
+        )
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=processor, max_retries=1
+        )
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=bool)
+        mask[2:5, 2:5] = True
+        state = ChangeState(image, image, "building", mask, mask, mask)
+
+        output = verifier.verify(state, None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "does not overlap enough white",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
+
+    def test_false_negative_localization_must_lie_outside_white_change(self):
+        processor = FakeProcessor(
+            [
+                {
+                    "quality_score": 0.4,
+                    "progress_score": 0.0,
+                    "error_type": "false_negative",
+                    "feedback": "A changed building is missing.",
+                },
+                {"target_view": "t2", "error_region": [250, 250, 600, 600]},
+            ]
+        )
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=processor, max_retries=1
+        )
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=bool)
+        mask[3:11, 3:11] = True
+        state = ChangeState(image, image, "building", mask, mask, mask)
+
+        output = verifier.verify(state, None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "lies mostly inside the white",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
 
     def test_initial_progress_must_be_zero(self):
         processor = FakeProcessor(

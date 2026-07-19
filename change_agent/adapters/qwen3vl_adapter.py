@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -52,6 +53,7 @@ class GroundingModelQwen3VL:
             processor = AutoProcessor.from_pretrained(model_path)
         self.model = model
         self.processor = processor
+        self.last_prompt_hash: str | None = None
 
     def build_messages(
         self,
@@ -60,18 +62,32 @@ class GroundingModelQwen3VL:
         previous_raw: str | None = None,
     ) -> list[dict[str, Any]]:
         prompt = self._instruction(observation, validation_error, previous_raw)
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": "T1 image (earlier time):"},
+            {"type": "image", "image": self._as_image(observation.t1_image)},
+            {"type": "text", "text": "T2 image (later time):"},
+            {"type": "image", "image": self._as_image(observation.t2_image)},
+        ]
+        if observation.t1_mask is not None and observation.t2_mask is not None:
+            content.extend(
+                [
+                    {"type": "text", "text": "Current predicted T1 object mask:"},
+                    {"type": "image", "image": self._mask_image(observation.t1_mask)},
+                    {"type": "text", "text": "Current predicted T2 object mask:"},
+                    {"type": "image", "image": self._mask_image(observation.t2_mask)},
+                ]
+            )
+        content.extend(
+            [
+                {"type": "text", "text": "Current binary change mask:"},
+                {"type": "image", "image": self._mask_image(observation.change_mask)},
+                {"type": "text", "text": prompt},
+            ]
+        )
         return [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": "T1 image (earlier time):"},
-                    {"type": "image", "image": self._as_image(observation.t1_image)},
-                    {"type": "text", "text": "T2 image (later time):"},
-                    {"type": "image", "image": self._as_image(observation.t2_image)},
-                    {"type": "text", "text": "Current binary change mask:"},
-                    {"type": "image", "image": self._mask_image(observation.change_mask)},
-                    {"type": "text", "text": prompt},
-                ],
+                "content": content,
             }
         ]
 
@@ -82,6 +98,13 @@ class GroundingModelQwen3VL:
         previous_raw: str | None = None,
     ) -> str:
         messages = self.build_messages(observation, validation_error, previous_raw)
+        prompt_text = "\n".join(
+            item["text"]
+            for message in messages
+            for item in message["content"]
+            if item["type"] == "text"
+        )
+        self.last_prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -150,8 +173,10 @@ class GroundingModelQwen3VL:
             observation, finish_allowed=has_tool_action and not verifier_invalid
         )
         return (
-            "You refine a change-detection result. The three inputs above are explicitly "
-            "T1, T2, and the current change mask. Do not invent a final mask. Select one "
+            "You refine a change-detection result. The inputs above are T1, T2, the current "
+            "predicted T1/T2 object masks, and the current change mask. The object masks are "
+            "model predictions, not GT; inspect them because your action edits one of them. "
+            "Do not invent a final mask. Select one "
             "tool action. All public coordinates, including Verifier error_region and your "
             "output, use normalized [0,1000] XY order; they are not image pixels. For a "
             "256x256 image, pixel center (128,128) is approximately (502,502). Return exactly one "

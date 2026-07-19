@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import platform
 import random
 import resource
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +54,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--selection-epsilon", type=float, default=0.0)
     parser.add_argument("--max-selection-area-delta", type=float, default=0.25)
+    parser.add_argument("--max-locality-outside-ratio", type=float, default=0.1)
+    parser.add_argument("--max-target-mask-change-ratio", type=float, default=0.25)
+    parser.add_argument("--max-component-count-delta", type=int, default=4)
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
     parser.add_argument("--overlap-threshold", type=float, default=0.25)
     parser.add_argument("--t12-min-instance-area", type=int, default=0)
@@ -79,15 +85,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     start = time.monotonic()
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    seed_runtime = _seed_runtime(args.seed)
     args.output.mkdir(parents=True, exist_ok=False)
     for name in ("predictions", "trajectories", "masks", "verifier_feedback", "logs", "tool_runs"):
         (args.output / name).mkdir()
     for name in ("initial", "verifier_best", "last", "selected"):
         (args.output / "predictions" / name).mkdir()
     _validate_inputs(args)
-    manifest = _base_manifest(args)
+    manifest = _base_manifest(args, seed_runtime)
     (args.output / "run_manifest.md").write_text(_render_manifest(manifest), encoding="utf-8")
 
     qwen = GroundingModelQwen3VL(
@@ -98,13 +103,14 @@ def main() -> None:
     verifier = _build_verifier(args, qwen)
     rollout_records: dict[str, dict[str, Any]] = {}
     for sample_file in SAMPLES:
+        sample_start = time.monotonic()
         sample = Path(sample_file).stem
         image1 = np.asarray(Image.open(args.input_root / "A" / sample_file).convert("RGB"))
         image2 = np.asarray(Image.open(args.input_root / "B" / sample_file).convert("RGB"))
         tool_root = args.output / "tool_runs" / sample
         point_backend = SubprocessPointBackend(
             args.segagent_python,
-            Path(__file__).with_name("segmentation_worker.py"),
+            Path(__file__).with_name("seeded_segmentation_worker.py"),
             tool_root,
             checkpoint=args.simpleclick_checkpoint,
             pythonpath=(
@@ -113,20 +119,22 @@ def main() -> None:
                 Path(__file__).parents[2] / "SegAgent/third_party/SimpleClick",
             ),
             device=args.tool_device,
+            seed=args.seed,
         )
         box_backend = SubprocessBoxBackend(
             args.omniovcd_python,
-            Path(__file__).with_name("segmentation_worker.py"),
+            Path(__file__).with_name("seeded_segmentation_worker.py"),
             tool_root,
             checkpoint=args.sam3_checkpoint,
             bpe=args.sam3_bpe,
             resolution=args.sam3_resolution,
             pythonpath=(Path(__file__).parents[1], Path(__file__).parents[2] / "OmniOVCD"),
             device=args.tool_device,
+            seed=args.seed,
         )
         initializer = SubprocessSAM3Initializer(
             args.omniovcd_python,
-            Path(__file__).with_name("segmentation_worker.py"),
+            Path(__file__).with_name("seeded_segmentation_worker.py"),
             tool_root / "sam3_initialization",
             checkpoint=args.sam3_checkpoint,
             bpe=args.sam3_bpe,
@@ -134,6 +142,7 @@ def main() -> None:
             pythonpath=(Path(__file__).parents[1], Path(__file__).parents[2] / "OmniOVCD"),
             device=args.tool_device,
             timeout_seconds=900,
+            seed=args.seed,
         )
         processor = MaskPairProcessor(
             overlap_threshold=args.overlap_threshold,
@@ -152,6 +161,9 @@ def main() -> None:
             selection_policy=args.selection_policy,
             selection_epsilon=args.selection_epsilon,
             max_selection_area_delta=args.max_selection_area_delta,
+            max_locality_outside_ratio=args.max_locality_outside_ratio,
+            max_target_mask_change_ratio=args.max_target_mask_change_ratio,
+            max_component_count_delta=args.max_component_count_delta,
             run_metadata={
                 "sample": sample_file,
                 "query": args.query,
@@ -164,16 +176,32 @@ def main() -> None:
             },
         )
         observation = environment.reset(image1, image2, args.query)
-        invalid_outputs: list[dict[str, str]] = []
+        invalid_outputs: list[dict[str, Any]] = []
         episode_stop_reason: str | None = None
+        loop_index = 0
         while not environment.done:
+            loop_index += 1
             observation, attempt_errors, action_executed = _execute_action_with_retries(
-                qwen, environment, observation, args.action_retries
+                qwen,
+                environment,
+                observation,
+                args.action_retries,
+                loop_index=loop_index,
             )
             invalid_outputs.extend(attempt_errors)
             if not action_executed:
                 episode_stop_reason = "action_retry_exhaustion_without_state_change"
                 break
+        if episode_stop_reason is None:
+            last_entry = environment.trajectory.entries[-1]
+            episode_stop_reason = (
+                "verifier_authorized_finish"
+                if last_entry.parsed_action is not None
+                and last_entry.parsed_action.action == "finish"
+                and last_entry.execution.get("candidate_accepted")
+                and last_entry.verifier.stop
+                else "max_steps_reached"
+            )
         tool_steps = [entry for entry in environment.trajectory.entries if entry.execution.get("tool")]
 
         trajectory_dir = args.output / "trajectories" / sample
@@ -193,6 +221,38 @@ def main() -> None:
             (trajectory_dir / "invalid_agent_outputs.json").write_text(
                 json.dumps(invalid_outputs, indent=2, ensure_ascii=False), encoding="utf-8"
             )
+        accepted_count = sum(
+            bool(entry.execution.get("candidate_accepted"))
+            for entry in environment.trajectory.entries[1:]
+        )
+        rejected_count = sum(
+            entry.execution.get("candidate_accepted") is False
+            for entry in environment.trajectory.entries[1:]
+        )
+        episode_summary = {
+            "sample": sample,
+            "status": "success",
+            "stop_reason": episode_stop_reason,
+            "elapsed_seconds": round(time.monotonic() - sample_start, 3),
+            "loop_count": loop_index,
+            "candidate_count": len(environment.trajectory.entries) - 1,
+            "accepted_candidate_count": accepted_count,
+            "rejected_candidate_count": rejected_count,
+            "tool_action_count": len(tool_steps),
+            "action_attempt_count": (
+                len(environment.trajectory.entries) - 1 + len(invalid_outputs)
+            ),
+            "invalid_action_attempt_count": len(invalid_outputs),
+            "action_attempt_errors": invalid_outputs,
+            "selected_step": environment.trajectory.best_entry.step_index,
+            "verifier_best_step": environment.trajectory.verifier_best_entry.step_index,
+            "trajectory": str(trajectory_path),
+        }
+        episode_summary_path = trajectory_dir / "episode_summary.json"
+        episode_summary_path.write_text(
+            json.dumps(episode_summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         selected = environment.best_state.change_mask
         verifier_best = environment.trajectory.verifier_best_entry.state.change_mask
         initial = environment.trajectory.entries[0].state.change_mask
@@ -217,6 +277,7 @@ def main() -> None:
             "fallback_action_count": 0,
             "fallback_actions": [],
             "episode_stop_reason": episode_stop_reason,
+            "episode_summary": episode_summary_path,
             "raw_actions": [entry.raw_action for entry in environment.trajectory.entries[1:]],
         }
 
@@ -263,19 +324,36 @@ def _execute_action_with_retries(
     environment: ChangeAgentEnvironment,
     observation: AgentObservation,
     retries: int,
-) -> tuple[AgentObservation, list[dict[str, str]], bool]:
+    *,
+    loop_index: int = 0,
+) -> tuple[AgentObservation, list[dict[str, Any]], bool]:
     """Try only model-produced actions and leave state unchanged on exhaustion."""
 
     validation_error = None
     previous_raw = None
-    errors: list[dict[str, str]] = []
-    for _ in range(retries):
+    errors: list[dict[str, Any]] = []
+    for attempt_index in range(1, retries + 1):
         raw = qwen.generate_raw(observation, validation_error, previous_raw)
         try:
             next_observation, _ = environment.step(raw)
+            environment.trajectory.entries[-1].execution["action_generation"] = {
+                "loop_index": loop_index,
+                "attempt_index": attempt_index,
+                "prompt_hash": getattr(qwen, "last_prompt_hash", None),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
             return next_observation, errors, True
         except ActionValidationError as error:
-            errors.append({"raw_agent_output": raw, "error": str(error)})
+            errors.append(
+                {
+                    "loop_index": loop_index,
+                    "attempt_index": attempt_index,
+                    "raw_agent_output": raw,
+                    "error": str(error),
+                    "prompt_hash": getattr(qwen, "last_prompt_hash", None),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             validation_error = str(error)
             previous_raw = raw
     return observation, errors, False
@@ -366,7 +444,9 @@ def _validate_inputs(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"missing required inputs: {missing}")
 
 
-def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
+def _base_manifest(
+    args: argparse.Namespace, seed_runtime: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "status": "running",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -390,9 +470,60 @@ def _base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "selection_policy": args.selection_policy,
         "selection_epsilon": args.selection_epsilon,
         "max_selection_area_delta": args.max_selection_area_delta,
+        "max_locality_outside_ratio": args.max_locality_outside_ratio,
+        "max_target_mask_change_ratio": args.max_target_mask_change_ratio,
+        "max_component_count_delta": args.max_component_count_delta,
         "seed": args.seed,
+        "seed_runtime": seed_runtime,
+        "python": sys.version,
+        "platform": platform.platform(),
+        "model_identity": _model_identity(Path(args.model_path)),
         "gt_policy": "label_cvt is opened only by evaluate_after_rollout after rollout_complete.json",
     }
+
+
+def _seed_runtime(seed: int) -> dict[str, Any]:
+    random.seed(seed)
+    np.random.seed(seed)
+    result: dict[str, Any] = {
+        "python_random": seed,
+        "numpy": seed,
+        "torch": None,
+        "deterministic_algorithms": False,
+    }
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        result["torch"] = seed
+        result["torch_version"] = torch.__version__
+        result["cuda_version"] = torch.version.cuda
+    except ImportError:
+        result["torch_version"] = None
+        result["cuda_version"] = None
+    return result
+
+
+def _model_identity(model_path: Path) -> dict[str, Any]:
+    resolved = model_path.resolve()
+    identity: dict[str, Any] = {"path": str(resolved), "exists": resolved.exists()}
+    candidates = (
+        [resolved]
+        if resolved.is_file()
+        else [
+            resolved / "config.json",
+            resolved / "model.safetensors.index.json",
+            resolved / "generation_config.json",
+        ]
+    )
+    checksums: dict[str, str] = {}
+    for candidate in candidates:
+        if candidate.is_file():
+            checksums[candidate.name] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    identity["metadata_sha256"] = checksums
+    return identity
 
 
 def _render_manifest(manifest: dict[str, Any], metrics: dict[str, Any] | None = None) -> str:

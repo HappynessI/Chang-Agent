@@ -25,7 +25,7 @@ class StateBackend(Protocol):
 
 
 class ChangeAgentEnvironment:
-    """Owns hidden masks/evidence and exposes only a restricted Agent observation."""
+    """Owns GT-free state/evidence and exposes model masks needed for editing."""
 
     def __init__(
         self,
@@ -40,12 +40,21 @@ class ChangeAgentEnvironment:
         selection_policy: str = "conservative_best",
         selection_epsilon: float = 0.0,
         max_selection_area_delta: float = 0.25,
+        max_locality_outside_ratio: float = 0.1,
+        max_target_mask_change_ratio: float = 0.25,
+        max_component_count_delta: int = 4,
         require_tool_before_finish: bool = True,
     ):
         if not inference_only:
             raise ValueError("runtime Environment currently supports inference_only=True only")
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
+        if not 0 <= max_locality_outside_ratio <= 1:
+            raise ValueError("max_locality_outside_ratio must be in [0, 1]")
+        if not 0 <= max_target_mask_change_ratio <= 1:
+            raise ValueError("max_target_mask_change_ratio must be in [0, 1]")
+        if max_component_count_delta < 0:
+            raise ValueError("max_component_count_delta must be non-negative")
         self.backend = backend
         self.executor = executor
         self.verifier = verifier
@@ -55,6 +64,9 @@ class ChangeAgentEnvironment:
         self.selection_policy = selection_policy
         self.selection_epsilon = selection_epsilon
         self.max_selection_area_delta = max_selection_area_delta
+        self.max_locality_outside_ratio = max_locality_outside_ratio
+        self.max_target_mask_change_ratio = max_target_mask_change_ratio
+        self.max_component_count_delta = max_component_count_delta
         self.require_tool_before_finish = require_tool_before_finish
         self.trajectory = Trajectory(
             run_metadata,
@@ -114,6 +126,8 @@ class ChangeAgentEnvironment:
             change_mask=np.array(self.state.change_mask, copy=True),
             feedback=self.feedback,
             history_summary=self.trajectory.history_summary(),
+            t1_mask=np.array(self.state.t1_mask, copy=True),
+            t2_mask=np.array(self.state.t2_mask, copy=True),
         )
 
     def step(self, action_or_raw: AgentAction | str) -> tuple[AgentObservation, bool]:
@@ -200,6 +214,19 @@ class ChangeAgentEnvironment:
                 rejection_reasons.append("progress_did_not_improve")
             if area_delta > self.max_selection_area_delta:
                 rejection_reasons.append("mask_area_delta_exceeded")
+            locality = execution.get("locality", {})
+            if locality.get("outside_roi_ratio", 0.0) > self.max_locality_outside_ratio:
+                rejection_reasons.append("locality_outside_roi_exceeded")
+            if (
+                locality.get("target_mask_change_ratio", 0.0)
+                > self.max_target_mask_change_ratio
+            ):
+                rejection_reasons.append("target_mask_change_exceeded")
+            if (
+                abs(locality.get("component_count_delta", 0))
+                > self.max_component_count_delta
+            ):
+                rejection_reasons.append("component_count_delta_exceeded")
         candidate_accepted = not rejection_reasons
         execution.update(
             {

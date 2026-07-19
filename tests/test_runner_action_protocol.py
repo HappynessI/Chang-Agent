@@ -31,7 +31,7 @@ class RunnerActionProtocolTest(unittest.TestCase):
         observation = object()
 
         returned, errors, executed = _execute_action_with_retries(
-            agent, environment, observation, retries=3
+            agent, environment, observation, retries=3, loop_index=4
         )
 
         self.assertIs(returned, observation)
@@ -47,6 +47,9 @@ class RunnerActionProtocolTest(unittest.TestCase):
             '{"target_view":"t2","action":"finish"}',
         ])
         self.assertTrue(all('"action":"finish"' in raw for raw in environment.calls))
+        self.assertEqual([item["loop_index"] for item in errors], [4, 4, 4])
+        self.assertEqual([item["attempt_index"] for item in errors], [1, 2, 3])
+        self.assertTrue(all("prompt_hash" in item for item in errors))
 
 
 if __name__ == "__main__":

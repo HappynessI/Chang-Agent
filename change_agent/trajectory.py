@@ -141,15 +141,25 @@ def default_run_metadata() -> dict[str, Any]:
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
+        "git_dirty": _git_dirty(),
         "python": sys.version.split()[0],
         "platform": platform.platform(),
     }
 
 
 def _git_commit() -> str | None:
+    return _git_output(["rev-parse", "HEAD"])
+
+
+def _git_dirty() -> bool | None:
+    status = _git_output(["status", "--short"])
+    return bool(status) if status is not None else None
+
+
+def _git_output(arguments: list[str]) -> str | None:
     try:
         return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-C", str(Path(__file__).resolve().parents[1]), *arguments],
             check=True,
             capture_output=True,
             text=True,

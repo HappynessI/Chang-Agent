@@ -35,7 +35,16 @@ class QwenAdapterTest(unittest.TestCase):
         processor = FakeProcessor()
         adapter = GroundingModelQwen3VL(model=FakeModel(), processor=processor)
         image = np.zeros((11, 21, 3), dtype=np.uint8)
-        observation = AgentObservation(image, image, "building", np.zeros((11, 21)))
+        t1_mask = np.zeros((11, 21), dtype=bool)
+        t2_mask = np.ones((11, 21), dtype=bool)
+        observation = AgentObservation(
+            image,
+            image,
+            "building",
+            np.zeros((11, 21)),
+            t1_mask=t1_mask,
+            t2_mask=t2_mask,
+        )
         raw, action = adapter.act(observation)
         texts = [
             item["text"]
@@ -44,12 +53,16 @@ class QwenAdapterTest(unittest.TestCase):
         ]
         self.assertIn("T1 image", texts[0])
         self.assertIn("T2 image", texts[1])
-        self.assertIn("Current binary change mask", texts[2])
+        self.assertIn("predicted T1 object mask", texts[2])
+        self.assertIn("predicted T2 object mask", texts[3])
+        self.assertIn("Current binary change mask", texts[4])
         self.assertNotIn("<img>", " ".join(texts))
         self.assertIn("coordinate protocol is system-defined", texts[-1])
         self.assertIn("Never output coordinate_frame", texts[-1])
         self.assertEqual(action.coordinate, (10, 5))
         self.assertIn("positive_point", raw)
+        self.assertIsNotNone(adapter.last_prompt_hash)
+        self.assertEqual(len(adapter.last_prompt_hash), 64)
 
     def test_validation_error_is_injected_into_retry_prompt(self):
         processor = FakeProcessor()

@@ -22,6 +22,7 @@ class _SubprocessTool:
         pythonpath: Iterable[str | Path] = (),
         device: str = "cuda",
         timeout_seconds: int = 300,
+        seed: int | None = None,
     ):
         self.python = str(Path(python).resolve())
         self.worker = str(Path(worker).resolve())
@@ -29,6 +30,7 @@ class _SubprocessTool:
         self.pythonpath = tuple(str(Path(item).resolve()) for item in pythonpath)
         self.device = device
         self.timeout_seconds = timeout_seconds
+        self.seed = seed
         self.call_index = 0
         self.last_evidence: dict[str, Any] = {}
 
@@ -69,6 +71,10 @@ class _SubprocessTool:
             command.extend(["--initial-mask", str(mask_path)])
         command.extend(extra_args)
         env = os.environ.copy()
+        if self.seed is not None:
+            env["PYTHONHASHSEED"] = str(self.seed)
+            env["CHANGE_AGENT_SEED"] = str(self.seed)
+            env.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         if self.pythonpath:
             existing = env.get("PYTHONPATH")
             env["PYTHONPATH"] = os.pathsep.join(
@@ -96,6 +102,7 @@ class _SubprocessTool:
             "worker_command": command,
             "worker_report": report,
             "worker_artifact_dir": str(call_dir),
+            "worker_seed": self.seed,
         }
         return np.asarray(np.load(output_path), dtype=bool)
 
@@ -228,6 +235,10 @@ class SubprocessSAM3Initializer(_SubprocessTool):
             query,
         ]
         env = os.environ.copy()
+        if self.seed is not None:
+            env["PYTHONHASHSEED"] = str(self.seed)
+            env["CHANGE_AGENT_SEED"] = str(self.seed)
+            env.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         if self.pythonpath:
             existing = env.get("PYTHONPATH")
             env["PYTHONPATH"] = os.pathsep.join(
@@ -267,6 +278,7 @@ class SubprocessSAM3Initializer(_SubprocessTool):
             "worker_command": command,
             "worker_report": report,
             "worker_artifact_dir": str(call_dir),
+            "worker_seed": self.seed,
         }
         return t1_mask, t2_mask, {
             "initializer": "live_sam3_dual_view_text_prompt",

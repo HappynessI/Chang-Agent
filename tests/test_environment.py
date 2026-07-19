@@ -93,12 +93,54 @@ class EnvironmentTest(unittest.TestCase):
         self.assertTrue(done)
         self.assertEqual(self.environment.best_state.step_index, 1)
 
-    def test_observation_does_not_expose_hidden_masks_or_gt(self):
+    def test_observation_exposes_predicted_masks_but_not_gt(self):
         observation = self.environment.reset(self.image1, self.image2, "building")
         public = observation.to_mapping()
-        self.assertNotIn("t1_mask", public)
-        self.assertNotIn("t2_mask", public)
+        self.assertIn("predicted_t1_mask", public)
+        self.assertIn("predicted_t2_mask", public)
+        self.assertTrue(np.array_equal(public["predicted_t1_mask"], observation.t1_mask))
+        self.assertTrue(np.array_equal(public["predicted_t2_mask"], observation.t2_mask))
         self.assertFalse(any("gt" in key.lower() for key in public))
+
+    def test_locality_gate_rejects_global_point_component(self):
+        class GlobalPoint:
+            def refine(self, image, initial_mask, coordinate, is_positive):
+                return np.ones_like(initial_mask)
+
+        initial_feedback = VerifierOutput(
+            quality_score=0.3,
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="positive_point",
+            feedback="Initial feedback.",
+        )
+        candidate_feedback = VerifierOutput(
+            quality_score=0.8,
+            score_delta=0.5,
+            progress_score=0.5,
+            error_type="none",
+            feedback="Candidate feedback.",
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(GlobalPoint(), self.box),
+            SequenceVerifier([initial_feedback, candidate_feedback]),
+            max_steps=3,
+            max_selection_area_delta=1.0,
+            max_locality_outside_ratio=0.0,
+            max_target_mask_change_ratio=1.0,
+            max_component_count_delta=100,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+
+        entry = environment.trajectory.entries[1]
+        self.assertFalse(entry.execution["candidate_accepted"])
+        self.assertIn(
+            "locality_outside_roi_exceeded",
+            entry.execution["candidate_rejection_reasons"],
+        )
 
     def test_verifier_feedback_declares_normalized_public_coordinates(self):
         observation = self.environment.reset(self.image1, self.image2, "building")

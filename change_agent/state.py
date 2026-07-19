@@ -147,7 +147,7 @@ class ChangeState:
 
 @dataclass(frozen=True)
 class AgentObservation:
-    """The deliberately restricted, GT-free view supplied to an Agent."""
+    """The GT-free model predictions and imagery supplied to an Agent."""
 
     t1_image: np.ndarray
     t2_image: np.ndarray
@@ -155,6 +155,8 @@ class AgentObservation:
     change_mask: np.ndarray
     feedback: VerifierOutput | None = None
     history_summary: str = ""
+    t1_mask: np.ndarray | None = None
+    t2_mask: np.ndarray | None = None
 
     def to_mapping(self) -> Mapping[str, Any]:
         return {
@@ -162,6 +164,8 @@ class AgentObservation:
             "t2_image": self.t2_image,
             "query": self.query,
             "current_change_mask": self.change_mask,
+            "predicted_t1_mask": self.t1_mask,
+            "predicted_t2_mask": self.t2_mask,
             "feedback": self.feedback.to_dict() if self.feedback else None,
             "history_summary": self.history_summary,
         }

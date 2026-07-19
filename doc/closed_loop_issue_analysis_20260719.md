@@ -352,3 +352,38 @@ calibration error、error-type macro F1、localization IoU，以及最终 accept
 本轮 CPU 单元测试覆盖成对视觉输入、四关系 Prompt、独立 progress 解析、动态单示例、
 缺字段定向重试、previous-state 传递和回滚兼容。下一步应先用固定三样本做闭环回归，
 再根据轨迹中的 `quality_score`/`progress_score` 与离线 IoU 进行审计。
+
+## 9. 2026-07-19 第二轮闭环安全修复记录
+
+本轮继续完成分析报告中优先级最高的四项工程修复，仍未启动 GPU 闭环：
+
+1. **局部工具组合与 locality gate**
+   - positive point 只合并 SimpleClick prediction 中包含点击点的连通组件；其他
+     全局 prediction 组件不会进入 live mask。
+   - negative point 只移除当前 target mask 中包含点击点的连通组件。
+   - box 只替换 action box 内像素，box 外严格保留上一 target mask。
+   - 每次动作记录 target-mask XOR、ROI 外变化比例、target-mask 变化比例、最大
+     变化组件、动作前后组件数；环境增加对应硬拒绝门。
+2. **Verifier localization 与 FP/FN 一致性**
+   - near-full-image region 在 candidate delta 不够大时标记为退化定位。
+   - false-positive region 必须覆盖足够的当前白色 change；false-negative region
+     必须主要位于白色 change 外。
+   - 定位失败不再立即结束，而是携带具体校验错误重试；所有 localization attempts
+     和检查统计进入 Verifier evidence。
+3. **Agent 可见 predicted T1/T2 masks**
+   - `AgentObservation` 和 Qwen3-VL messages 新增当前 predicted T1/T2 object mask，
+     并明确它们是待编辑的模型输出而非 GT。
+4. **审计与复现**
+   - 无效动作记录 `loop_index`、`attempt_index`、原始输出、错误、prompt SHA-256
+     和时间戳。
+   - 每样本新增 `episode_summary.json`，记录 stop reason、候选接受/拒绝数量、工具
+     数量、无效尝试、耗时和最终选择。
+   - trajectory 显式从仓库路径解析 commit/dirty；run manifest 增加 Python、平台、
+     parent seed、模型元数据 checksum 和 deterministic-policy 状态。
+   - 隔离工具通过 seed wrapper 在模型构造前设置 Python/NumPy/PyTorch seed，并将
+     seed runtime 写入 worker report。
+
+新增/更新的 CPU 回归测试覆盖 clicked-component merge/remove、box ROI preservation、
+global point rejection、full-image localization retry、FP region consistency、Agent mask
+输入、prompt hash、step/attempt audit、Git metadata、模型 metadata checksum 和父子进程
+seed 记录。正式有效性仍需下一轮固定三样本 GPU 闭环及闭环后 GT 审计确认。

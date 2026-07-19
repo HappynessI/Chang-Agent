@@ -51,16 +51,32 @@ class Qwen3VLZeroShotVerifier:
         max_new_tokens: int = 256,
         accept_threshold: float = 0.82,
         max_retries: int = 2,
+        max_localization_area_ratio: float = 0.85,
+        broad_region_delta_ratio: float = 0.5,
+        min_false_positive_white_fraction: float = 0.01,
+        max_false_negative_white_fraction: float = 0.5,
     ):
         if not 0 <= accept_threshold <= 1:
             raise ValueError("accept_threshold must be in [0, 1]")
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
+        if not 0 < max_localization_area_ratio <= 1:
+            raise ValueError("max_localization_area_ratio must be in (0, 1]")
+        if not 0 <= broad_region_delta_ratio <= 1:
+            raise ValueError("broad_region_delta_ratio must be in [0, 1]")
+        if not 0 <= min_false_positive_white_fraction <= 1:
+            raise ValueError("min_false_positive_white_fraction must be in [0, 1]")
+        if not 0 <= max_false_negative_white_fraction <= 1:
+            raise ValueError("max_false_negative_white_fraction must be in [0, 1]")
         self.model = model
         self.processor = processor
         self.max_new_tokens = max_new_tokens
         self.accept_threshold = accept_threshold
         self.max_retries = max_retries
+        self.max_localization_area_ratio = max_localization_area_ratio
+        self.broad_region_delta_ratio = broad_region_delta_ratio
+        self.min_false_positive_white_fraction = min_false_positive_white_fraction
+        self.max_false_negative_white_fraction = max_false_negative_white_fraction
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
 
@@ -126,41 +142,63 @@ class Qwen3VLZeroShotVerifier:
             # Keep scoring separate from localization so the first stage can focus
             # on final-mask quality and pairwise progress.
             localization_errors: list[str] = []
-            localization_raw = self._generate_localization_raw(
-                state, previous_state, previous_action, diagnostic
-            )
-            try:
-                localization_payload = self._extract_json_object(localization_raw)
-                target_view, region = self._parse_localization_payload(localization_payload)
-                output = self._derive_output(
-                    diagnostic,
-                    previous_score,
-                    target_view=target_view,
-                    error_region=region,
-                    localization_valid=True,
-                )
-                return self._record_valid(
-                    output,
-                    {
-                        "raw_output": primary_raw,
-                        "parsed_output": payload,
-                        "diagnostic_payload": payload,
-                        "localization_raw": localization_raw,
-                        "localization_output": localization_payload,
-                        "validation_errors": errors,
-                    },
-                )
-            except (TypeError, ValueError, KeyError) as error:
-                localization_errors.append(str(error))
-                return self._invalid_output(
-                    previous_score,
-                    diagnostic,
-                    errors + localization_errors,
-                    primary_raw,
-                    localization_raw,
-                    payload,
+            localization_raw = ""
+            localization_attempts: list[dict[str, Any]] = []
+            for _ in range(self.max_retries):
+                localization_raw = self._generate_localization_raw(
+                    state,
+                    previous_state,
                     previous_action,
+                    diagnostic,
+                    localization_errors[-1:],
                 )
+                try:
+                    localization_payload = self._extract_json_object(localization_raw)
+                    target_view, region = self._parse_localization_payload(
+                        localization_payload
+                    )
+                    checks = self._validate_localization(
+                        state, previous_state, diagnostic.error_type, region
+                    )
+                    localization_attempts.append(
+                        {"raw": localization_raw, "output": localization_payload}
+                    )
+                    output = self._derive_output(
+                        diagnostic,
+                        previous_score,
+                        target_view=target_view,
+                        error_region=region,
+                        localization_valid=True,
+                    )
+                    return self._record_valid(
+                        output,
+                        {
+                            "raw_output": primary_raw,
+                            "parsed_output": payload,
+                            "diagnostic_payload": payload,
+                            "localization_raw": localization_raw,
+                            "localization_output": localization_payload,
+                            "localization_attempts": localization_attempts,
+                            "localization_checks": checks,
+                            "validation_errors": errors + localization_errors,
+                        },
+                    )
+                except (TypeError, ValueError, KeyError) as error:
+                    localization_errors.append(str(error))
+                    localization_attempts.append(
+                        {"raw": localization_raw, "error": str(error)}
+                    )
+            invalid = self._invalid_output(
+                previous_score,
+                diagnostic,
+                errors + localization_errors,
+                primary_raw,
+                localization_raw,
+                payload,
+                previous_action,
+            )
+            self.last_evidence["localization_attempts"] = localization_attempts
+            return invalid
 
         return self._invalid_output(
             previous_score, None, errors, primary_raw, None, None, previous_action
@@ -306,8 +344,15 @@ class Qwen3VLZeroShotVerifier:
         previous_state: ChangeState | None,
         previous_action: AgentAction | None,
         diagnostic: _Diagnostic,
+        previous_errors: list[str] | None = None,
     ) -> str:
         public_action = self._public_action(previous_action, state.image_size)
+        correction = (
+            f"Your previous localization was invalid: {previous_errors[-1]}. "
+            "Return a smaller, semantically consistent region.\n"
+            if previous_errors
+            else ""
+        )
         prompt = (
             "The first-stage verifier diagnosed an actionable error but did not localize it. "
             "Return exactly one JSON object with only target_view ('t1' or 't2') and "
@@ -319,7 +364,9 @@ class Qwen3VLZeroShotVerifier:
             "outside the current white mask.\n"
             f"error_type: {diagnostic.error_type}\n"
             f"diagnosis: {diagnostic.feedback}\n"
-            f"Action that produced the candidate: {json.dumps(public_action, ensure_ascii=False)}"
+            f"Action that produced the candidate: "
+            f"{json.dumps(public_action, ensure_ascii=False)}\n"
+            f"{correction}"
         )
         return self._generate_messages(
             self._visual_messages(state, prompt, previous_state)
@@ -487,6 +534,57 @@ class Qwen3VLZeroShotVerifier:
         if "error_region" not in payload:
             raise ValueError("localization response must contain error_region")
         return target_view, self._parse_region(payload["error_region"])
+
+    def _validate_localization(
+        self,
+        state: ChangeState,
+        previous_state: ChangeState | None,
+        error_type: str,
+        region: tuple[int, int, int, int],
+    ) -> dict[str, float]:
+        width, height = state.image_size
+        x1, y1, x2, y2 = region
+        pixel_x1 = round(x1 / 1000 * (width - 1))
+        pixel_y1 = round(y1 / 1000 * (height - 1))
+        pixel_x2 = round(x2 / 1000 * (width - 1))
+        pixel_y2 = round(y2 / 1000 * (height - 1))
+        region_mask = np.zeros_like(state.change_mask)
+        region_mask[pixel_y1 : pixel_y2 + 1, pixel_x1 : pixel_x2 + 1] = True
+        region_area_ratio = float(region_mask.mean())
+        if previous_state is None:
+            delta = np.zeros_like(state.change_mask)
+        else:
+            delta = np.logical_xor(
+                previous_state.change_mask, state.change_mask
+            )
+        delta_ratio = float(delta.mean())
+        if (
+            region_area_ratio >= self.max_localization_area_ratio
+            and delta_ratio < self.broad_region_delta_ratio
+        ):
+            raise ValueError(
+                "localization region is degenerate/full-image without a broad candidate delta"
+            )
+        white_fraction = float(state.change_mask[region_mask].mean())
+        if (
+            error_type == "false_positive_change"
+            and white_fraction < self.min_false_positive_white_fraction
+        ):
+            raise ValueError(
+                "false_positive_change region does not overlap enough white candidate change"
+            )
+        if (
+            error_type == "false_negative"
+            and white_fraction > self.max_false_negative_white_fraction
+        ):
+            raise ValueError(
+                "false_negative region lies mostly inside the white candidate change mask"
+            )
+        return {
+            "region_area_ratio": region_area_ratio,
+            "candidate_delta_ratio": delta_ratio,
+            "region_white_fraction": white_fraction,
+        }
 
     @staticmethod
     def _extract_json_object(raw: str) -> dict[str, Any]:
