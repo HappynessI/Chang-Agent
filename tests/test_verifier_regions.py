@@ -81,6 +81,25 @@ class VerifierRegionTest(unittest.TestCase):
             all(len(item["sources"]) == 1 for item in proposals)
         )
 
+    def test_initial_coverage_counts_exact_components_not_padded_boxes(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        t1 = np.zeros((32, 32), dtype=bool)
+        t2 = np.zeros_like(t1)
+        t2[10:12, 10:12] = True
+        t2[10:12, 14:16] = True
+        state = ChangeState(image, image, "building", t1, t2, t2)
+
+        proposals = attach_verifier_regions(
+            state, max_regions=1, padding_ratio=1.0
+        )
+        facts = state.evidence["verifier_mask_facts"]
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(facts["initial_audit_pixels"], 8)
+        self.assertEqual(facts["initial_audit_covered_pixels"], 4)
+        self.assertEqual(facts["initial_audit_uncovered_pixels"], 4)
+        self.assertEqual(facts["initial_audit_coverage_ratio"], 0.5)
+
     def test_candidate_attachment_keeps_components_separate_with_full_coverage(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         previous_mask = np.zeros((32, 32), dtype=bool)
@@ -109,7 +128,7 @@ class VerifierRegionTest(unittest.TestCase):
             1.0,
         )
 
-    def test_component_budget_exposes_uncovered_delta_for_conservative_rejection(self):
+    def test_component_batch_size_preserves_every_delta_component(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         previous_mask = np.zeros((32, 32), dtype=bool)
         current_mask = np.zeros_like(previous_mask)
@@ -125,10 +144,13 @@ class VerifierRegionTest(unittest.TestCase):
         proposals = attach_verifier_regions(current, previous, max_delta_regions=3)
         facts = current.evidence["verifier_mask_facts"]
 
-        self.assertEqual(len(proposals), 3)
-        self.assertEqual(facts["candidate_delta_covered_pixels"], 12)
-        self.assertEqual(facts["candidate_delta_uncovered_pixels"], 4)
-        self.assertEqual(facts["candidate_delta_coverage_ratio"], 0.75)
+        self.assertEqual(len(proposals), 4)
+        self.assertEqual([item["batch_index"] for item in proposals], [0, 0, 0, 1])
+        self.assertEqual(facts["candidate_delta_covered_pixels"], 16)
+        self.assertEqual(facts["candidate_delta_uncovered_pixels"], 0)
+        self.assertEqual(facts["candidate_delta_coverage_ratio"], 1.0)
+        self.assertEqual(facts["proposal_config"]["max_regions_per_batch"], 3)
+        self.assertEqual(facts["proposal_config"]["batch_count"], 2)
 
 
 if __name__ == "__main__":

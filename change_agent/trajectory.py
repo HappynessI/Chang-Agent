@@ -136,17 +136,24 @@ class Trajectory:
         parts = []
         for item in recent:
             action = item.parsed_action.action if item.parsed_action else "reset"
+            accepted = item.execution.get("candidate_accepted", True)
             score = (
                 f"{item.verifier.quality_score:.3f}"
                 if item.verifier.quality_score is not None
                 else "n/a"
             )
-            parts.append(
+            summary = (
                 f"step={item.step_index}, action={action}, "
                 f"score={score}, comparison={item.verifier.comparison}, "
                 f"progress={item.verifier.progress_score}, error={item.verifier.error_type}, "
-                f"accepted={item.execution.get('candidate_accepted', True)}"
+                f"accepted={accepted}"
             )
+            rejected_payload = item.execution.get("raw_action_payload")
+            if accepted is False and isinstance(rejected_payload, dict):
+                summary += ", rejected_action=" + json.dumps(
+                    rejected_payload, ensure_ascii=False, separators=(",", ":")
+                )
+            parts.append(summary)
         return "; ".join(parts)
 
     def save(

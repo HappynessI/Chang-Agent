@@ -195,6 +195,9 @@ class GroundingModelQwen3VL:
             "JSON object with target_view ('t1' or 't2') and action "
             "('positive_point', 'negative_point', 'box', or 'finish'). The coordinate protocol "
             "is system-defined. Never output coordinate_frame or other configuration fields. "
+            "History entries with accepted=false may include rejected_action JSON. Never repeat "
+            "that exact target_view/action/coordinate or box while the live mask is unchanged; "
+            "choose a different unresolved region or different tool geometry. "
             "Return one JSON object and no explanation.\n"
             f"{correction}"
             f"{format_example}"
@@ -267,6 +270,14 @@ class GroundingModelQwen3VL:
         payload = GroundingModelQwen3VL._extract_json_payload(previous_raw)
         target_view = payload.get("target_view")
         action = payload.get("action")
+        if "exactly repeats a previously rejected action" in validation_error:
+            forbidden = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            return (
+                f"The exact previous action is forbidden on the unchanged live state: "
+                f"{forbidden}. Do not reproduce it. Your next JSON must change the action "
+                "type or its coordinate/box and target a different unresolved region. "
+                "Return one complete JSON object with all fields required by the new action.\n"
+            )
         if target_view in {"t1", "t2"} and action in {
             "positive_point",
             "negative_point",

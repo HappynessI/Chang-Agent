@@ -1,5 +1,36 @@
 # Development log
 
+## 2026-07-19 — full delta batching and programmatic initial semantics
+
+GPU job `41377` (`change_agent_levir_gpu_closed_loop_20260719_135752`) completed on one
+GPU in 95 seconds, but none of its candidates reached the new RGB temporal-state call.
+`test_20_15` improved offline IoU from `0.84638554` to `0.84762580`, yet one of nine
+delta pixels fell outside the three-proposal global cap. `test_85_16` similarly had five
+uncovered pixels, while `test_78_13` stopped at initial verification after twice labeling
+ordinary current-change proposals as false negatives.
+
+- Candidate proposal construction now returns every added/removed connected component.
+  The configured value `3` is `max_regions_per_batch`; the Verifier performs as many
+  batches as required and still enforces exact total `coverage_ratio=1.0`.
+- Each batch independently records advisory mask-context attempts and decisive clean-RGB
+  temporal-state attempts. Advisory failure never blocks the corresponding RGB batch;
+  one invalid decisive batch invalidates the complete candidate.
+- Initial Qwen output is also reduced to elementary T1/T2 RGB states. Predicted masks,
+  current-change presence, FP/FN terms, target views, and action semantics are hidden
+  from the model call. Runtime geometry derives initial verdict, target view, and action.
+- Existing change plus different decisive RGB states derives `true_change`; existing
+  change plus equal states derives FP or matching uncertainty; missing change plus
+  different states derives FN; missing change plus equal states derives no error.
+- Rejected normalized action JSON is persisted in trajectory history. Duplicate-action
+  retry prompts quote it as forbidden and require a different action type or geometry,
+  while the Environment hard rejection remains unchanged.
+- The schema/cache version is bumped, run/config metadata names the per-batch limit, and
+  the 1024-token ceiling remains unchanged.
+
+Regression coverage includes four mixed-polarity delta components across two batches,
+full pixel coverage, initial state-to-verdict/action derivation, rejection of legacy
+abstract initial labels, and persistent duplicate-action constraints.
+
 ## 2026-07-19 — RGB temporal facts replace exact dual-label consensus
 
 The closed loop `change_agent_levir_gpu_closed_loop_20260719_205825` preserved the

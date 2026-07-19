@@ -269,11 +269,14 @@ class EnvironmentTest(unittest.TestCase):
             max_steps=3,
         )
         environment.reset(self.image1, self.image2, "building")
-        action = AgentAction("t2", "positive_point", coordinate=(0, 0))
-        environment.step(action)
+        raw = '{"target_view":"t2","action":"positive_point","coordinate":[0,0]}'
+        environment.step(raw)
+
+        self.assertIn("rejected_action=", environment.observation().history_summary)
+        self.assertIn('"coordinate":[0,0]', environment.observation().history_summary)
 
         with self.assertRaisesRegex(ActionValidationError, "exactly repeats"):
-            environment.step(action)
+            environment.step(raw)
 
     def test_initial_selection_policy_keeps_initial_state(self):
         environment = ChangeAgentEnvironment(

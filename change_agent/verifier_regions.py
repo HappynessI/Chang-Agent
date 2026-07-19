@@ -78,8 +78,17 @@ def attach_verifier_regions(
         else 0,
         "proposal_count": len(proposals),
         "proposal_config": {
-            "schema_version": "component_delta_v2",
+            "schema_version": "component_delta_batched_v3",
             "max_regions": max_regions if previous_state is None else max_delta_regions,
+            "max_regions_per_batch": (
+                None if previous_state is None else max_delta_regions
+            ),
+            "total_component_count": len(proposals),
+            "batch_count": (
+                0
+                if previous_state is None or not proposals
+                else (len(proposals) + max_delta_regions - 1) // max_delta_regions
+            ),
             "min_component_area": min_component_area,
             "padding_ratio": padding_ratio,
         },
@@ -90,8 +99,17 @@ def attach_verifier_regions(
         )
         covered_mask = np.zeros_like(audit_mask)
         for proposal in proposals:
-            x1, y1, x2, y2 = proposal["box_pixels"]
-            covered_mask[y1 : y2 + 1, x1 : x2 + 1] = True
+            audit_kind = proposal.get("audit_kind")
+            source = (
+                state.change_mask
+                if audit_kind == "present"
+                else np.logical_and(temporal_difference, ~state.change_mask)
+                if audit_kind == "missing"
+                else audit_mask
+            )
+            covered_mask |= _component_containing_seed(
+                source, proposal["component_seed_pixels"]
+            )
         covered_audit = np.logical_and(audit_mask, covered_mask)
         uncovered_audit = np.logical_and(audit_mask, ~covered_mask)
         total = int(audit_mask.sum())
@@ -137,8 +155,9 @@ def build_candidate_delta_regions(
     """Build compact, polarity-preserving component panels for a candidate edit.
 
     Connected components remain separate, so spatially distant or semantically mixed
-    edits cannot be collapsed into one label. Coverage facts force conservative
-    rejection when the configured component budget cannot inspect every changed pixel.
+    edits cannot be collapsed into one label. ``max_regions`` is the downstream model
+    batch size, not a lossy global component cap: every delta component is returned and
+    exact coverage remains auditable.
     """
 
     if max_regions < 1:
@@ -166,7 +185,7 @@ def build_candidate_delta_regions(
 
     height, width = change.shape
     result: list[dict[str, Any]] = []
-    for index, (effect_kind, component) in enumerate(raw[:max_regions]):
+    for index, (effect_kind, component) in enumerate(raw):
         seed_y, seed_x = np.argwhere(component)[0]
         crop_box = _padded_box(_mask_box(component), (height, width), padding_ratio)
         x1, y1, x2, y2 = crop_box
@@ -175,6 +194,7 @@ def build_candidate_delta_regions(
         result.append(
             {
                 "region_id": f"d{index}",
+                "batch_index": index // max_regions,
                 "effect_kind": effect_kind,
                 "sources": [f"candidate_{effect_kind}"],
                 "component_area": int(component.sum()),
@@ -281,6 +301,8 @@ def build_verifier_regions(
                 "box": item["box"],
                 "sources": {item["source"]},
                 "component_area": item["area"],
+                "component": item["component"],
+                "primary_source": item["source"],
             }
         )
 
@@ -288,6 +310,7 @@ def build_verifier_regions(
     result: list[dict[str, Any]] = []
     candidate_delta = np.logical_or(candidate_added, candidate_removed)
     for index, item in enumerate(selected):
+        seed_y, seed_x = np.argwhere(item["component"])[0]
         crop_box = _padded_box(item["box"], (height, width), padding_ratio)
         x1, y1, x2, y2 = crop_box
         crop = np.zeros_like(change)
@@ -296,7 +319,15 @@ def build_verifier_regions(
             {
                 "region_id": f"r{index}",
                 "sources": sorted(item["sources"]),
+                "audit_kind": (
+                    "present"
+                    if item["primary_source"] == "change_component"
+                    else "missing"
+                    if item["primary_source"] == "temporal_difference_missing"
+                    else "mixed"
+                ),
                 "component_area": int(item["component_area"]),
+                "component_seed_pixels": [int(seed_x), int(seed_y)],
                 "box_pixels": list(crop_box),
                 "box_normalized": list(
                     pixel_box_to_normalized(crop_box, (width, height))
@@ -326,6 +357,23 @@ def _mask_box(mask: np.ndarray) -> tuple[int, int, int, int]:
     if not len(xs):
         raise ValueError("cannot build a box for an empty component")
     return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+
+def _component_containing_seed(
+    mask: np.ndarray, seed_xy: list[int] | tuple[int, int]
+) -> np.ndarray:
+    seed_x, seed_y = (int(value) for value in seed_xy)
+    component = next(
+        (
+            item
+            for item in connected_components(np.asarray(mask, dtype=bool))
+            if item[seed_y, seed_x]
+        ),
+        None,
+    )
+    if component is None:
+        raise ValueError("proposal seed is outside its source component")
+    return component
 
 
 def _padded_box(

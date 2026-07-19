@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +23,7 @@ class _RegionJudgment:
     verdict: str
     target_view: str | None
     feedback: str
+    suggested_action: str | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class _RegionalAnalysis:
     target_view: str
     error_region: tuple[int, int, int, int] | None
     feedback: str
+    suggested_action: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,7 @@ class Qwen3VLZeroShotVerifier:
     runtime rules. Mask-context effect labels are retained only as audit evidence.
     """
 
-    SCHEMA_VERSION = "rgb_temporal_state_effect_v4"
+    SCHEMA_VERSION = "rgb_temporal_state_batched_effect_v5"
     CANDIDATE_EVIDENCE_MODES = ("mask_context", "rgb_temporal_state")
     ERROR_TYPES = {
         "none",
@@ -71,12 +72,6 @@ class Qwen3VLZeroShotVerifier:
         "false_negative",
         "mixed_error",
         "uncertain_region",
-    }
-    REGION_VERDICTS = {
-        "true_change",
-        "false_positive",
-        "false_negative",
-        "uncertain",
     }
     COMPARISONS = {"better", "worse", "unchanged", "uncertain"}
     EFFECT_LABELS = {
@@ -88,7 +83,6 @@ class Qwen3VLZeroShotVerifier:
         "uncertain",
     }
     TEMPORAL_STATES = {"building", "background", "mixed", "uncertain"}
-    VIEWS = {"t1", "t2"}
 
     def __init__(
         self,
@@ -146,9 +140,18 @@ class Qwen3VLZeroShotVerifier:
             proposals = attach_verifier_regions(state, previous_state)
         mask_facts = dict(state.evidence.get("verifier_mask_facts", {}))
 
+        if not proposals:
+            return self._invalid_output(
+                ["no mask-derived proposal is available for a reliable diagnosis"],
+                region_attempts=[],
+                pairwise_attempts=[],
+                previous_action=previous_action,
+            )
+
         region_errors: list[str] = []
-        schema_warnings: list[str] = []
         region_attempts: list[dict[str, Any]] = []
+        temporal_judgments: tuple[_TemporalStateJudgment, ...] | None = None
+        derivation_detail: list[dict[str, Any]] = []
         regional_analysis: _RegionalAnalysis | None = None
         for _ in range(self.max_retries):
             raw = self._generate_messages(
@@ -162,11 +165,12 @@ class Qwen3VLZeroShotVerifier:
             )
             try:
                 payload = self._extract_json_object(raw)
-                attempt_warnings: list[str] = []
-                judgments = self._parse_region_payload(
-                    payload, proposals, mask_facts, attempt_warnings
+                temporal_judgments = self._parse_temporal_state_payload(
+                    payload, proposals
                 )
-                schema_warnings.extend(attempt_warnings)
+                judgments, derivation_detail = self._initial_judgments_from_temporal_states(
+                    temporal_judgments, proposals, state
+                )
                 regional_analysis = self._derive_regional_analysis(
                     judgments, proposals, mask_facts, previous_action
                 )
@@ -191,7 +195,7 @@ class Qwen3VLZeroShotVerifier:
         self._last_valid_output = output
         self.last_evidence = {
             "type": "qwen3vl_compact_region_zero_shot",
-            "decision_mode": "compact_regions_then_rgb_temporal_state_delta_effect",
+            "decision_mode": "rgb_temporal_state_then_programmatic_initial",
             "gt_available": False,
             "verifier_valid": True,
             "localization_valid": output.localization_valid,
@@ -206,12 +210,20 @@ class Qwen3VLZeroShotVerifier:
                 }
                 for item in regional_analysis.judgments
             ],
+            "temporal_state_judgments": [
+                {
+                    "region_id": item.region_id,
+                    "t1_state": item.t1_state,
+                    "t2_state": item.t2_state,
+                }
+                for item in temporal_judgments or ()
+            ],
+            "initial_state_derivation": derivation_detail,
             "region_attempts": region_attempts,
             "effect_attempts": [],
             "pairwise_attempts": [],
             "comparison": decision.comparison,
             "validation_errors": region_errors,
-            "schema_warnings": schema_warnings,
         }
         return output
 
@@ -277,7 +289,6 @@ class Qwen3VLZeroShotVerifier:
         effect_attempts: list[dict[str, Any]] = []
         temporal_state_attempts: list[dict[str, Any]] = []
         fusion_detail: list[dict[str, Any]] = []
-        mask_judgments: tuple[_EffectJudgment, ...] | None = None
         temporal_judgments: tuple[_TemporalStateJudgment, ...] | None = None
         judgments: tuple[_EffectJudgment, ...] | None = None
         uncovered = int(facts.get("candidate_delta_uncovered_pixels", 0))
@@ -288,75 +299,130 @@ class Qwen3VLZeroShotVerifier:
         elif not proposals:
             effect_errors.append("candidate delta has no auditable proposal")
         else:
-            mask_errors: list[str] = []
-            for _ in range(self.max_retries):
-                raw = self._generate_messages(
-                    self.build_effect_messages(
-                        state,
-                        previous_state,
-                        previous_action,
-                        proposals,
-                        facts,
-                        mask_errors[-1:],
+            proposal_config = facts.get("proposal_config", {})
+            batch_size = int(
+                proposal_config.get("max_regions_per_batch") or len(proposals)
+            )
+            if batch_size < 1:
+                effect_errors.append("candidate delta batch size must be positive")
+            else:
+                all_effects: list[_EffectJudgment] = []
+                all_temporal: list[_TemporalStateJudgment] = []
+                decisive_batches_valid = True
+                for batch_index, start in enumerate(
+                    range(0, len(proposals), batch_size)
+                ):
+                    batch = proposals[start : start + batch_size]
+                    region_ids = [item["region_id"] for item in batch]
+                    batch_facts = dict(facts)
+                    batch_facts.update(
+                        {
+                            "batch_index": batch_index,
+                            "batch_proposal_count": len(batch),
+                            "total_proposal_count": len(proposals),
+                            "proposal_count": len(batch),
+                        }
                     )
-                )
-                try:
-                    payload = self._extract_json_object(raw)
-                    mask_judgments = self._parse_effect_payload(payload, proposals)
-                    effect_attempts.append(
-                        {"evidence_mode": "mask_context", "raw": raw, "output": payload}
-                    )
-                    break
-                except (TypeError, ValueError, KeyError) as error:
-                    mask_errors.append(str(error))
-                    effect_errors.append(f"mask_context: {error}")
-                    effect_attempts.append(
-                        {"evidence_mode": "mask_context", "raw": raw, "error": str(error)}
-                    )
+                    mask_judgments: tuple[_EffectJudgment, ...] | None = None
+                    mask_errors: list[str] = []
+                    for _ in range(self.max_retries):
+                        raw = self._generate_messages(
+                            self.build_effect_messages(
+                                state,
+                                previous_state,
+                                previous_action,
+                                batch,
+                                batch_facts,
+                                mask_errors[-1:],
+                            )
+                        )
+                        try:
+                            payload = self._extract_json_object(raw)
+                            mask_judgments = self._parse_effect_payload(payload, batch)
+                            effect_attempts.append(
+                                {
+                                    "evidence_mode": "mask_context",
+                                    "batch_index": batch_index,
+                                    "region_ids": region_ids,
+                                    "raw": raw,
+                                    "output": payload,
+                                }
+                            )
+                            break
+                        except (TypeError, ValueError, KeyError) as error:
+                            mask_errors.append(str(error))
+                            effect_errors.append(
+                                f"mask_context batch {batch_index}: {error}"
+                            )
+                            effect_attempts.append(
+                                {
+                                    "evidence_mode": "mask_context",
+                                    "batch_index": batch_index,
+                                    "region_ids": region_ids,
+                                    "raw": raw,
+                                    "error": str(error),
+                                }
+                            )
 
-            # The mask-context judgment is advisory audit evidence.  Always run the
-            # elementary RGB temporal-state pass even when that advisory response is
-            # malformed, otherwise an unrelated formatting failure can suppress a
-            # visually supported beneficial edit.
-            temporal_errors: list[str] = []
-            for _ in range(self.max_retries):
-                raw = self._generate_messages(
-                    self.build_temporal_state_messages(
-                        state,
-                        previous_state,
-                        previous_action,
-                        proposals,
-                        facts,
-                        temporal_errors[-1:],
+                    # Mask-context is advisory. Every batch independently reaches the
+                    # decisive RGB pass even if the advisory response is malformed.
+                    batch_temporal: tuple[_TemporalStateJudgment, ...] | None = None
+                    temporal_errors: list[str] = []
+                    for _ in range(self.max_retries):
+                        raw = self._generate_messages(
+                            self.build_temporal_state_messages(
+                                state,
+                                previous_state,
+                                previous_action,
+                                batch,
+                                batch_facts,
+                                temporal_errors[-1:],
+                            )
+                        )
+                        try:
+                            payload = self._extract_json_object(raw)
+                            batch_temporal = self._parse_temporal_state_payload(
+                                payload, batch
+                            )
+                            temporal_state_attempts.append(
+                                {
+                                    "evidence_mode": "rgb_temporal_state",
+                                    "batch_index": batch_index,
+                                    "region_ids": region_ids,
+                                    "raw": raw,
+                                    "output": payload,
+                                }
+                            )
+                            break
+                        except (TypeError, ValueError, KeyError) as error:
+                            temporal_errors.append(str(error))
+                            effect_errors.append(
+                                f"rgb_temporal_state batch {batch_index}: {error}"
+                            )
+                            temporal_state_attempts.append(
+                                {
+                                    "evidence_mode": "rgb_temporal_state",
+                                    "batch_index": batch_index,
+                                    "region_ids": region_ids,
+                                    "raw": raw,
+                                    "error": str(error),
+                                }
+                            )
+                    if batch_temporal is None:
+                        decisive_batches_valid = False
+                        break
+                    batch_effects, batch_fusion = self._effects_from_temporal_states(
+                        batch_temporal, mask_judgments, batch
                     )
-                )
-                try:
-                    payload = self._extract_json_object(raw)
-                    temporal_judgments = self._parse_temporal_state_payload(
-                        payload, proposals
+                    all_temporal.extend(batch_temporal)
+                    all_effects.extend(batch_effects)
+                    fusion_detail.extend(
+                        {**item, "batch_index": batch_index}
+                        for item in batch_fusion
                     )
-                    temporal_state_attempts.append(
-                        {
-                            "evidence_mode": "rgb_temporal_state",
-                            "raw": raw,
-                            "output": payload,
-                        }
-                    )
-                    break
-                except (TypeError, ValueError, KeyError) as error:
-                    temporal_errors.append(str(error))
-                    effect_errors.append(f"rgb_temporal_state: {error}")
-                    temporal_state_attempts.append(
-                        {
-                            "evidence_mode": "rgb_temporal_state",
-                            "raw": raw,
-                            "error": str(error),
-                        }
-                    )
-            if temporal_judgments is not None:
-                judgments, fusion_detail = self._effects_from_temporal_states(
-                    temporal_judgments, mask_judgments, proposals
-                )
+                if decisive_batches_valid:
+                    temporal_judgments = tuple(all_temporal)
+                    judgments = tuple(all_effects)
 
         if judgments is None:
             output = self._invalid_output(
@@ -368,7 +434,7 @@ class Qwen3VLZeroShotVerifier:
             self.last_evidence.update(
                 {
                     "type": "qwen3vl_compact_delta_effect_zero_shot",
-                    "decision_mode": "rgb_temporal_state_then_programmatic_delta_effect",
+                    "decision_mode": "batched_rgb_temporal_state_then_programmatic_delta_effect",
                     "candidate_fingerprint": fingerprint,
                     "decision_key": fingerprint,
                     "decision_step": state.step_index,
@@ -390,7 +456,7 @@ class Qwen3VLZeroShotVerifier:
         self._last_valid_output = output
         self.last_evidence = {
             "type": "qwen3vl_compact_delta_effect_zero_shot",
-            "decision_mode": "rgb_temporal_state_then_programmatic_delta_effect",
+            "decision_mode": "batched_rgb_temporal_state_then_programmatic_delta_effect",
             "candidate_fingerprint": fingerprint,
             "decision_key": fingerprint,
             "decision_step": state.step_index,
@@ -445,7 +511,7 @@ class Qwen3VLZeroShotVerifier:
             messages.append(f"Previous valid feedback retained: {retained}")
         self.last_evidence = {
             "type": "qwen3vl_compact_region_zero_shot",
-            "decision_mode": "compact_regions_then_rgb_temporal_state_delta_effect",
+            "decision_mode": "rgb_temporal_state_programmatic_verifier",
             "region_attempts": region_attempts,
             "pairwise_attempts": pairwise_attempts,
             "validation_errors": errors,
@@ -478,7 +544,10 @@ class Qwen3VLZeroShotVerifier:
     def _derive_output(
         analysis: _RegionalAnalysis, decision: _PairwiseDecision
     ) -> VerifierOutput:
-        if analysis.error_type == "none":
+        if analysis.suggested_action is not None:
+            suggested_action = analysis.suggested_action
+            accept = analysis.error_type == "none"
+        elif analysis.error_type == "none":
             suggested_action = "finish"
             accept = True
         elif analysis.error_type == "false_positive_change":
@@ -517,57 +586,54 @@ class Qwen3VLZeroShotVerifier:
         previous_state: ChangeState | None = None,
         previous_errors: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        del previous_score, previous_state
+        del previous_score, previous_action, previous_state
         proposals = list(state.evidence.get("verifier_region_proposals", []))
-        facts = dict(state.evidence.get("verifier_mask_facts", {}))
         correction = (
-            f"Your previous response was invalid: {previous_errors[-1]}. Correct it.\n"
+            f"Your previous temporal-state response was invalid: "
+            f"{previous_errors[-1]}. Correct it.\n"
             if previous_errors
             else ""
         )
         prompt = (
-            "Classify each Environment-proposed local region for building change detection. "
-            "The full images and masks preserve global context; each local panel makes small "
-            "white mask components visible. Panel quadrants are: top-left T1 crop with current "
-            "change highlighted magenta, top-right T2 crop with the same highlight, bottom-left "
-            "change comparison (white candidate change for the initial state; red=previous, "
-            "green=candidate, blue=delta for pairwise state), bottom-right temporal masks "
-            "(red=T1 object, green=T2 object, blue=current change). A true temporal building "
-            "change is added (background T1/building T2) or disappeared (building T1/background "
-            "T2). Unchanged buildings/background are not change. Predicted temporal masks are "
-            "supporting predictions, not GT; verify against RGB crops. For each exact region_id, "
-            "return true_change when existing white change pixels are supported, false_positive "
-            "when existing white pixels are unsupported, false_negative only when a real change "
-            "is absent from the current white mask, or uncertain. false_negative is allowed only "
-            "when the proposal sources include temporal_difference_missing; it is forbidden for "
-            "an ordinary white change component. target_view must be t1 or "
-            "t2 for false_positive/false_negative and null otherwise. Return exactly one compact "
-            "JSON object mapping every exact region_id to [verdict,target_view], for example "
-            "{\"r0\":[\"true_change\",null],\"r1\":[\"false_positive\",\"t2\"]}. "
-            "Do not output feedback sentences, scores, comparison, coordinates, actions, GT "
-            "claims, or extra keys.\n"
-            f"Exact global mask facts (authoritative, not inferred visually): "
-            f"{json.dumps(facts, ensure_ascii=False)}\n"
-            f"OmniOVCD matching summary (supporting evidence, not GT): "
-            f"{json.dumps(state.evidence.get('matching', {}), ensure_ascii=False, default=str)}\n"
-            "If change_pixels is greater than zero, the current change mask is NOT empty and "
-            "you must not call it empty.\n"
-            f"Action that produced the candidate: "
-            f"{json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
+            "Judge elementary RGB facts at the exact highlighted audit pixels. Predicted masks, "
+            "change-mask status, FP/FN labels, and action semantics are intentionally hidden. "
+            "Each panel contains clean T1 RGB, clean T2 RGB, the exact binary audit component, "
+            "and amplified absolute RGB difference. For every region_id, independently classify "
+            "the object state at those exact pixels in T1 and T2 as building, background, mixed, "
+            "or uncertain. Use mixed when the highlighted component spans both building and "
+            "background. Return exactly one compact JSON object mapping every exact region_id to "
+            "[t1_state,t2_state], for example "
+            "{\"r0\":[\"building\",\"building\"],"
+            "\"r1\":[\"background\",\"building\"]}. Do not output FP/FN, true-change, "
+            "target views, feedback, scores, actions, coordinates, or extra keys.\n"
             f"{correction}"
         )
-        content = self._global_visual_content(state)
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": "Fixed clean T1 original image:"},
+            {"type": "image", "image": self._as_image(state.t1_image)},
+            {"type": "text", "text": "Fixed clean T2 original image:"},
+            {"type": "image", "image": self._as_image(state.t2_image)},
+        ]
         for proposal in proposals:
+            public_proposal = {
+                key: proposal[key]
+                for key in (
+                    "region_id",
+                    "component_area",
+                    "box_normalized",
+                )
+                if key in proposal
+            }
             content.extend(
                 [
                     {
                         "type": "text",
                         "text": (
-                            f"Local proposal {proposal['region_id']} with exact metadata: "
-                            f"{json.dumps(proposal, ensure_ascii=False)}"
+                            f"Initial RGB audit proposal {proposal['region_id']}: "
+                            f"{json.dumps(public_proposal, ensure_ascii=False)}"
                         ),
                     },
-                    {"type": "image", "image": self._region_panel(state, proposal)},
+                    {"type": "image", "image": self._rgb_initial_panel(state, proposal)},
                 ]
             )
         content.append({"type": "text", "text": prompt})
@@ -659,6 +725,9 @@ class Qwen3VLZeroShotVerifier:
                 "candidate_delta_uncovered_pixels",
                 "candidate_delta_coverage_ratio",
                 "proposal_count",
+                "batch_index",
+                "batch_proposal_count",
+                "total_proposal_count",
                 "proposal_config",
             )
             if key in facts
@@ -715,141 +784,6 @@ class Qwen3VLZeroShotVerifier:
         return [{"role": "user", "content": content}]
 
     @staticmethod
-    def _global_visual_content(state: ChangeState) -> list[dict[str, Any]]:
-        return [
-            {"type": "text", "text": "Full T1 original image:"},
-            {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t1_image)},
-            {"type": "text", "text": "Full T2 original image:"},
-            {"type": "image", "image": Qwen3VLZeroShotVerifier._as_image(state.t2_image)},
-            {"type": "text", "text": "Full predicted T1 object mask:"},
-            {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t1_mask)},
-            {"type": "text", "text": "Full predicted T2 object mask:"},
-            {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.t2_mask)},
-            {"type": "text", "text": "Full candidate final change mask:"},
-            {"type": "image", "image": Qwen3VLZeroShotVerifier._mask_image(state.change_mask)},
-        ]
-
-    def _parse_region_payload(
-        self,
-        payload: dict[str, Any],
-        proposals: list[dict[str, Any]],
-        mask_facts: dict[str, Any],
-        schema_warnings: list[str] | None = None,
-    ) -> tuple[_RegionJudgment, ...]:
-        expected_ids = [item["region_id"] for item in proposals]
-        values = self._normalize_region_values(payload, expected_ids)
-        if len(values) != len(expected_ids):
-            raise ValueError("region response must cover every proposal exactly once")
-        by_id = {item["region_id"]: item for item in proposals}
-        judgments: list[_RegionJudgment] = []
-        seen: set[str] = set()
-        feedback_text: list[str] = []
-        for value in values:
-            required = {"region_id", "verdict", "target_view"}
-            allowed = required | {"feedback"}
-            if (
-                not isinstance(value, dict)
-                or not required.issubset(value)
-                or set(value) - allowed
-            ):
-                raise ValueError("each region judgment has unexpected or missing fields")
-            region_id = value["region_id"]
-            if region_id not in by_id or region_id in seen:
-                raise ValueError("unknown or duplicate region_id")
-            verdict = value["verdict"]
-            if verdict not in self.REGION_VERDICTS:
-                raise ValueError("unsupported region verdict")
-            target_view = value["target_view"]
-            if verdict in {"false_positive", "false_negative"}:
-                if target_view not in self.VIEWS:
-                    raise ValueError("actionable region judgment requires target_view t1/t2")
-            elif target_view is not None:
-                if target_view not in self.VIEWS:
-                    raise ValueError("non-actionable region judgment has invalid target_view")
-                if schema_warnings is not None:
-                    schema_warnings.append(
-                        f"{region_id} {verdict} target_view={target_view} canonicalized to null"
-                    )
-                target_view = None
-            feedback = value.get("feedback")
-            if feedback is None:
-                feedback = f"{region_id} classified as {verdict}."
-            if not isinstance(feedback, str) or not feedback.strip():
-                raise TypeError("region feedback must be a non-empty string when supplied")
-            if verdict in {"true_change", "false_positive"} and not by_id[region_id]["change_pixels"]:
-                raise ValueError(f"{verdict} requires white change pixels in the proposal")
-            if (
-                verdict == "false_negative"
-                and "temporal_difference_missing"
-                not in by_id[region_id].get("sources", [])
-            ):
-                raise ValueError(
-                    "false_negative is impossible without a mask-derived missing-change "
-                    "proposal"
-                )
-            seen.add(region_id)
-            feedback_text.append(feedback)
-            judgments.append(
-                _RegionJudgment(region_id, verdict, target_view, feedback.strip())
-            )
-        if seen != set(expected_ids):
-            raise ValueError("region response omitted a proposal")
-        if int(mask_facts.get("change_pixels", 0)) > 0 and self._claims_empty(
-            " ".join(feedback_text)
-        ):
-            raise ValueError(
-                "diagnosis contradicts authoritative mask facts: current change mask is not empty"
-            )
-        return tuple(judgments)
-
-    @staticmethod
-    def _normalize_region_values(
-        payload: dict[str, Any], expected_ids: list[str]
-    ) -> list[dict[str, Any]]:
-        """Normalize compact output and legacy verbose forms.
-
-        The current prompt asks for ``{"r0": [verdict, view]}``. Older saved
-        responses used either ``{"regions": [...]}`` or region-keyed objects;
-        retaining those parsers keeps replay artifacts readable. Ordering is always
-        restored to Environment proposal order.
-        """
-        if set(payload) == {"regions"}:
-            values = payload["regions"]
-            if not isinstance(values, list):
-                raise TypeError("regions must be a list")
-            return values
-
-        expected = set(expected_ids)
-        if set(payload) == expected and all(
-            isinstance(payload[region_id], (list, tuple))
-            and len(payload[region_id]) == 2
-            for region_id in expected_ids
-        ):
-            return [
-                {
-                    "region_id": region_id,
-                    "verdict": payload[region_id][0],
-                    "target_view": payload[region_id][1],
-                }
-                for region_id in expected_ids
-            ]
-        if set(payload) == expected and all(
-            isinstance(payload[region_id], dict) for region_id in expected_ids
-        ):
-            values: list[dict[str, Any]] = []
-            for region_id in expected_ids:
-                value = dict(payload[region_id])
-                # The key is authoritative when the model omits the repeated
-                # field; retain the strict downstream schema after injection.
-                value.setdefault("region_id", region_id)
-                values.append(value)
-            return values
-
-        raise ValueError(
-            "region response must use compact region pairs or a complete legacy form"
-        )
-
-    @staticmethod
     def _derive_regional_analysis(
         judgments: tuple[_RegionJudgment, ...],
         proposals: list[dict[str, Any]],
@@ -899,7 +833,7 @@ class Qwen3VLZeroShotVerifier:
         )
         facts = (
             f"Current change mask contains {int(mask_facts.get('change_pixels', 0))} white pixels "
-            f"across {len(proposals)} inspected proposals."
+            f"across {len(proposals)} inspected audit proposals."
         )
         detail = (
             selected.feedback
@@ -909,10 +843,22 @@ class Qwen3VLZeroShotVerifier:
                 "finish is not authorized."
             )
             if uncovered
-            else "All proposed white change regions are supported by the inspected RGB crops."
+            else "All inspected audit components are supported by the RGB crops."
+        )
+        suggested_action = (
+            "box"
+            if error_type == "mixed_error"
+            else selected.suggested_action
+            if selected is not None and selected.suggested_action is not None
+            else "box" if uncovered and selected is None else None
         )
         return _RegionalAnalysis(
-            judgments, error_type, target_view, region, f"{facts} {detail}"
+            judgments,
+            error_type,
+            target_view,
+            region,
+            f"{facts} {detail}",
+            suggested_action,
         )
 
     def _parse_effect_payload(
@@ -956,6 +902,100 @@ class Qwen3VLZeroShotVerifier:
                 raise ValueError("unsupported RGB temporal state")
             result.append(_TemporalStateJudgment(region_id, t1_state, t2_state))
         return tuple(result)
+
+    @staticmethod
+    def _initial_judgments_from_temporal_states(
+        temporal_judgments: tuple[_TemporalStateJudgment, ...],
+        proposals: list[dict[str, Any]],
+        state: ChangeState,
+    ) -> tuple[tuple[_RegionJudgment, ...], list[dict[str, Any]]]:
+        """Derive initial FP/FN semantics from RGB facts and mask-owned geometry."""
+
+        by_temporal = {item.region_id: item for item in temporal_judgments}
+        judgments: list[_RegionJudgment] = []
+        detail: list[dict[str, Any]] = []
+        for proposal in proposals:
+            region_id = proposal["region_id"]
+            temporal = by_temporal[region_id]
+            component = Qwen3VLZeroShotVerifier._proposal_initial_component(
+                state, proposal
+            )
+            component_pixels = max(1, int(component.sum()))
+            t1_ratio = float(np.logical_and(component, state.t1_mask).sum()) / component_pixels
+            t2_ratio = float(np.logical_and(component, state.t2_mask).sum()) / component_pixels
+            predicted_views = [
+                view
+                for view, ratio in (("t1", t1_ratio), ("t2", t2_ratio))
+                if ratio >= 0.5
+            ]
+            audit_kind = proposal.get("audit_kind", "mixed")
+            states = {temporal.t1_state, temporal.t2_state}
+            temporal_change: bool | None
+            target_view: str | None = None
+            suggested_action: str | None = None
+            if audit_kind not in {"present", "missing"} or states & {
+                "mixed",
+                "uncertain",
+            }:
+                verdict = "uncertain"
+                temporal_change = None
+                suggested_action = "box"
+            else:
+                temporal_change = temporal.t1_state != temporal.t2_state
+                if audit_kind == "present" and temporal_change:
+                    verdict = "true_change"
+                elif audit_kind == "missing" and not temporal_change:
+                    verdict = "no_error"
+                elif audit_kind == "missing":
+                    verdict = "false_negative"
+                    target_view = (
+                        "t1" if temporal.t1_state == "building" else "t2"
+                    )
+                    suggested_action = "positive_point"
+                elif len(predicted_views) != 1:
+                    # A current change component with both/neither predicted masks is
+                    # a matching inconsistency, not a safe one-view segmentation edit.
+                    verdict = "uncertain"
+                    temporal_change = False
+                    suggested_action = "box"
+                else:
+                    verdict = "false_positive"
+                    predicted_view = predicted_views[0]
+                    if temporal.t1_state == temporal.t2_state == "building":
+                        target_view = "t2" if predicted_view == "t1" else "t1"
+                        suggested_action = "positive_point"
+                    else:
+                        target_view = predicted_view
+                        suggested_action = "negative_point"
+            feedback = (
+                f"{region_id} RGB states are {temporal.t1_state}/{temporal.t2_state}; "
+                f"runtime audit kind is {audit_kind}, derived verdict is {verdict}."
+            )
+            judgments.append(
+                _RegionJudgment(
+                    region_id,
+                    verdict,
+                    target_view,
+                    feedback,
+                    suggested_action,
+                )
+            )
+            detail.append(
+                {
+                    "region_id": region_id,
+                    "audit_kind": audit_kind,
+                    "t1_state": temporal.t1_state,
+                    "t2_state": temporal.t2_state,
+                    "temporal_change": temporal_change,
+                    "t1_predicted_component_ratio": t1_ratio,
+                    "t2_predicted_component_ratio": t2_ratio,
+                    "derived_verdict": verdict,
+                    "target_view": target_view,
+                    "suggested_action": suggested_action,
+                    "decision_source": "rgb_temporal_state_plus_runtime_geometry",
+                }
+            )
+        return tuple(judgments), detail
 
     @staticmethod
     def _effects_from_temporal_states(
@@ -1136,16 +1176,6 @@ class Qwen3VLZeroShotVerifier:
         )
         return digest.hexdigest()
 
-    @staticmethod
-    def _claims_empty(text: str) -> bool:
-        return bool(
-            re.search(
-                r"\b(?:candidate|current|change)\s+(?:change\s+)?mask\s+(?:is|appears|looks)\s+empty\b|\b(?:candidate|current|change)\s+mask\s+contains\s+no\s+white\s+pixels\b",
-                text,
-                flags=re.IGNORECASE,
-            )
-        )
-
     def _generate_messages(self, messages: list[dict[str, Any]]) -> str:
         inputs = self.processor.apply_chat_template(
             messages,
@@ -1295,6 +1325,76 @@ class Qwen3VLZeroShotVerifier:
                 ((index % 2) * panel_size, (index // 2) * panel_size),
             )
         return canvas
+
+    @staticmethod
+    def _rgb_initial_panel(
+        state: ChangeState,
+        proposal: dict[str, Any],
+        panel_size: int = 192,
+    ) -> Image.Image:
+        """Show clean temporal RGB and exact initial audit-component geometry."""
+
+        x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
+        region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
+        t1 = np.asarray(state.t1_image[region], dtype=np.uint8)
+        t2 = np.asarray(state.t2_image[region], dtype=np.uint8)
+        component = Qwen3VLZeroShotVerifier._proposal_initial_component(
+            state, proposal
+        )[region]
+        component_rgb = np.repeat(
+            (component.astype(np.uint8) * 255)[..., None], 3, axis=2
+        )
+        absolute_difference = np.abs(t2.astype(np.int16) - t1.astype(np.int16))
+        absolute_difference = np.clip(absolute_difference * 2, 0, 255).astype(np.uint8)
+        tiles = [
+            Image.fromarray(t1),
+            Image.fromarray(t2),
+            Image.fromarray(component_rgb),
+            Image.fromarray(absolute_difference),
+        ]
+        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
+        for index, tile in enumerate(tiles):
+            resample = Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
+            canvas.paste(
+                tile.resize((panel_size, panel_size), resample),
+                ((index % 2) * panel_size, (index // 2) * panel_size),
+            )
+        return canvas
+
+    @staticmethod
+    def _proposal_initial_component(
+        state: ChangeState, proposal: dict[str, Any]
+    ) -> np.ndarray:
+        audit_kind = proposal.get("audit_kind")
+        if audit_kind == "present":
+            source = np.asarray(state.change_mask, dtype=bool)
+        elif audit_kind == "missing":
+            source = np.logical_and(
+                np.logical_xor(state.t1_mask, state.t2_mask),
+                ~state.change_mask,
+            )
+        else:
+            source = np.logical_or(
+                state.change_mask,
+                np.logical_and(
+                    np.logical_xor(state.t1_mask, state.t2_mask),
+                    ~state.change_mask,
+                ),
+            )
+        seed_x, seed_y = proposal.get("component_seed_pixels", (None, None))
+        if seed_x is None or seed_y is None:
+            raise ValueError("initial proposal has no component seed")
+        component = next(
+            (
+                item
+                for item in connected_components(source)
+                if item[int(seed_y), int(seed_x)]
+            ),
+            None,
+        )
+        if component is None:
+            raise ValueError("initial proposal seed is outside its audit component")
+        return component
 
     @staticmethod
     def _proposal_delta_component(

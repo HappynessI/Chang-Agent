@@ -41,7 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--comparison-epsilon", type=float, default=1e-6)
     parser.add_argument("--max-regions", type=int, default=6)
-    parser.add_argument("--max-delta-regions", type=int, default=3)
+    parser.add_argument(
+        "--max-delta-regions-per-batch",
+        "--max-delta-regions",
+        dest="max_delta_regions",
+        type=int,
+        default=3,
+    )
     return parser.parse_args()
 
 
@@ -215,7 +221,7 @@ def replay_run(
     summary = _summary(samples)
     metrics = json.loads((run_dir / "per_sample_metrics.json").read_text())
     return {
-        "decision_mode": "rgb_temporal_state_effect_then_programmatic_comparison",
+        "decision_mode": "batched_rgb_temporal_state_effect_then_programmatic_comparison",
         "gt_policy": "GT opened only after every verifier output for a sample",
         "run_dir": str(run_dir),
         "samples": samples,

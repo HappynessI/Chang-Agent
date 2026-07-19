@@ -45,47 +45,28 @@ def make_state(end=8):
     return ChangeState(image, image, "building", t1, t2, t2)
 
 
-def region_payload(state, verdict="true_change", feedback="The white region is supported."):
-    del feedback
-    proposals = state.evidence["verifier_region_proposals"]
+def region_payload(state, t1_state="background", t2_state="building"):
     return {
-        item["region_id"]: [
-            verdict,
-            "t2" if verdict in {"false_positive", "false_negative"} else None,
-        ]
+        item["region_id"]: [t1_state, t2_state]
+        for item in state.evidence["verifier_region_proposals"]
+    }
+
+
+def effect_payload(state, effect, proposals=None):
+    proposals = proposals or state.evidence["verifier_region_proposals"]
+    return {
+        item["region_id"]: effect
         for item in proposals
     }
 
 
-def keyed_region_payload(
-    state, verdict="true_change", feedback="The white region is supported."
+def temporal_payload(
+    state, t1_state="background", t2_state="building", proposals=None
 ):
-    """Model-shaped alternative observed in the GPU rollout."""
-    return {
-        item["region_id"]: {
-            "region_id": item["region_id"],
-            "verdict": verdict,
-            # Qwen often supplies a harmless view even for non-actionable
-            # judgments; the verifier should not discard an otherwise valid
-            # region analysis for that cosmetic field.
-            "target_view": "t1",
-            "feedback": feedback,
-        }
-        for item in state.evidence["verifier_region_proposals"]
-    }
-
-
-def effect_payload(state, effect):
-    return {
-        item["region_id"]: effect
-        for item in state.evidence["verifier_region_proposals"]
-    }
-
-
-def temporal_payload(state, t1_state="background", t2_state="building"):
+    proposals = proposals or state.evidence["verifier_region_proposals"]
     return {
         item["region_id"]: [t1_state, t2_state]
-        for item in state.evidence["verifier_region_proposals"]
+        for item in proposals
     }
 
 
@@ -107,13 +88,13 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("white pixels", output.feedback)
         self.assertEqual(
             verifier.last_evidence["decision_mode"],
-            "compact_regions_then_rgb_temporal_state_delta_effect",
+            "rgb_temporal_state_then_programmatic_initial",
         )
 
     def test_false_positive_uses_environment_box_instead_of_model_localization(self):
         state = make_state()
         proposals = attach_verifier_regions(state)
-        processor = FakeProcessor(region_payload(state, "false_positive", "Roof is unchanged."))
+        processor = FakeProcessor(region_payload(state, "background", "background"))
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
 
         output = verifier.verify(state, None, None)
@@ -124,10 +105,25 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_region, tuple(proposals[0]["box_normalized"]))
         self.assertEqual(processor.call_count, 1)
 
-    def test_nonactionable_region_view_is_canonicalized_without_retry(self):
+    def test_unchanged_building_component_adds_missing_temporal_mask(self):
+        state = make_state()
+        proposals = attach_verifier_regions(state)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(region_payload(state, "building", "building")),
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertEqual(output.error_type, "false_positive_change")
+        self.assertEqual(output.suggested_action, "positive_point")
+        self.assertEqual(output.target_view, "t1")
+        self.assertEqual(output.error_region, tuple(proposals[0]["box_normalized"]))
+
+    def test_initial_model_outputs_only_temporal_states_without_target_view(self):
         state = make_state()
         attach_verifier_regions(state)
-        processor = FakeProcessor(keyed_region_payload(state))
+        processor = FakeProcessor(region_payload(state))
         verifier = Qwen3VLZeroShotVerifier(
             model=FakeModel(), processor=processor, max_retries=2
         )
@@ -138,10 +134,6 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.comparison, "initial")
         self.assertEqual(processor.call_count, 1)
         self.assertEqual(verifier.last_evidence["validation_errors"], [])
-        self.assertIn(
-            "canonicalized to null",
-            " ".join(verifier.last_evidence["schema_warnings"]),
-        )
         self.assertTrue(
             all(
                 item["target_view"] is None
@@ -149,8 +141,16 @@ class QwenVerifierTest(unittest.TestCase):
             )
         )
         self.assertEqual(len(verifier.last_evidence["region_judgments"]), len(
-            state.evidence["verifier_region_proposals"]
+                state.evidence["verifier_region_proposals"]
         ))
+        prompt = " ".join(
+            item["text"]
+            for item in processor.messages_history[0][0]["content"]
+            if item["type"] == "text"
+        )
+        self.assertNotIn("target_view", json.dumps(processor.payloads[0]))
+        self.assertIn("Predicted masks", prompt)
+        self.assertIn("intentionally hidden", prompt)
 
     def test_uncovered_initial_audit_pixels_cannot_authorize_finish(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
@@ -259,6 +259,78 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_type, "false_positive_change")
         self.assertEqual(output.suggested_action, "negative_point")
 
+    def test_four_delta_components_are_fully_verified_in_two_batches(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        previous_mask[28, 28] = True
+        current_mask = np.zeros_like(previous_mask)
+        for y, x in ((2, 2), (10, 10), (20, 20)):
+            current_mask[y, x] = True
+        previous = ChangeState(
+            image,
+            image,
+            "building",
+            np.zeros_like(previous_mask),
+            previous_mask,
+            previous_mask,
+        )
+        state = ChangeState(
+            image,
+            image,
+            "building",
+            np.zeros_like(current_mask),
+            current_mask,
+            current_mask,
+        )
+        proposals = attach_verifier_regions(
+            state, previous, max_delta_regions=3
+        )
+        batches = [proposals[:3], proposals[3:]]
+        payloads = []
+        for batch in batches:
+            payloads.append(
+                {
+                    item["region_id"]: (
+                        "added_true_change"
+                        if item["effect_kind"] == "added"
+                        else "removed_false_positive"
+                    )
+                    for item in batch
+                }
+            )
+            payloads.append(
+                {
+                    item["region_id"]: (
+                        ["background", "building"]
+                        if item["effect_kind"] == "added"
+                        else ["background", "background"]
+                    )
+                    for item in batch
+                }
+            )
+        processor = FakeProcessor(payloads)
+        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "box", box=(0, 0, 31, 31)),
+            previous,
+        )
+
+        self.assertEqual(len(proposals), 4)
+        self.assertEqual(
+            state.evidence["verifier_mask_facts"]["candidate_delta_coverage_ratio"],
+            1.0,
+        )
+        self.assertEqual(output.comparison, "better")
+        self.assertTrue(output.accept)
+        self.assertEqual(processor.call_count, 4)
+        self.assertEqual(
+            [item["batch_index"] for item in verifier.last_evidence["effect_fusion"]],
+            [0, 0, 0, 1],
+        )
+
     def test_identical_candidate_fingerprint_reuses_cached_effect_decision(self):
         previous = make_state(7)
         state = make_state(8)
@@ -350,7 +422,7 @@ class QwenVerifierTest(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                error.startswith("mask_context:")
+                error.startswith("mask_context batch 0:")
                 for error in verifier.last_evidence["validation_errors"]
             )
         )
@@ -440,21 +512,22 @@ class QwenVerifierTest(unittest.TestCase):
         temporal = {f"d{index}": ["background", "building"] for index in range(3)}
         self.assertLess(len(json.dumps(temporal, separators=(",", ":"))), 160)
 
-    def test_white_candidate_region_cannot_be_false_negative(self):
+    def test_present_change_region_cannot_derive_false_negative(self):
         state = make_state()
         attach_verifier_regions(state)
         verifier = Qwen3VLZeroShotVerifier(
             model=FakeModel(),
-            processor=FakeProcessor(region_payload(state, "false_negative")),
+            processor=FakeProcessor(region_payload(state, "background", "building")),
             max_retries=1,
         )
 
         output = verifier.verify(state, None, None)
 
-        self.assertFalse(output.verifier_valid)
-        self.assertIn(
-            "false_negative is impossible",
-            " ".join(verifier.last_evidence["validation_errors"]),
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_type, "none")
+        self.assertEqual(
+            {item["verdict"] for item in verifier.last_evidence["region_judgments"]},
+            {"true_change"},
         )
 
     def test_false_negative_requires_a_mask_derived_missing_proposal(self):
@@ -466,7 +539,7 @@ class QwenVerifierTest(unittest.TestCase):
         attach_verifier_regions(state)
         verifier = Qwen3VLZeroShotVerifier(
             model=FakeModel(),
-            processor=FakeProcessor(region_payload(state, "false_negative")),
+            processor=FakeProcessor(region_payload(state, "background", "building")),
         )
 
         output = verifier.verify(state, None, None)
@@ -474,19 +547,16 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertTrue(output.verifier_valid)
         self.assertEqual(output.error_type, "false_negative")
 
-    def test_nonempty_mask_claimed_empty_is_rejected_and_retried(self):
+    def test_abstract_initial_labels_are_rejected_then_temporal_states_corrected(self):
         state = make_state()
         attach_verifier_regions(state)
-        contradictory = keyed_region_payload(
-            state,
-            "true_change",
-            "The current change mask is empty and misses a building.",
-        )
-        for value in contradictory.values():
-            value["target_view"] = None
+        abstract_labels = {
+            item["region_id"]: ["false_negative", "t1"]
+            for item in state.evidence["verifier_region_proposals"]
+        }
         processor = FakeProcessor(
             [
-                contradictory,
+                abstract_labels,
                 region_payload(state),
             ]
         )
@@ -498,25 +568,12 @@ class QwenVerifierTest(unittest.TestCase):
 
         self.assertTrue(output.verifier_valid)
         self.assertEqual(processor.call_count, 2)
-        self.assertEqual(processor.call_count, 2)
         self.assertIn(
-            "not empty",
+            "unsupported RGB temporal state",
             " ".join(verifier.last_evidence["validation_errors"]),
         )
 
-    def test_empty_t1_object_mask_is_not_change_mask_contradiction(self):
-        self.assertFalse(
-            Qwen3VLZeroShotVerifier._claims_empty(
-                "The T1 mask is empty, but the T2 building is visible."
-            )
-        )
-        self.assertTrue(
-            Qwen3VLZeroShotVerifier._claims_empty(
-                "The current change mask is empty."
-            )
-        )
-
-    def test_prompt_keeps_full_analysis_and_adds_upscaled_local_panels(self):
+    def test_initial_prompt_hides_predicted_masks_and_uses_exact_rgb_panels(self):
         state = make_state()
         attach_verifier_regions(state)
         verifier = Qwen3VLZeroShotVerifier(
@@ -529,18 +586,14 @@ class QwenVerifierTest(unittest.TestCase):
         images = [item["image"] for item in content if item["type"] == "image"]
 
         self.assertEqual(
-            texts[:5],
-            [
-                "Full T1 original image:",
-                "Full T2 original image:",
-                "Full predicted T1 object mask:",
-                "Full predicted T2 object mask:",
-                "Full candidate final change mask:",
-            ],
+            texts[:2],
+            ["Fixed clean T1 original image:", "Fixed clean T2 original image:"],
         )
-        self.assertIn("Local proposal r0", texts[5])
+        self.assertIn("Initial RGB audit proposal r0", texts[2])
         self.assertEqual(images[-1].size, (384, 384))
-        self.assertIn("must not call it empty", texts[-1])
+        self.assertIn("elementary RGB facts", texts[-1])
+        self.assertNotIn("predicted T1 object mask", " ".join(texts).lower())
+        self.assertNotIn("change_pixels", " ".join(texts))
 
     def test_identical_candidate_must_be_unchanged(self):
         previous = make_state()

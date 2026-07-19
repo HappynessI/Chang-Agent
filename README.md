@@ -25,8 +25,8 @@ The current code implements the v0–v3 research skeleton:
 - SimpleClick point and SAM3 box boundaries;
 - per-step instance extraction, default OmniOVCD overlap-presence matching, optional
   one-to-one greedy ablation, and change-mask reconstruction;
-- a region-grounded Qwen3-VL zero-shot Verifier with compact initial labels and
-  programmatic candidate-delta comparison that shares the Agent model weights, plus a
+- a region-grounded Qwen3-VL zero-shot Verifier with elementary T1/T2 RGB-state labels
+  and programmatic initial/candidate decisions that shares the Agent model weights, plus a
   transparent rule Verifier ablation and a legacy trainable
   frozen-feature Verifier head for offline quality/error-map/error-type experiments;
 - offline GT perturbations for Verifier supervision;
@@ -63,25 +63,24 @@ separately validated latent/tool-ranking objective.
 ## Verifier feedback boundary
 
 - Initial verification uses at most six auditable proposals from current change-mask
-  components and T1/T2 object-mask XOR components. Candidate verification inspects only
-  the actual added/removed delta as separate connected-component panels, capped at three,
-  and rejects a candidate when any changed pixel falls outside that proposal set.
-- Qwen retains the five labeled full-image inputs, then receives an upscaled four-panel
-  crop for every proposal: T1, T2, binary change, and color-coded T1/T2/change masks.
-  Initial responses map each exact `region_id` to the compact pair
-  `[verdict,target_view]`; per-region natural-language feedback is not requested.
-- Exact mask facts are authoritative. If `change_pixels>0`, a response claiming that
-  the current mask is empty is rejected and retried. Even a one-pixel component is kept
-  as a proposal and upscaled so white foreground cannot silently disappear visually.
+  components and T1/T2 object-mask XOR components. Candidate verification keeps every
+  added/removed delta connected component, assigns stable `dN` identifiers, and sends at
+  most three components per Qwen batch. The batch size is not a global coverage cap;
+  covered delta pixels must still equal the complete candidate delta.
+- Initial Qwen calls see clean T1/T2 RGB plus an exact binary audit component and RGB
+  difference. Predicted masks, change status, FP/FN semantics, and target views are
+  hidden. Responses contain only `[t1_state,t2_state]` using `building`, `background`,
+  `mixed`, or `uncertain`; per-region prose is not requested.
 - Initial audit coverage is measured over current change pixels plus mask-derived missing
   pixels. Uncovered pixels receive a deterministic box and prevent initial `finish`, even
-  when every inspected proposal is labeled `true_change`. For non-actionable
-  `true_change`/`uncertain`, an extraneous T1/T2 target is canonicalized to `null` and
-  recorded as a schema warning; only actionable FP/FN labels use a target view.
-- An ordinary white change component cannot be labeled `false_negative`; that initial
-  label requires a `temporal_difference_missing` source. For candidates, Qwen's
-  decisive RGB pass maps each `dN` to elementary T1/T2 states from `building`,
-  `background`, `mixed`, and `uncertain`.
+  when every inspected proposal is supported. Runtime code combines RGB states with
+  Environment-owned `present/missing` geometry to derive `true_change`, FP, FN,
+  no-error, or uncertain; therefore an existing white component cannot become FN by a
+  model-generated abstract label.
+- Target view and suggested action are derived rather than generated. For example, an
+  unchanged background in one spurious predicted view maps to a negative point there,
+  while an unchanged building missing from the opposite predicted view maps to a
+  positive point in that missing view. Ambiguous matching cases map to a box.
 - Qwen no longer outputs candidate `better/worse`. The runtime derives it
   deterministically: true-change additions and false-positive removals are beneficial;
   false-change additions and true-change removals are harmful; mixed, conflicting, or
@@ -94,9 +93,10 @@ separately validated latent/tool-ranking objective.
   disagreement or malformed advisory response remains auditable but cannot filter an
   RGB-supported beneficial edit; mixed/uncertain RGB evidence still rejects safely.
 - `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
-  from region judgments and Environment boxes. False positives map to a negative point,
-  false negatives to a positive point, mixed/uncertain results to a box, and fully
-  supported proposals to finish. Invalid analysis cannot authorize an action or stop.
+  from RGB states, predicted-mask occupancy, and Environment boxes. False negatives map
+  to a positive point; false positives use either a negative point for a spurious object
+  or a positive point for a missing unchanged counterpart; mixed/uncertain results use a
+  box, and fully supported proposals finish. Invalid analysis cannot authorize action or stop.
 - A valid, error-free initial state may finish without a redundant tool action. The
   saved-candidate replay challenge in `tools/replay_verifier_challenge.py` evaluates
   delta-effect decisions without exposing GT to the Verifier. Replay reconstructs the
@@ -115,6 +115,9 @@ runner stops before requesting any Agent/tool action and exports the unchanged i
 state.
 Candidate decisions are cached by the SHA256 of previous masks, candidate masks, and
 action. An exact action rejected on an unchanged live state cannot execute again.
+Rejected normalized action JSON is retained in history and injected into retries as a
+forbidden action; the next response must change its tool type or geometry and select a
+different unresolved region.
 
 The Agent prompt injects only the JSON example for the Verifier's current suggested
 action, keeping the Qwen3-VL-2B instruction short. Point examples always include

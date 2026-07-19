@@ -172,6 +172,25 @@ class QwenAdapterTest(unittest.TestCase):
         )
         self.assertIn("Never omit box", prompt)
 
+    def test_retry_for_rejected_duplicate_requires_different_geometry(self):
+        processor = FakeProcessor()
+        adapter = GroundingModelQwen3VL(model=FakeModel(), processor=processor)
+        image = np.zeros((11, 21, 3), dtype=np.uint8)
+        observation = AgentObservation(image, image, "building", np.zeros((11, 21)))
+        forbidden = '{"target_view":"t2","action":"box","box":[10,20,30,40]}'
+
+        adapter.generate_raw(
+            observation,
+            "action exactly repeats a previously rejected action on the same accepted state",
+            forbidden,
+        )
+
+        prompt = processor.messages[0]["content"][-1]["text"]
+        self.assertIn("exact previous action is forbidden", prompt)
+        self.assertIn(forbidden, prompt)
+        self.assertIn("must change the action type or its coordinate/box", prompt)
+        self.assertIn("Never repeat", prompt)
+
     def test_invalid_verifier_feedback_does_not_authorize_finish(self):
         processor = FakeProcessor()
         adapter = GroundingModelQwen3VL(model=FakeModel(), processor=processor)

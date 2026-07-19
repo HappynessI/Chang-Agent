@@ -59,7 +59,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-target-mask-change-ratio", type=float, default=0.25)
     parser.add_argument("--max-component-count-delta", type=int, default=4)
     parser.add_argument("--verifier-max-regions", type=int, default=6)
-    parser.add_argument("--verifier-max-delta-regions", type=int, default=3)
+    parser.add_argument(
+        "--verifier-max-delta-regions-per-batch",
+        "--verifier-max-delta-regions",
+        dest="verifier_max_delta_regions",
+        type=int,
+        default=3,
+        help="Maximum delta components per Qwen call; all components are still audited.",
+    )
     parser.add_argument("--verifier-min-region-area", type=int, default=4)
     parser.add_argument("--verifier-region-padding-ratio", type=float, default=0.25)
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
@@ -179,12 +186,12 @@ def main() -> None:
                 "agent": "Qwen3-VL-2B-Instruct",
                 "verifier": args.verifier,
                 "verifier_decision_mode": (
-                    "compact_initial_then_rgb_temporal_state_delta_effect"
+                    "rgb_temporal_state_initial_and_batched_delta_effect"
                     if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
-                "verifier_max_delta_regions": args.verifier_max_delta_regions,
+                "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
                 "verifier_candidate_evidence_modes": list(
                     Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
                 )
@@ -494,12 +501,12 @@ def _base_manifest(
         "verifier": args.verifier,
         "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
         "verifier_decision_mode": (
-            "compact_initial_then_rgb_temporal_state_delta_effect"
+            "rgb_temporal_state_initial_and_batched_delta_effect"
             if args.verifier == "qwen_zero_shot"
             else "legacy_rule_score"
         ),
         "verifier_max_regions": args.verifier_max_regions,
-        "verifier_max_delta_regions": args.verifier_max_delta_regions,
+        "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
         "verifier_candidate_evidence_modes": list(
             Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
         )
