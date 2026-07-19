@@ -599,8 +599,10 @@ class Qwen3VLZeroShotVerifier:
             if verdict in {"false_positive", "false_negative"}:
                 if target_view not in self.VIEWS:
                     raise ValueError("actionable region judgment requires target_view t1/t2")
-            elif target_view is not None and target_view not in self.VIEWS:
-                raise ValueError("non-actionable region judgment has invalid target_view")
+            elif target_view is not None:
+                raise ValueError(
+                    "true_change/uncertain region judgment requires target_view null"
+                )
             feedback = value.get("feedback")
             if feedback is None:
                 feedback = f"{region_id} classified as {verdict}."
@@ -707,6 +709,9 @@ class Qwen3VLZeroShotVerifier:
         else:
             error_type = "none"
             candidates = []
+        uncovered = int(mask_facts.get("initial_audit_uncovered_pixels", 0))
+        if error_type == "none" and uncovered:
+            error_type = "uncertain_region"
         selected = (
             max(candidates, key=lambda item: lookup[item.region_id]["component_area"])
             if candidates
@@ -720,6 +725,8 @@ class Qwen3VLZeroShotVerifier:
         region = (
             tuple(lookup[selected.region_id]["box_normalized"])
             if selected is not None
+            else tuple(mask_facts["initial_audit_uncovered_box_normalized"])
+            if uncovered and mask_facts.get("initial_audit_uncovered_box_normalized")
             else None
         )
         facts = (
@@ -729,6 +736,11 @@ class Qwen3VLZeroShotVerifier:
         detail = (
             selected.feedback
             if selected is not None
+            else (
+                f"{uncovered} audit pixels fall outside the supplied panels; "
+                "finish is not authorized."
+            )
+            if uncovered
             else "All proposed white change regions are supported by the inspected RGB crops."
         )
         return _RegionalAnalysis(

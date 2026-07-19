@@ -84,7 +84,37 @@ def attach_verifier_regions(
             "padding_ratio": padding_ratio,
         },
     }
-    if previous_state is not None:
+    if previous_state is None:
+        audit_mask = np.logical_or(
+            state.change_mask, np.logical_and(temporal_difference, ~state.change_mask)
+        )
+        covered_mask = np.zeros_like(audit_mask)
+        for proposal in proposals:
+            x1, y1, x2, y2 = proposal["box_pixels"]
+            covered_mask[y1 : y2 + 1, x1 : x2 + 1] = True
+        covered_audit = np.logical_and(audit_mask, covered_mask)
+        uncovered_audit = np.logical_and(audit_mask, ~covered_mask)
+        total = int(audit_mask.sum())
+        uncovered_box = None
+        if uncovered_audit.any():
+            largest = max(
+                connected_components(uncovered_audit), key=lambda item: int(item.sum())
+            )
+            uncovered_box = list(
+                pixel_box_to_normalized(_mask_box(largest), state.image_size)
+            )
+        state.evidence["verifier_mask_facts"].update(
+            {
+                "initial_audit_pixels": total,
+                "initial_audit_covered_pixels": int(covered_audit.sum()),
+                "initial_audit_uncovered_pixels": int(uncovered_audit.sum()),
+                "initial_audit_coverage_ratio": (
+                    int(covered_audit.sum()) / total if total else 1.0
+                ),
+                "initial_audit_uncovered_box_normalized": uncovered_box,
+            }
+        )
+    else:
         covered = int(state.evidence["verifier_mask_facts"]["candidate_delta_covered_pixels"])
         total = int(candidate_delta.sum())
         state.evidence["verifier_mask_facts"]["candidate_delta_uncovered_pixels"] = max(

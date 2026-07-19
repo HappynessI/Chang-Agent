@@ -73,6 +73,10 @@ separately validated latent/tool-ranking objective.
 - Exact mask facts are authoritative. If `change_pixels>0`, a response claiming that
   the current mask is empty is rejected and retried. Even a one-pixel component is kept
   as a proposal and upscaled so white foreground cannot silently disappear visually.
+- Initial audit coverage is measured over current change pixels plus mask-derived missing
+  pixels. Uncovered pixels receive a deterministic box and prevent initial `finish`, even
+  when every inspected proposal is labeled `true_change`. `true_change` and `uncertain`
+  must use `target_view=null`; only actionable FP/FN labels may select T1 or T2.
 - An ordinary white change component cannot be labeled `false_negative`; that initial
   label requires a `temporal_difference_missing` source. Candidate delta responses map
   each `dN` directly to `added_true_change`, `added_false_change`,

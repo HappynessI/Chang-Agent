@@ -19,6 +19,11 @@
   accepted-state chain, uses the recorded matching configuration, and fails before Qwen if
   any reconstructed candidate hash differs from the online trajectory. Ground truth is
   opened only after all Verifier calls for a sample.
+- The first GPU regression on this revision showed all three samples immediately finishing
+  after only six `true_change` labels; `test_85_16` had just 54.8% initial audit coverage.
+  Initial coverage is now explicit, uncovered pixels deterministically localize an
+  `uncertain_region` and forbid finish, and non-actionable judgments strictly require
+  `target_view=null` as declared by the compact schema.
 
 ## 2026-07-19 — compact delta-effect verifier and duplicate-candidate safety
 

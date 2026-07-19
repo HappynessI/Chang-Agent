@@ -25,6 +25,10 @@ class VerifierRegionTest(unittest.TestCase):
         self.assertIn("temporal_difference", proposals[0]["sources"])
         self.assertEqual(state.evidence["verifier_mask_facts"]["change_pixels"], 30)
         self.assertEqual(proposals[0]["change_pixels"], 30)
+        self.assertEqual(
+            state.evidence["verifier_mask_facts"]["initial_audit_coverage_ratio"],
+            1.0,
+        )
 
     def test_candidate_delta_sources_have_priority_and_region_limit(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)

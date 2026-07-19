@@ -457,3 +457,10 @@ Qwen 推理。
 schema/model/generation 配置、proposal 与区域事实。轨迹逐步保存 T1/T2/change hash；
 replay 沿线上 accepted-state 链重建候选并复用 matching 配置，任一 replay hash 与
 线上记录不一致即终止，不能产生 Verifier 评价。Verifier 输出预算保持 1024。
+
+第一次 GPU 回归 `change_agent_levir_gpu_closed_loop_20260719_203105` 暴露了新的初始
+停止漏洞：三个样本均把六个 panel 全判为 true_change 后直接 finish，实际没有进入
+delta 分支；其中 `test_85_16` 的六个 panel 只覆盖 54.8% 待审计像素。现对初始
+`change OR temporal-missing` 像素同样记录精确覆盖率，覆盖不全时由程序定位最大遗漏
+分量并输出 uncertain/box，禁止 finish。同时严格执行 compact schema：
+true_change/uncertain 的 target_view 必须为 null，模型输出 t1/t2 时重试。

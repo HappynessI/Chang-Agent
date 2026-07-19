@@ -110,19 +110,46 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_region, tuple(proposals[0]["box_normalized"]))
         self.assertEqual(processor.call_count, 1)
 
-    def test_keyed_region_object_from_qwen_is_normalized(self):
+    def test_nonactionable_region_view_is_rejected_then_corrected(self):
         state = make_state()
         attach_verifier_regions(state)
-        processor = FakeProcessor(keyed_region_payload(state))
-        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+        processor = FakeProcessor([keyed_region_payload(state), region_payload(state)])
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=processor, max_retries=2
+        )
 
         output = verifier.verify(state, None, None)
 
         self.assertTrue(output.verifier_valid)
         self.assertEqual(output.comparison, "initial")
+        self.assertEqual(processor.call_count, 2)
+        self.assertIn(
+            "requires target_view null",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
         self.assertEqual(len(verifier.last_evidence["region_judgments"]), len(
             state.evidence["verifier_region_proposals"]
         ))
+
+    def test_uncovered_initial_audit_pixels_cannot_authorize_finish(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        t1 = np.zeros((32, 32), dtype=bool)
+        t2 = np.zeros_like(t1)
+        t2[2:5, 2:5] = True
+        t2[25:28, 25:28] = True
+        state = ChangeState(image, image, "building", t1, t2, t2)
+        attach_verifier_regions(state, max_regions=1, padding_ratio=0.0)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=FakeProcessor(region_payload(state))
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertEqual(output.error_type, "uncertain_region")
+        self.assertEqual(output.suggested_action, "box")
+        self.assertFalse(output.accept)
+        self.assertFalse(output.stop)
+        self.assertIsNotNone(output.error_region)
 
     def test_truncated_top_level_json_is_not_misread_as_nested_region(self):
         with self.assertRaisesRegex(ValueError, "incomplete JSON object"):
@@ -313,13 +340,16 @@ class QwenVerifierTest(unittest.TestCase):
     def test_nonempty_mask_claimed_empty_is_rejected_and_retried(self):
         state = make_state()
         attach_verifier_regions(state)
+        contradictory = keyed_region_payload(
+            state,
+            "true_change",
+            "The current change mask is empty and misses a building.",
+        )
+        for value in contradictory.values():
+            value["target_view"] = None
         processor = FakeProcessor(
             [
-                keyed_region_payload(
-                    state,
-                    "true_change",
-                    "The current change mask is empty and misses a building.",
-                ),
+                contradictory,
                 region_payload(state),
             ]
         )
