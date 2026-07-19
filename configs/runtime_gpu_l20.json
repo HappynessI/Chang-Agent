@@ -9,6 +9,7 @@
   "verifier": "qwen3vl_zero_shot_shared_weights",
   "verifier_max_new_tokens": 1024,
   "verifier_max_delta_regions": 3,
+  "verifier_effect_consensus_modes": ["mask_context", "rgb_counterfactual"],
   "selection_policy": "conservative_best",
   "max_selection_area_delta": 0.25,
   "max_steps": 3,

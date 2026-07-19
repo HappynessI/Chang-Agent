@@ -55,7 +55,8 @@ class Qwen3VLZeroShotVerifier:
     derived from added/removed effect labels by deterministic runtime rules.
     """
 
-    SCHEMA_VERSION = "compact_delta_effect_v2"
+    SCHEMA_VERSION = "compact_delta_effect_consensus_v3"
+    EFFECT_VISUAL_MODES = ("mask_context", "rgb_counterfactual")
     ERROR_TYPES = {
         "none",
         "false_positive_change",
@@ -259,6 +260,8 @@ class Qwen3VLZeroShotVerifier:
 
         effect_errors: list[str] = []
         effect_attempts: list[dict[str, Any]] = []
+        consensus_inputs: dict[str, tuple[_EffectJudgment, ...]] = {}
+        consensus_detail: list[dict[str, Any]] = []
         judgments: tuple[_EffectJudgment, ...] | None = None
         uncovered = int(facts.get("candidate_delta_uncovered_pixels", 0))
         if uncovered:
@@ -268,25 +271,49 @@ class Qwen3VLZeroShotVerifier:
         elif not proposals:
             effect_errors.append("candidate delta has no auditable proposal")
         else:
-            for _ in range(self.max_retries):
-                raw = self._generate_messages(
-                    self.build_effect_messages(
-                        state,
-                        previous_state,
-                        previous_action,
-                        proposals,
-                        facts,
-                        effect_errors[-1:],
+            for visual_mode in self.EFFECT_VISUAL_MODES:
+                mode_errors: list[str] = []
+                mode_judgments: tuple[_EffectJudgment, ...] | None = None
+                for _ in range(self.max_retries):
+                    raw = self._generate_messages(
+                        self.build_effect_messages(
+                            state,
+                            previous_state,
+                            previous_action,
+                            proposals,
+                            facts,
+                            mode_errors[-1:],
+                            visual_mode=visual_mode,
+                        )
                     )
-                )
-                try:
-                    payload = self._extract_json_object(raw)
-                    judgments = self._parse_effect_payload(payload, proposals)
-                    effect_attempts.append({"raw": raw, "output": payload})
+                    try:
+                        payload = self._extract_json_object(raw)
+                        mode_judgments = self._parse_effect_payload(payload, proposals)
+                        effect_attempts.append(
+                            {"visual_mode": visual_mode, "raw": raw, "output": payload}
+                        )
+                        break
+                    except (TypeError, ValueError, KeyError) as error:
+                        mode_errors.append(str(error))
+                        effect_errors.append(f"{visual_mode}: {error}")
+                        effect_attempts.append(
+                            {"visual_mode": visual_mode, "raw": raw, "error": str(error)}
+                        )
+                if mode_judgments is None:
                     break
-                except (TypeError, ValueError, KeyError) as error:
-                    effect_errors.append(str(error))
-                    effect_attempts.append({"raw": raw, "error": str(error)})
+                consensus_inputs[visual_mode] = mode_judgments
+            if len(consensus_inputs) == len(self.EFFECT_VISUAL_MODES):
+                judgments, consensus_detail = self._effect_consensus(
+                    consensus_inputs, proposals
+                )
+                disagreements = [
+                    item["region_id"] for item in consensus_detail if not item["agreement"]
+                ]
+                if disagreements:
+                    effect_errors.append(
+                        "effect visual consensus disagreement for "
+                        + ", ".join(disagreements)
+                    )
 
         if judgments is None:
             output = self._invalid_output(
@@ -306,6 +333,7 @@ class Qwen3VLZeroShotVerifier:
                     "effect_attempts": effect_attempts,
                     "mask_facts": facts,
                     "region_proposals": proposals,
+                    "effect_consensus": consensus_detail,
                 }
             )
             self._cache_candidate(fingerprint, output)
@@ -333,6 +361,7 @@ class Qwen3VLZeroShotVerifier:
                 for item in judgments
             ],
             "effect_attempts": effect_attempts,
+            "effect_consensus": consensus_detail,
             "pairwise_attempts": [],
             "comparison": comparison,
             "validation_errors": effect_errors,
@@ -499,16 +528,50 @@ class Qwen3VLZeroShotVerifier:
         proposals: list[dict[str, Any]],
         facts: dict[str, Any],
         previous_errors: list[str] | None = None,
+        *,
+        visual_mode: str = "mask_context",
     ) -> list[dict[str, Any]]:
+        if visual_mode not in self.EFFECT_VISUAL_MODES:
+            raise ValueError("unsupported candidate effect visual mode")
         correction = (
             f"Your previous effect labels were invalid: {previous_errors[-1]}. Correct them.\n"
             if previous_errors
             else ""
         )
+        visual_instruction = (
+            "Use the previous/candidate masks and the mask-context panels only to locate the exact edit. "
+            if visual_mode == "mask_context"
+            else "This is an independent RGB countercheck: use the clean T1/T2 crops to decide semantic truth; the binary delta tile only locates the exact edited pixels and predicted masks are intentionally hidden. "
+        )
+        evidence_instruction = (
+            "Predicted masks are supporting predictions, not GT. "
+            if visual_mode == "mask_context"
+            else "Do not infer semantic truth from mask predictions or mask statistics. "
+        )
+        prompt_facts = (
+            facts
+            if visual_mode == "mask_context"
+            else {
+                key: facts[key]
+                for key in (
+                    "height",
+                    "width",
+                    "candidate_delta_pixels",
+                    "candidate_added_pixels",
+                    "candidate_removed_pixels",
+                    "candidate_delta_covered_pixels",
+                    "candidate_delta_uncovered_pixels",
+                    "candidate_delta_coverage_ratio",
+                    "proposal_count",
+                    "proposal_config",
+                )
+                if key in facts
+            }
+        )
         prompt = (
-            "Judge only the pixels changed by the candidate action. Each supplied delta proposal "
+            f"{visual_instruction}Judge only the pixels changed by the candidate action. Each supplied delta proposal "
             "has effect_kind added or removed and exact pixel counts. Confirm temporal building "
-            "change from the T1/T2 RGB crops; predicted masks are supporting predictions, not GT. "
+            f"change from the T1/T2 RGB crops. {evidence_instruction}"
             "For an added proposal output added_true_change when the newly white pixels are real "
             "temporal building change, added_false_change when they are false change, mixed when "
             "the component contains both, or uncertain. For a removed proposal output "
@@ -518,7 +581,7 @@ class Qwen3VLZeroShotVerifier:
             "region_id to one label string, for example "
             "{\"d0\":\"added_true_change\",\"d1\":\"removed_false_positive\"}. "
             "Do not output feedback sentences, comparison, scores, actions, coordinates, or extra keys.\n"
-            f"Exact candidate delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
+            f"Exact candidate delta facts: {json.dumps(prompt_facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
             f"{correction}"
         )
@@ -527,29 +590,83 @@ class Qwen3VLZeroShotVerifier:
             {"type": "image", "image": self._as_image(state.t1_image)},
             {"type": "text", "text": "Fixed T2 original image:"},
             {"type": "image", "image": self._as_image(state.t2_image)},
-            {"type": "text", "text": "Previous accepted final change mask:"},
-            {"type": "image", "image": self._mask_image(previous_state.change_mask)},
-            {"type": "text", "text": "Candidate final change mask:"},
-            {"type": "image", "image": self._mask_image(state.change_mask)},
         ]
+        if visual_mode == "mask_context":
+            content.extend(
+                [
+                    {"type": "text", "text": "Previous accepted final change mask:"},
+                    {"type": "image", "image": self._mask_image(previous_state.change_mask)},
+                    {"type": "text", "text": "Candidate final change mask:"},
+                    {"type": "image", "image": self._mask_image(state.change_mask)},
+                ]
+            )
         for proposal in proposals:
+            public_proposal = (
+                proposal
+                if visual_mode == "mask_context"
+                else {
+                    key: proposal[key]
+                    for key in (
+                        "region_id",
+                        "effect_kind",
+                        "component_area",
+                        "box_normalized",
+                        "candidate_delta_pixels",
+                        "delta_pixels",
+                        "candidate_added_pixels",
+                        "candidate_removed_pixels",
+                    )
+                    if key in proposal
+                }
+            )
             content.extend(
                 [
                     {
                         "type": "text",
                         "text": (
                             f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
-                            f"{json.dumps(proposal, ensure_ascii=False)}"
+                            f"{json.dumps(public_proposal, ensure_ascii=False)}"
                         ),
                     },
                     {
                         "type": "image",
-                        "image": self._region_panel(state, proposal, previous_state),
+                        "image": (
+                            self._region_panel(state, proposal, previous_state)
+                            if visual_mode == "mask_context"
+                            else self._rgb_delta_panel(state, previous_state, proposal)
+                        ),
                     },
                 ]
             )
         content.append({"type": "text", "text": prompt})
         return [{"role": "user", "content": content}]
+
+    @staticmethod
+    def _effect_consensus(
+        inputs: dict[str, tuple[_EffectJudgment, ...]],
+        proposals: list[dict[str, Any]],
+    ) -> tuple[tuple[_EffectJudgment, ...], list[dict[str, Any]]]:
+        expected = [item["region_id"] for item in proposals]
+        by_mode = {
+            mode: {item.region_id: item.effect for item in judgments}
+            for mode, judgments in inputs.items()
+        }
+        result: list[_EffectJudgment] = []
+        detail: list[dict[str, Any]] = []
+        for region_id in expected:
+            labels = {mode: values[region_id] for mode, values in by_mode.items()}
+            agreement = len(set(labels.values())) == 1
+            effect = next(iter(labels.values())) if agreement else "uncertain"
+            result.append(_EffectJudgment(region_id, effect))
+            detail.append(
+                {
+                    "region_id": region_id,
+                    "labels": labels,
+                    "agreement": agreement,
+                    "consensus_effect": effect,
+                }
+            )
+        return tuple(result), detail
 
     @staticmethod
     def _global_visual_content(state: ChangeState) -> list[dict[str, Any]]:
@@ -887,6 +1004,7 @@ class Qwen3VLZeroShotVerifier:
             "action": previous_action.to_dict() if previous_action else None,
             "max_new_tokens": self.max_new_tokens,
             "max_retries": self.max_retries,
+            "effect_visual_modes": self.EFFECT_VISUAL_MODES,
             "model": getattr(getattr(self.model, "config", None), "_name_or_path", None),
             "proposals": proposals,
             "facts": facts,
@@ -971,28 +1089,9 @@ class Qwen3VLZeroShotVerifier:
         change = np.asarray(state.change_mask[region], dtype=bool)
         delta_component = None
         if previous_state is not None and proposal.get("component_seed_pixels"):
-            if proposal.get("effect_kind") == "added":
-                full_delta = np.logical_and(
-                    state.change_mask, ~previous_state.change_mask
-                )
-            elif proposal.get("effect_kind") == "removed":
-                full_delta = np.logical_and(
-                    previous_state.change_mask, ~state.change_mask
-                )
-            else:
-                raise ValueError("delta proposal has no valid effect_kind")
-            seed_x, seed_y = proposal["component_seed_pixels"]
-            delta_component = next(
-                (
-                    component
-                    for component in connected_components(full_delta)
-                    if component[int(seed_y), int(seed_x)]
-                ),
-                None,
-            )
-            if delta_component is None:
-                raise ValueError("delta proposal seed does not identify a candidate component")
-            delta_component = delta_component[region]
+            delta_component = Qwen3VLZeroShotVerifier._proposal_delta_component(
+                state, previous_state, proposal
+            )[region]
         t1 = np.array(
             Qwen3VLZeroShotVerifier._as_image(state.t1_image[region]).convert("RGB"),
             copy=True,
@@ -1040,6 +1139,67 @@ class Qwen3VLZeroShotVerifier:
                 ((index % 2) * panel_size, (index // 2) * panel_size),
             )
         return canvas
+
+    @staticmethod
+    def _rgb_delta_panel(
+        state: ChangeState,
+        previous_state: ChangeState,
+        proposal: dict[str, Any],
+        panel_size: int = 192,
+    ) -> Image.Image:
+        """Show clean RGB evidence, exact delta geometry, and raw temporal difference."""
+
+        x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
+        region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
+        t1 = np.asarray(state.t1_image[region], dtype=np.uint8)
+        t2 = np.asarray(state.t2_image[region], dtype=np.uint8)
+        delta = Qwen3VLZeroShotVerifier._proposal_delta_component(
+            state, previous_state, proposal
+        )[region]
+        delta_rgb = np.repeat((delta.astype(np.uint8) * 255)[..., None], 3, axis=2)
+        absolute_difference = np.abs(t2.astype(np.int16) - t1.astype(np.int16))
+        absolute_difference = np.clip(absolute_difference * 2, 0, 255).astype(np.uint8)
+        tiles = [
+            Image.fromarray(t1),
+            Image.fromarray(t2),
+            Image.fromarray(delta_rgb),
+            Image.fromarray(absolute_difference),
+        ]
+        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
+        for index, tile in enumerate(tiles):
+            resample = Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
+            canvas.paste(
+                tile.resize((panel_size, panel_size), resample),
+                ((index % 2) * panel_size, (index // 2) * panel_size),
+            )
+        return canvas
+
+    @staticmethod
+    def _proposal_delta_component(
+        state: ChangeState,
+        previous_state: ChangeState,
+        proposal: dict[str, Any],
+    ) -> np.ndarray:
+        if proposal.get("effect_kind") == "added":
+            full_delta = np.logical_and(state.change_mask, ~previous_state.change_mask)
+        elif proposal.get("effect_kind") == "removed":
+            full_delta = np.logical_and(previous_state.change_mask, ~state.change_mask)
+        else:
+            raise ValueError("delta proposal has no valid effect_kind")
+        seed_x, seed_y = proposal.get("component_seed_pixels", (None, None))
+        if seed_x is None or seed_y is None:
+            raise ValueError("delta proposal has no component seed")
+        component = next(
+            (
+                item
+                for item in connected_components(full_delta)
+                if item[int(seed_y), int(seed_x)]
+            ),
+            None,
+        )
+        if component is None:
+            raise ValueError("delta proposal seed does not identify a candidate component")
+        return component
 
     @staticmethod
     def _as_image(value: Any) -> Image.Image:

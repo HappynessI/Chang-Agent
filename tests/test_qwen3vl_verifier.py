@@ -196,6 +196,19 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertTrue(np.any(panel[..., 0] > 0))
         self.assertTrue(np.any(panel[..., 1] > 0))
         self.assertTrue(np.any(panel[..., 2] > 0))
+        self.assertEqual(processor.call_count, 2)
+        rgb_countercheck_text = " ".join(
+            item["text"]
+            for item in processor.messages_history[1][0]["content"]
+            if item["type"] == "text"
+        )
+        self.assertIn("independent RGB countercheck", rgb_countercheck_text)
+        self.assertNotIn("Previous accepted final change mask", rgb_countercheck_text)
+        self.assertNotIn("t1_mask_pixels", rgb_countercheck_text)
+        self.assertNotIn("temporal_difference_pixels", rgb_countercheck_text)
+        self.assertTrue(
+            all(item["agreement"] for item in verifier.last_evidence["effect_consensus"])
+        )
 
     def test_unsupported_added_delta_is_programmatically_worse(self):
         previous = make_state(7)
@@ -236,13 +249,49 @@ class QwenVerifierTest(unittest.TestCase):
         second = verifier.verify(state, None, action, previous)
 
         self.assertEqual(first, second)
-        self.assertEqual(processor.call_count, 1)
+        self.assertEqual(processor.call_count, 2)
         self.assertTrue(verifier.last_evidence["cache_hit"])
         self.assertEqual(
             verifier.last_evidence["decision_key"],
             verifier.last_evidence["candidate_fingerprint"],
         )
         self.assertEqual(verifier.last_evidence["reused_from_step"], state.step_index)
+
+    def test_disagreeing_visual_effect_checks_are_conservatively_uncertain(self):
+        previous = make_state(7)
+        state = make_state(8)
+        attach_verifier_regions(state, previous)
+        supported = {
+            item["region_id"]: "added_true_change"
+            for item in state.evidence["verifier_region_proposals"]
+        }
+        unsupported = {
+            item["region_id"]: "added_false_change"
+            for item in state.evidence["verifier_region_proposals"]
+        }
+        processor = FakeProcessor([supported, unsupported])
+        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "positive_point", coordinate=(7, 7)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "uncertain")
+        self.assertFalse(output.accept)
+        self.assertEqual(
+            {item["effect"] for item in verifier.last_evidence["effect_judgments"]},
+            {"uncertain"},
+        )
+        self.assertTrue(
+            all(not item["agreement"] for item in verifier.last_evidence["effect_consensus"])
+        )
+        self.assertIn(
+            "consensus disagreement",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
 
     def test_candidate_decision_key_changes_with_context_and_schema(self):
         previous = make_state(7)

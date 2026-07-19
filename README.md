@@ -86,6 +86,10 @@ separately validated latent/tool-ranking objective.
   false-change additions and true-change removals are harmful; mixed, conflicting, or
   uncertain judgments are rejected.
   `quality_score` and `progress_score` remain `null`.
+- Every candidate component is classified twice with different evidence: a mask-context
+  panel and an independent panel containing clean T1/T2 RGB, the exact binary delta, and
+  raw temporal RGB difference. Labels must agree exactly; disagreement becomes
+  `uncertain` and cannot authorize a commit.
 - `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
   from region judgments and Environment boxes. False positives map to a negative point,
   false negatives to a positive point, mixed/uncertain results to a box, and fully
@@ -103,6 +107,9 @@ absolute mask-area jump stays within the configured limit. Rejected candidates
 remain auditable in the trajectory, while the next Agent step resumes from the previous
 accepted state. If model action retries are exhausted, the episode stops without
 executing a synthetic SAM3 box action.
+If the initial Verifier exhausts its own retries and remains invalid, the production
+runner stops before requesting any Agent/tool action and exports the unchanged initial
+state.
 Candidate decisions are cached by the SHA256 of previous masks, candidate masks, and
 action. An exact action rejected on an unchanged live state cannot execute again.
 

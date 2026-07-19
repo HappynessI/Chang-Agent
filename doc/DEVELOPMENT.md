@@ -1,5 +1,27 @@
 # Development log
 
+## 2026-07-19 — dual-visual candidate consensus and invalid-initial fail-safe
+
+The valid GPU regression `change_agent_levir_gpu_closed_loop_20260719_203719`
+confirmed that programmatic comparison cannot correct a wrong local effect label:
+Qwen called 189 newly added false-positive pixels `added_true_change` in
+`test_20_15`, while it called a beneficial 135-pixel false-positive removal
+`removed_true_change` in `test_78_13`.
+
+- Candidate effects now require exact agreement between two model calls with deliberately
+  different visual evidence. `mask_context` retains previous/candidate masks and temporal
+  overlays; `rgb_counterfactual` hides predicted masks and shows clean T1/T2 crops, the
+  exact component delta, and raw RGB difference.
+- Per-region disagreement is converted to `uncertain`; the programmatic comparison gate
+  therefore rejects it. Both calls, retry histories, per-mode labels, agreement flags,
+  and consensus labels are saved in Verifier evidence.
+- The cache schema is bumped and includes the consensus modes, preventing reuse of older
+  single-view decisions.
+- An invalid initial Verifier result now stops the production runner before Agent action
+  generation. This prevents an exploratory edit from being committed against an
+  unaudited baseline; the initial mask remains selected with stop reason
+  `initial_verifier_invalid`.
+
 ## 2026-07-19 — component-safe delta audit and replay identity
 
 - Candidate deltas are no longer collapsed by polarity. Up to three connected components

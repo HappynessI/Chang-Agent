@@ -1,7 +1,11 @@
 import unittest
+from types import SimpleNamespace
 
 from change_agent.action_parser import ActionValidationError
-from tools.run_levir_change_agent import _execute_action_with_retries
+from tools.run_levir_change_agent import (
+    _execute_action_with_retries,
+    _initial_verifier_stop_reason,
+)
 
 
 class InvalidAgent:
@@ -25,6 +29,20 @@ class RejectingEnvironment:
 
 
 class RunnerActionProtocolTest(unittest.TestCase):
+    def test_initial_invalid_verifier_stops_before_agent_actions(self):
+        observation = SimpleNamespace(
+            feedback=SimpleNamespace(verifier_valid=False)
+        )
+
+        self.assertEqual(
+            _initial_verifier_stop_reason(observation), "initial_verifier_invalid"
+        )
+        self.assertIsNone(
+            _initial_verifier_stop_reason(
+                SimpleNamespace(feedback=SimpleNamespace(verifier_valid=True))
+            )
+        )
+
     def test_retry_exhaustion_does_not_execute_a_fallback_action(self):
         agent = InvalidAgent()
         environment = RejectingEnvironment()

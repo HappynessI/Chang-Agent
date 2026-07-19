@@ -179,12 +179,17 @@ def main() -> None:
                 "agent": "Qwen3-VL-2B-Instruct",
                 "verifier": args.verifier,
                 "verifier_decision_mode": (
-                    "compact_initial_regions_then_programmatic_delta_effect"
+                    "compact_initial_then_dual_visual_consensus_delta_effect"
                     if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
                 "verifier_max_delta_regions": args.verifier_max_delta_regions,
+                "verifier_effect_consensus_modes": list(
+                    Qwen3VLZeroShotVerifier.EFFECT_VISUAL_MODES
+                )
+                if args.verifier == "qwen_zero_shot"
+                else None,
                 "verifier_min_region_area": args.verifier_min_region_area,
                 "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
                 "coordinate_protocol": "public normalized_0_1000; environment pixel_xy",
@@ -197,9 +202,9 @@ def main() -> None:
         )
         observation = environment.reset(image1, image2, args.query)
         invalid_outputs: list[dict[str, Any]] = []
-        episode_stop_reason: str | None = None
+        episode_stop_reason = _initial_verifier_stop_reason(observation)
         loop_index = 0
-        while not environment.done:
+        while not environment.done and episode_stop_reason is None:
             loop_index += 1
             observation, attempt_errors, action_executed = _execute_action_with_retries(
                 qwen,
@@ -337,6 +342,13 @@ def _build_verifier(args: argparse.Namespace, qwen: GroundingModelQwen3VL):
         accept_threshold=args.verifier_accept_threshold,
         max_retries=args.verifier_retries,
     )
+
+
+def _initial_verifier_stop_reason(observation: Any) -> str | None:
+    feedback = getattr(observation, "feedback", None)
+    if feedback is not None and not feedback.verifier_valid:
+        return "initial_verifier_invalid"
+    return None
 
 
 def _execute_action_with_retries(
@@ -482,12 +494,17 @@ def _base_manifest(
         "verifier": args.verifier,
         "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
         "verifier_decision_mode": (
-            "compact_initial_regions_then_programmatic_delta_effect"
+            "compact_initial_then_dual_visual_consensus_delta_effect"
             if args.verifier == "qwen_zero_shot"
             else "legacy_rule_score"
         ),
         "verifier_max_regions": args.verifier_max_regions,
         "verifier_max_delta_regions": args.verifier_max_delta_regions,
+        "verifier_effect_consensus_modes": list(
+            Qwen3VLZeroShotVerifier.EFFECT_VISUAL_MODES
+        )
+        if args.verifier == "qwen_zero_shot"
+        else None,
         "verifier_min_region_area": args.verifier_min_region_area,
         "verifier_region_padding_ratio": args.verifier_region_padding_ratio,
         "coordinate_protocol": "Agent/Verifier normalized_0_1000; Environment pixel_xy",
