@@ -1,5 +1,34 @@
 # Development log
 
+## 2026-07-19 — RGB temporal facts replace exact dual-label consensus
+
+The closed loop `change_agent_levir_gpu_closed_loop_20260719_205825` preserved the
+initial aggregate IoU (`0.69744116`) but exposed two over-conservative filters. Initial
+`true_change` answers with an irrelevant T1/T2 target exhausted retries, and a genuinely
+beneficial 135-pixel false-positive removal in `test_78_13` was rejected because both
+visual branches repeated the same wrong abstract `removed_true_change` label.
+
+- The decisive candidate call no longer asks Qwen for an abstract action-effect label.
+  For each exact delta component it emits only elementary T1/T2 RGB states:
+  `building`, `background`, `mixed`, or `uncertain`. Action type, delta polarity, and
+  added/removed statistics are hidden from this call to avoid semantic anchoring.
+- Runtime code combines those states with Environment-owned delta polarity. Equal,
+  decisive states mean no temporal change; different decisive states mean a temporal
+  change. This deterministically maps additions/removals to the existing beneficial or
+  harmful effect labels and then to `better/worse`.
+- The mask-context effect call remains as audit evidence, but it is not a veto. Its
+  disagreement or JSON failure is recorded without suppressing a decisive beneficial
+  RGB result. Only an invalid or mixed/uncertain RGB response remains conservative.
+- Non-actionable initial `true_change`/`uncertain` target views are canonicalized to
+  `null` with `schema_warnings`; the semantic judgment is not discarded for a cosmetic
+  field that has no downstream action meaning.
+- The cache schema and run manifests now identify `rgb_temporal_state` evidence, so old
+  exact-consensus decisions cannot be silently reused.
+
+Regression coverage includes conflicting mask/RGB conclusions, malformed advisory
+mask JSON, RGB uncertainty, target-view canonicalization, and deterministic derivation
+of beneficial and harmful candidate effects.
+
 ## 2026-07-19 — dual-visual candidate consensus and invalid-initial fail-safe
 
 The valid GPU regression `change_agent_levir_gpu_closed_loop_20260719_203719`

@@ -179,14 +179,14 @@ def main() -> None:
                 "agent": "Qwen3-VL-2B-Instruct",
                 "verifier": args.verifier,
                 "verifier_decision_mode": (
-                    "compact_initial_then_dual_visual_consensus_delta_effect"
+                    "compact_initial_then_rgb_temporal_state_delta_effect"
                     if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
                 "verifier_max_delta_regions": args.verifier_max_delta_regions,
-                "verifier_effect_consensus_modes": list(
-                    Qwen3VLZeroShotVerifier.EFFECT_VISUAL_MODES
+                "verifier_candidate_evidence_modes": list(
+                    Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
                 )
                 if args.verifier == "qwen_zero_shot"
                 else None,
@@ -494,14 +494,14 @@ def _base_manifest(
         "verifier": args.verifier,
         "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
         "verifier_decision_mode": (
-            "compact_initial_then_dual_visual_consensus_delta_effect"
+            "compact_initial_then_rgb_temporal_state_delta_effect"
             if args.verifier == "qwen_zero_shot"
             else "legacy_rule_score"
         ),
         "verifier_max_regions": args.verifier_max_regions,
         "verifier_max_delta_regions": args.verifier_max_delta_regions,
-        "verifier_effect_consensus_modes": list(
-            Qwen3VLZeroShotVerifier.EFFECT_VISUAL_MODES
+        "verifier_candidate_evidence_modes": list(
+            Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
         )
         if args.verifier == "qwen_zero_shot"
         else None,

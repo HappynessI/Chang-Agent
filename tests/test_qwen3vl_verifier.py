@@ -75,6 +75,20 @@ def keyed_region_payload(
     }
 
 
+def effect_payload(state, effect):
+    return {
+        item["region_id"]: effect
+        for item in state.evidence["verifier_region_proposals"]
+    }
+
+
+def temporal_payload(state, t1_state="background", t2_state="building"):
+    return {
+        item["region_id"]: [t1_state, t2_state]
+        for item in state.evidence["verifier_region_proposals"]
+    }
+
+
 class QwenVerifierTest(unittest.TestCase):
     def test_initial_analysis_uses_regions_without_predicting_scores(self):
         state = make_state()
@@ -93,7 +107,7 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("white pixels", output.feedback)
         self.assertEqual(
             verifier.last_evidence["decision_mode"],
-            "compact_regions_then_programmatic_delta_effect",
+            "compact_regions_then_rgb_temporal_state_delta_effect",
         )
 
     def test_false_positive_uses_environment_box_instead_of_model_localization(self):
@@ -110,10 +124,10 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_region, tuple(proposals[0]["box_normalized"]))
         self.assertEqual(processor.call_count, 1)
 
-    def test_nonactionable_region_view_is_rejected_then_corrected(self):
+    def test_nonactionable_region_view_is_canonicalized_without_retry(self):
         state = make_state()
         attach_verifier_regions(state)
-        processor = FakeProcessor([keyed_region_payload(state), region_payload(state)])
+        processor = FakeProcessor(keyed_region_payload(state))
         verifier = Qwen3VLZeroShotVerifier(
             model=FakeModel(), processor=processor, max_retries=2
         )
@@ -122,10 +136,17 @@ class QwenVerifierTest(unittest.TestCase):
 
         self.assertTrue(output.verifier_valid)
         self.assertEqual(output.comparison, "initial")
-        self.assertEqual(processor.call_count, 2)
+        self.assertEqual(processor.call_count, 1)
+        self.assertEqual(verifier.last_evidence["validation_errors"], [])
         self.assertIn(
-            "requires target_view null",
-            " ".join(verifier.last_evidence["validation_errors"]),
+            "canonicalized to null",
+            " ".join(verifier.last_evidence["schema_warnings"]),
+        )
+        self.assertTrue(
+            all(
+                item["target_view"] is None
+                for item in verifier.last_evidence["region_judgments"]
+            )
         )
         self.assertEqual(len(verifier.last_evidence["region_judgments"]), len(
             state.evidence["verifier_region_proposals"]
@@ -162,10 +183,7 @@ class QwenVerifierTest(unittest.TestCase):
         state = make_state(8)
         attach_verifier_regions(state, previous)
         processor = FakeProcessor(
-            {
-                item["region_id"]: "added_true_change"
-                for item in state.evidence["verifier_region_proposals"]
-            }
+            [effect_payload(state, "added_true_change"), temporal_payload(state)]
         )
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
 
@@ -184,7 +202,7 @@ class QwenVerifierTest(unittest.TestCase):
             for item in processor.messages_history[0][0]["content"]
             if item["type"] == "text"
         )
-        self.assertIn("Judge only the pixels changed", effect_text)
+        self.assertIn("judge only the pixels changed", effect_text)
         self.assertIn("Do not output feedback sentences", effect_text)
         effect_panels = [
             item["image"]
@@ -197,29 +215,37 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertTrue(np.any(panel[..., 1] > 0))
         self.assertTrue(np.any(panel[..., 2] > 0))
         self.assertEqual(processor.call_count, 2)
-        rgb_countercheck_text = " ".join(
+        temporal_state_text = " ".join(
             item["text"]
             for item in processor.messages_history[1][0]["content"]
             if item["type"] == "text"
         )
-        self.assertIn("independent RGB countercheck", rgb_countercheck_text)
-        self.assertNotIn("Previous accepted final change mask", rgb_countercheck_text)
-        self.assertNotIn("t1_mask_pixels", rgb_countercheck_text)
-        self.assertNotIn("temporal_difference_pixels", rgb_countercheck_text)
+        self.assertIn("elementary RGB facts", temporal_state_text)
+        self.assertNotIn("Previous accepted final change mask", temporal_state_text)
+        self.assertNotIn("t1_mask_pixels", temporal_state_text)
+        self.assertNotIn("temporal_difference_pixels", temporal_state_text)
+        self.assertNotIn("effect_kind", temporal_state_text)
+        self.assertNotIn("positive_point", temporal_state_text)
+        self.assertNotIn("candidate_added_pixels", temporal_state_text)
         self.assertTrue(
-            all(item["agreement"] for item in verifier.last_evidence["effect_consensus"])
+            all(
+                item["decision_source"] == "rgb_temporal_state"
+                for item in verifier.last_evidence["effect_fusion"]
+            )
         )
 
     def test_unsupported_added_delta_is_programmatically_worse(self):
         previous = make_state(7)
         state = make_state(8)
         attach_verifier_regions(state, previous)
-        payload = {
-            item["region_id"]: "added_false_change"
-            for item in state.evidence["verifier_region_proposals"]
-        }
         verifier = Qwen3VLZeroShotVerifier(
-            model=FakeModel(), processor=FakeProcessor(payload)
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    effect_payload(state, "added_true_change"),
+                    temporal_payload(state, "background", "background"),
+                ]
+            ),
         )
 
         output = verifier.verify(
@@ -237,11 +263,12 @@ class QwenVerifierTest(unittest.TestCase):
         previous = make_state(7)
         state = make_state(8)
         attach_verifier_regions(state, previous)
-        payload = {
-            item["region_id"]: "added_false_change"
-            for item in state.evidence["verifier_region_proposals"]
-        }
-        processor = FakeProcessor(payload)
+        processor = FakeProcessor(
+            [
+                effect_payload(state, "added_false_change"),
+                temporal_payload(state, "background", "background"),
+            ]
+        )
         verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
         action = AgentAction("t2", "positive_point", coordinate=(7, 7))
 
@@ -257,20 +284,90 @@ class QwenVerifierTest(unittest.TestCase):
         )
         self.assertEqual(verifier.last_evidence["reused_from_step"], state.step_index)
 
-    def test_disagreeing_visual_effect_checks_are_conservatively_uncertain(self):
+    def test_rgb_temporal_facts_keep_beneficial_removal_despite_mask_disagreement(self):
+        previous = make_state(8)
+        state = make_state(7)
+        attach_verifier_regions(state, previous)
+        processor = FakeProcessor(
+            [
+                effect_payload(state, "removed_true_change"),
+                temporal_payload(state, "building", "building"),
+            ]
+        )
+        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "negative_point", coordinate=(7, 7)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "better")
+        self.assertTrue(output.accept)
+        self.assertEqual(
+            {item["effect"] for item in verifier.last_evidence["effect_judgments"]},
+            {"removed_false_positive"},
+        )
+        self.assertTrue(
+            all(
+                not item["mask_context_agreement"]
+                for item in verifier.last_evidence["effect_fusion"]
+            )
+        )
+
+    def test_invalid_advisory_mask_response_cannot_filter_beneficial_rgb_edit(self):
+        previous = make_state(8)
+        state = make_state(7)
+        attach_verifier_regions(state, previous)
+        processor = FakeProcessor(
+            [
+                {"wrong": "removed_false_positive"},
+                {"wrong": "removed_false_positive"},
+                temporal_payload(state, "building", "building"),
+            ]
+        )
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(), processor=processor, max_retries=2
+        )
+
+        output = verifier.verify(
+            state,
+            None,
+            AgentAction("t2", "negative_point", coordinate=(7, 7)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "better")
+        self.assertTrue(output.accept)
+        self.assertEqual(processor.call_count, 3)
+        self.assertTrue(
+            all(
+                item["mask_context_effect"] is None
+                and item["mask_context_agreement"] is None
+                for item in verifier.last_evidence["effect_fusion"]
+            )
+        )
+        self.assertTrue(
+            any(
+                error.startswith("mask_context:")
+                for error in verifier.last_evidence["validation_errors"]
+            )
+        )
+
+    def test_uncertain_rgb_temporal_state_is_rejected(self):
         previous = make_state(7)
         state = make_state(8)
         attach_verifier_regions(state, previous)
-        supported = {
-            item["region_id"]: "added_true_change"
-            for item in state.evidence["verifier_region_proposals"]
-        }
-        unsupported = {
-            item["region_id"]: "added_false_change"
-            for item in state.evidence["verifier_region_proposals"]
-        }
-        processor = FakeProcessor([supported, unsupported])
-        verifier = Qwen3VLZeroShotVerifier(model=FakeModel(), processor=processor)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    effect_payload(state, "added_true_change"),
+                    temporal_payload(state, "uncertain", "building"),
+                ]
+            ),
+        )
 
         output = verifier.verify(
             state,
@@ -281,17 +378,6 @@ class QwenVerifierTest(unittest.TestCase):
 
         self.assertEqual(output.comparison, "uncertain")
         self.assertFalse(output.accept)
-        self.assertEqual(
-            {item["effect"] for item in verifier.last_evidence["effect_judgments"]},
-            {"uncertain"},
-        )
-        self.assertTrue(
-            all(not item["agreement"] for item in verifier.last_evidence["effect_consensus"])
-        )
-        self.assertIn(
-            "consensus disagreement",
-            " ".join(verifier.last_evidence["validation_errors"]),
-        )
 
     def test_candidate_decision_key_changes_with_context_and_schema(self):
         previous = make_state(7)
@@ -351,6 +437,8 @@ class QwenVerifierTest(unittest.TestCase):
     def test_compact_effect_json_fits_a_small_output_budget(self):
         payload = {f"d{index}": "added_true_change" for index in range(3)}
         self.assertLess(len(json.dumps(payload, separators=(",", ":"))), 128)
+        temporal = {f"d{index}": ["background", "building"] for index in range(3)}
+        self.assertLess(len(json.dumps(temporal, separators=(",", ":"))), 160)
 
     def test_white_candidate_region_cannot_be_false_negative(self):
         state = make_state()

@@ -18,8 +18,8 @@
     "max_new_tokens": 1024,
     "max_region_proposals": 6,
     "max_delta_region_proposals": 3,
-    "effect_consensus_modes": ["mask_context", "rgb_counterfactual"],
-    "decision": "programmatic_from_dual_visual_consensus_effect_labels"
+    "candidate_evidence_modes": ["mask_context", "rgb_temporal_state"],
+    "decision": "programmatic_from_rgb_temporal_state"
   },
   "seed": 42
 }

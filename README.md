@@ -75,21 +75,24 @@ separately validated latent/tool-ranking objective.
   as a proposal and upscaled so white foreground cannot silently disappear visually.
 - Initial audit coverage is measured over current change pixels plus mask-derived missing
   pixels. Uncovered pixels receive a deterministic box and prevent initial `finish`, even
-  when every inspected proposal is labeled `true_change`. `true_change` and `uncertain`
-  must use `target_view=null`; only actionable FP/FN labels may select T1 or T2.
+  when every inspected proposal is labeled `true_change`. For non-actionable
+  `true_change`/`uncertain`, an extraneous T1/T2 target is canonicalized to `null` and
+  recorded as a schema warning; only actionable FP/FN labels use a target view.
 - An ordinary white change component cannot be labeled `false_negative`; that initial
-  label requires a `temporal_difference_missing` source. Candidate delta responses map
-  each `dN` directly to `added_true_change`, `added_false_change`,
-  `removed_false_positive`, `removed_true_change`, `mixed`, or `uncertain`.
+  label requires a `temporal_difference_missing` source. For candidates, Qwen's
+  decisive RGB pass maps each `dN` to elementary T1/T2 states from `building`,
+  `background`, `mixed`, and `uncertain`.
 - Qwen no longer outputs candidate `better/worse`. The runtime derives it
   deterministically: true-change additions and false-positive removals are beneficial;
   false-change additions and true-change removals are harmful; mixed, conflicting, or
   uncertain judgments are rejected.
   `quality_score` and `progress_score` remain `null`.
-- Every candidate component is classified twice with different evidence: a mask-context
-  panel and an independent panel containing clean T1/T2 RGB, the exact binary delta, and
-  raw temporal RGB difference. Labels must agree exactly; disagreement becomes
-  `uncertain` and cannot authorize a commit.
+- Every candidate component has two evidence records. The mask-context pass emits an
+  advisory effect label. The decisive pass sees clean T1/T2 RGB and the exact binary
+  delta, then emits only the two elementary temporal states. Runtime code combines
+  those states with added/removed polarity to derive the effect. A mask-context
+  disagreement or malformed advisory response remains auditable but cannot filter an
+  RGB-supported beneficial edit; mixed/uncertain RGB evidence still rejects safely.
 - `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
   from region judgments and Environment boxes. False positives map to a negative point,
   false negatives to a positive point, mixed/uncertain results to a box, and fully

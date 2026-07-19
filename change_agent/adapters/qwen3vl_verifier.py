@@ -1,4 +1,4 @@
-"""Compact region diagnosis and programmatic candidate-effect verification."""
+"""Compact diagnosis with RGB temporal-state candidate verification."""
 
 from __future__ import annotations
 
@@ -47,16 +47,24 @@ class _EffectJudgment:
     effect: str
 
 
+@dataclass(frozen=True)
+class _TemporalStateJudgment:
+    region_id: str
+    t1_state: str
+    t2_state: str
+
+
 class Qwen3VLZeroShotVerifier:
     """Classify initial regions and candidate delta effects with compact outputs.
 
     Qwen never predicts an absolute score or a pairwise comparison. Environment-owned
     boxes make every decision local and auditable; candidate ``better/worse`` is
-    derived from added/removed effect labels by deterministic runtime rules.
+    derived from elementary T1/T2 RGB states and delta polarity by deterministic
+    runtime rules. Mask-context effect labels are retained only as audit evidence.
     """
 
-    SCHEMA_VERSION = "compact_delta_effect_consensus_v3"
-    EFFECT_VISUAL_MODES = ("mask_context", "rgb_counterfactual")
+    SCHEMA_VERSION = "rgb_temporal_state_effect_v4"
+    CANDIDATE_EVIDENCE_MODES = ("mask_context", "rgb_temporal_state")
     ERROR_TYPES = {
         "none",
         "false_positive_change",
@@ -79,6 +87,7 @@ class Qwen3VLZeroShotVerifier:
         "mixed",
         "uncertain",
     }
+    TEMPORAL_STATES = {"building", "background", "mixed", "uncertain"}
     VIEWS = {"t1", "t2"}
 
     def __init__(
@@ -138,6 +147,7 @@ class Qwen3VLZeroShotVerifier:
         mask_facts = dict(state.evidence.get("verifier_mask_facts", {}))
 
         region_errors: list[str] = []
+        schema_warnings: list[str] = []
         region_attempts: list[dict[str, Any]] = []
         regional_analysis: _RegionalAnalysis | None = None
         for _ in range(self.max_retries):
@@ -152,7 +162,11 @@ class Qwen3VLZeroShotVerifier:
             )
             try:
                 payload = self._extract_json_object(raw)
-                judgments = self._parse_region_payload(payload, proposals, mask_facts)
+                attempt_warnings: list[str] = []
+                judgments = self._parse_region_payload(
+                    payload, proposals, mask_facts, attempt_warnings
+                )
+                schema_warnings.extend(attempt_warnings)
                 regional_analysis = self._derive_regional_analysis(
                     judgments, proposals, mask_facts, previous_action
                 )
@@ -177,7 +191,7 @@ class Qwen3VLZeroShotVerifier:
         self._last_valid_output = output
         self.last_evidence = {
             "type": "qwen3vl_compact_region_zero_shot",
-            "decision_mode": "compact_regions_then_programmatic_delta_effect",
+            "decision_mode": "compact_regions_then_rgb_temporal_state_delta_effect",
             "gt_available": False,
             "verifier_valid": True,
             "localization_valid": output.localization_valid,
@@ -197,6 +211,7 @@ class Qwen3VLZeroShotVerifier:
             "pairwise_attempts": [],
             "comparison": decision.comparison,
             "validation_errors": region_errors,
+            "schema_warnings": schema_warnings,
         }
         return output
 
@@ -260,8 +275,10 @@ class Qwen3VLZeroShotVerifier:
 
         effect_errors: list[str] = []
         effect_attempts: list[dict[str, Any]] = []
-        consensus_inputs: dict[str, tuple[_EffectJudgment, ...]] = {}
-        consensus_detail: list[dict[str, Any]] = []
+        temporal_state_attempts: list[dict[str, Any]] = []
+        fusion_detail: list[dict[str, Any]] = []
+        mask_judgments: tuple[_EffectJudgment, ...] | None = None
+        temporal_judgments: tuple[_TemporalStateJudgment, ...] | None = None
         judgments: tuple[_EffectJudgment, ...] | None = None
         uncovered = int(facts.get("candidate_delta_uncovered_pixels", 0))
         if uncovered:
@@ -271,49 +288,75 @@ class Qwen3VLZeroShotVerifier:
         elif not proposals:
             effect_errors.append("candidate delta has no auditable proposal")
         else:
-            for visual_mode in self.EFFECT_VISUAL_MODES:
-                mode_errors: list[str] = []
-                mode_judgments: tuple[_EffectJudgment, ...] | None = None
-                for _ in range(self.max_retries):
-                    raw = self._generate_messages(
-                        self.build_effect_messages(
-                            state,
-                            previous_state,
-                            previous_action,
-                            proposals,
-                            facts,
-                            mode_errors[-1:],
-                            visual_mode=visual_mode,
-                        )
+            mask_errors: list[str] = []
+            for _ in range(self.max_retries):
+                raw = self._generate_messages(
+                    self.build_effect_messages(
+                        state,
+                        previous_state,
+                        previous_action,
+                        proposals,
+                        facts,
+                        mask_errors[-1:],
                     )
-                    try:
-                        payload = self._extract_json_object(raw)
-                        mode_judgments = self._parse_effect_payload(payload, proposals)
-                        effect_attempts.append(
-                            {"visual_mode": visual_mode, "raw": raw, "output": payload}
-                        )
-                        break
-                    except (TypeError, ValueError, KeyError) as error:
-                        mode_errors.append(str(error))
-                        effect_errors.append(f"{visual_mode}: {error}")
-                        effect_attempts.append(
-                            {"visual_mode": visual_mode, "raw": raw, "error": str(error)}
-                        )
-                if mode_judgments is None:
-                    break
-                consensus_inputs[visual_mode] = mode_judgments
-            if len(consensus_inputs) == len(self.EFFECT_VISUAL_MODES):
-                judgments, consensus_detail = self._effect_consensus(
-                    consensus_inputs, proposals
                 )
-                disagreements = [
-                    item["region_id"] for item in consensus_detail if not item["agreement"]
-                ]
-                if disagreements:
-                    effect_errors.append(
-                        "effect visual consensus disagreement for "
-                        + ", ".join(disagreements)
+                try:
+                    payload = self._extract_json_object(raw)
+                    mask_judgments = self._parse_effect_payload(payload, proposals)
+                    effect_attempts.append(
+                        {"evidence_mode": "mask_context", "raw": raw, "output": payload}
                     )
+                    break
+                except (TypeError, ValueError, KeyError) as error:
+                    mask_errors.append(str(error))
+                    effect_errors.append(f"mask_context: {error}")
+                    effect_attempts.append(
+                        {"evidence_mode": "mask_context", "raw": raw, "error": str(error)}
+                    )
+
+            # The mask-context judgment is advisory audit evidence.  Always run the
+            # elementary RGB temporal-state pass even when that advisory response is
+            # malformed, otherwise an unrelated formatting failure can suppress a
+            # visually supported beneficial edit.
+            temporal_errors: list[str] = []
+            for _ in range(self.max_retries):
+                raw = self._generate_messages(
+                    self.build_temporal_state_messages(
+                        state,
+                        previous_state,
+                        previous_action,
+                        proposals,
+                        facts,
+                        temporal_errors[-1:],
+                    )
+                )
+                try:
+                    payload = self._extract_json_object(raw)
+                    temporal_judgments = self._parse_temporal_state_payload(
+                        payload, proposals
+                    )
+                    temporal_state_attempts.append(
+                        {
+                            "evidence_mode": "rgb_temporal_state",
+                            "raw": raw,
+                            "output": payload,
+                        }
+                    )
+                    break
+                except (TypeError, ValueError, KeyError) as error:
+                    temporal_errors.append(str(error))
+                    effect_errors.append(f"rgb_temporal_state: {error}")
+                    temporal_state_attempts.append(
+                        {
+                            "evidence_mode": "rgb_temporal_state",
+                            "raw": raw,
+                            "error": str(error),
+                        }
+                    )
+            if temporal_judgments is not None:
+                judgments, fusion_detail = self._effects_from_temporal_states(
+                    temporal_judgments, mask_judgments, proposals
+                )
 
         if judgments is None:
             output = self._invalid_output(
@@ -325,7 +368,7 @@ class Qwen3VLZeroShotVerifier:
             self.last_evidence.update(
                 {
                     "type": "qwen3vl_compact_delta_effect_zero_shot",
-                    "decision_mode": "programmatic_delta_effect",
+                    "decision_mode": "rgb_temporal_state_then_programmatic_delta_effect",
                     "candidate_fingerprint": fingerprint,
                     "decision_key": fingerprint,
                     "decision_step": state.step_index,
@@ -333,7 +376,8 @@ class Qwen3VLZeroShotVerifier:
                     "effect_attempts": effect_attempts,
                     "mask_facts": facts,
                     "region_proposals": proposals,
-                    "effect_consensus": consensus_detail,
+                    "temporal_state_attempts": temporal_state_attempts,
+                    "effect_fusion": fusion_detail,
                 }
             )
             self._cache_candidate(fingerprint, output)
@@ -346,7 +390,7 @@ class Qwen3VLZeroShotVerifier:
         self._last_valid_output = output
         self.last_evidence = {
             "type": "qwen3vl_compact_delta_effect_zero_shot",
-            "decision_mode": "programmatic_delta_effect",
+            "decision_mode": "rgb_temporal_state_then_programmatic_delta_effect",
             "candidate_fingerprint": fingerprint,
             "decision_key": fingerprint,
             "decision_step": state.step_index,
@@ -361,7 +405,16 @@ class Qwen3VLZeroShotVerifier:
                 for item in judgments
             ],
             "effect_attempts": effect_attempts,
-            "effect_consensus": consensus_detail,
+            "temporal_state_attempts": temporal_state_attempts,
+            "temporal_state_judgments": [
+                {
+                    "region_id": item.region_id,
+                    "t1_state": item.t1_state,
+                    "t2_state": item.t2_state,
+                }
+                for item in temporal_judgments or ()
+            ],
+            "effect_fusion": fusion_detail,
             "pairwise_attempts": [],
             "comparison": comparison,
             "validation_errors": effect_errors,
@@ -392,7 +445,7 @@ class Qwen3VLZeroShotVerifier:
             messages.append(f"Previous valid feedback retained: {retained}")
         self.last_evidence = {
             "type": "qwen3vl_compact_region_zero_shot",
-            "decision_mode": "compact_regions_then_programmatic_delta_effect",
+            "decision_mode": "compact_regions_then_rgb_temporal_state_delta_effect",
             "region_attempts": region_attempts,
             "pairwise_attempts": pairwise_attempts,
             "validation_errors": errors,
@@ -528,50 +581,17 @@ class Qwen3VLZeroShotVerifier:
         proposals: list[dict[str, Any]],
         facts: dict[str, Any],
         previous_errors: list[str] | None = None,
-        *,
-        visual_mode: str = "mask_context",
     ) -> list[dict[str, Any]]:
-        if visual_mode not in self.EFFECT_VISUAL_MODES:
-            raise ValueError("unsupported candidate effect visual mode")
         correction = (
             f"Your previous effect labels were invalid: {previous_errors[-1]}. Correct them.\n"
             if previous_errors
             else ""
         )
-        visual_instruction = (
-            "Use the previous/candidate masks and the mask-context panels only to locate the exact edit. "
-            if visual_mode == "mask_context"
-            else "This is an independent RGB countercheck: use the clean T1/T2 crops to decide semantic truth; the binary delta tile only locates the exact edited pixels and predicted masks are intentionally hidden. "
-        )
-        evidence_instruction = (
-            "Predicted masks are supporting predictions, not GT. "
-            if visual_mode == "mask_context"
-            else "Do not infer semantic truth from mask predictions or mask statistics. "
-        )
-        prompt_facts = (
-            facts
-            if visual_mode == "mask_context"
-            else {
-                key: facts[key]
-                for key in (
-                    "height",
-                    "width",
-                    "candidate_delta_pixels",
-                    "candidate_added_pixels",
-                    "candidate_removed_pixels",
-                    "candidate_delta_covered_pixels",
-                    "candidate_delta_uncovered_pixels",
-                    "candidate_delta_coverage_ratio",
-                    "proposal_count",
-                    "proposal_config",
-                )
-                if key in facts
-            }
-        )
         prompt = (
-            f"{visual_instruction}Judge only the pixels changed by the candidate action. Each supplied delta proposal "
+            "Use the previous/candidate masks and mask-context panels to judge only the pixels "
+            "changed by the candidate action. Each supplied delta proposal "
             "has effect_kind added or removed and exact pixel counts. Confirm temporal building "
-            f"change from the T1/T2 RGB crops. {evidence_instruction}"
+            "change from the T1/T2 RGB crops. Predicted masks are supporting predictions, not GT. "
             "For an added proposal output added_true_change when the newly white pixels are real "
             "temporal building change, added_false_change when they are false change, mixed when "
             "the component contains both, or uncertain. For a removed proposal output "
@@ -581,7 +601,7 @@ class Qwen3VLZeroShotVerifier:
             "region_id to one label string, for example "
             "{\"d0\":\"added_true_change\",\"d1\":\"removed_false_positive\"}. "
             "Do not output feedback sentences, comparison, scores, actions, coordinates, or extra keys.\n"
-            f"Exact candidate delta facts: {json.dumps(prompt_facts, ensure_ascii=False)}\n"
+            f"Exact candidate delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
             f"{correction}"
         )
@@ -590,83 +610,109 @@ class Qwen3VLZeroShotVerifier:
             {"type": "image", "image": self._as_image(state.t1_image)},
             {"type": "text", "text": "Fixed T2 original image:"},
             {"type": "image", "image": self._as_image(state.t2_image)},
+            {"type": "text", "text": "Previous accepted final change mask:"},
+            {"type": "image", "image": self._mask_image(previous_state.change_mask)},
+            {"type": "text", "text": "Candidate final change mask:"},
+            {"type": "image", "image": self._mask_image(state.change_mask)},
         ]
-        if visual_mode == "mask_context":
-            content.extend(
-                [
-                    {"type": "text", "text": "Previous accepted final change mask:"},
-                    {"type": "image", "image": self._mask_image(previous_state.change_mask)},
-                    {"type": "text", "text": "Candidate final change mask:"},
-                    {"type": "image", "image": self._mask_image(state.change_mask)},
-                ]
-            )
         for proposal in proposals:
-            public_proposal = (
-                proposal
-                if visual_mode == "mask_context"
-                else {
-                    key: proposal[key]
-                    for key in (
-                        "region_id",
-                        "effect_kind",
-                        "component_area",
-                        "box_normalized",
-                        "candidate_delta_pixels",
-                        "delta_pixels",
-                        "candidate_added_pixels",
-                        "candidate_removed_pixels",
-                    )
-                    if key in proposal
-                }
-            )
             content.extend(
                 [
                     {
                         "type": "text",
                         "text": (
                             f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
-                            f"{json.dumps(public_proposal, ensure_ascii=False)}"
+                            f"{json.dumps(proposal, ensure_ascii=False)}"
                         ),
                     },
                     {
                         "type": "image",
-                        "image": (
-                            self._region_panel(state, proposal, previous_state)
-                            if visual_mode == "mask_context"
-                            else self._rgb_delta_panel(state, previous_state, proposal)
-                        ),
+                        "image": self._region_panel(state, proposal, previous_state),
                     },
                 ]
             )
         content.append({"type": "text", "text": prompt})
         return [{"role": "user", "content": content}]
 
-    @staticmethod
-    def _effect_consensus(
-        inputs: dict[str, tuple[_EffectJudgment, ...]],
+    def build_temporal_state_messages(
+        self,
+        state: ChangeState,
+        previous_state: ChangeState,
+        previous_action: AgentAction | None,
         proposals: list[dict[str, Any]],
-    ) -> tuple[tuple[_EffectJudgment, ...], list[dict[str, Any]]]:
-        expected = [item["region_id"] for item in proposals]
-        by_mode = {
-            mode: {item.region_id: item.effect for item in judgments}
-            for mode, judgments in inputs.items()
-        }
-        result: list[_EffectJudgment] = []
-        detail: list[dict[str, Any]] = []
-        for region_id in expected:
-            labels = {mode: values[region_id] for mode, values in by_mode.items()}
-            agreement = len(set(labels.values())) == 1
-            effect = next(iter(labels.values())) if agreement else "uncertain"
-            result.append(_EffectJudgment(region_id, effect))
-            detail.append(
-                {
-                    "region_id": region_id,
-                    "labels": labels,
-                    "agreement": agreement,
-                    "consensus_effect": effect,
-                }
+        facts: dict[str, Any],
+        previous_errors: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        del previous_action
+        correction = (
+            f"Your previous temporal-state output was invalid: {previous_errors[-1]}. Correct it.\n"
+            if previous_errors
+            else ""
+        )
+        prompt_facts = {
+            key: facts[key]
+            for key in (
+                "height",
+                "width",
+                "candidate_delta_pixels",
+                "candidate_delta_covered_pixels",
+                "candidate_delta_uncovered_pixels",
+                "candidate_delta_coverage_ratio",
+                "proposal_count",
+                "proposal_config",
             )
-        return tuple(result), detail
+            if key in facts
+        }
+        prompt = (
+            "Judge elementary RGB facts at the exact candidate delta pixels. Predicted T1/T2 "
+            "object masks and their statistics are intentionally hidden. In each panel: top-left "
+            "is the clean T1 crop, top-right is the clean T2 crop, bottom-left is the exact binary "
+            "delta location, and bottom-right is amplified absolute RGB difference. For every "
+            "region_id, classify the object state at those pixels independently in T1 and T2 as "
+            "building, background, mixed, or uncertain. Use mixed when the component spans both "
+            "building and background. Return exactly one compact JSON object mapping every exact "
+            "region_id to [t1_state,t2_state], for example "
+            "{\"d0\":[\"building\",\"building\"],\"d1\":[\"background\",\"building\"]}. "
+            "Do not output candidate quality, added/removed effect labels, feedback, coordinates, "
+            "or extra keys.\n"
+            f"Delta geometry facts: {json.dumps(prompt_facts, ensure_ascii=False)}\n"
+            f"{correction}"
+        )
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": "Fixed clean T1 original image:"},
+            {"type": "image", "image": self._as_image(state.t1_image)},
+            {"type": "text", "text": "Fixed clean T2 original image:"},
+            {"type": "image", "image": self._as_image(state.t2_image)},
+        ]
+        for proposal in proposals:
+            public_proposal = {
+                key: proposal[key]
+                for key in (
+                    "region_id",
+                    "component_area",
+                    "box_normalized",
+                    "candidate_delta_pixels",
+                    "delta_pixels",
+                )
+                if key in proposal
+            }
+            content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"RGB temporal-state proposal {proposal['region_id']}: "
+                            f"{json.dumps(public_proposal, ensure_ascii=False)}"
+                        ),
+                    },
+                    {
+                        "type": "image",
+                        "image": self._rgb_delta_panel(state, previous_state, proposal),
+                    },
+                ]
+            )
+        content.append({"type": "text", "text": prompt})
+        return [{"role": "user", "content": content}]
 
     @staticmethod
     def _global_visual_content(state: ChangeState) -> list[dict[str, Any]]:
@@ -688,6 +734,7 @@ class Qwen3VLZeroShotVerifier:
         payload: dict[str, Any],
         proposals: list[dict[str, Any]],
         mask_facts: dict[str, Any],
+        schema_warnings: list[str] | None = None,
     ) -> tuple[_RegionJudgment, ...]:
         expected_ids = [item["region_id"] for item in proposals]
         values = self._normalize_region_values(payload, expected_ids)
@@ -717,9 +764,13 @@ class Qwen3VLZeroShotVerifier:
                 if target_view not in self.VIEWS:
                     raise ValueError("actionable region judgment requires target_view t1/t2")
             elif target_view is not None:
-                raise ValueError(
-                    "true_change/uncertain region judgment requires target_view null"
-                )
+                if target_view not in self.VIEWS:
+                    raise ValueError("non-actionable region judgment has invalid target_view")
+                if schema_warnings is not None:
+                    schema_warnings.append(
+                        f"{region_id} {verdict} target_view={target_view} canonicalized to null"
+                    )
+                target_view = None
             feedback = value.get("feedback")
             if feedback is None:
                 feedback = f"{region_id} classified as {verdict}."
@@ -884,6 +935,77 @@ class Qwen3VLZeroShotVerifier:
             result.append(_EffectJudgment(region_id, effect))
         return tuple(result)
 
+    def _parse_temporal_state_payload(
+        self, payload: dict[str, Any], proposals: list[dict[str, Any]]
+    ) -> tuple[_TemporalStateJudgment, ...]:
+        expected = [item["region_id"] for item in proposals]
+        if set(payload) != set(expected):
+            raise ValueError("temporal-state response must cover every delta region exactly once")
+        result: list[_TemporalStateJudgment] = []
+        for region_id in expected:
+            states = payload[region_id]
+            if not isinstance(states, (list, tuple)) or len(states) != 2:
+                raise TypeError("each temporal-state value must be [t1_state,t2_state]")
+            t1_state, t2_state = states
+            if (
+                not isinstance(t1_state, str)
+                or not isinstance(t2_state, str)
+                or t1_state not in self.TEMPORAL_STATES
+                or t2_state not in self.TEMPORAL_STATES
+            ):
+                raise ValueError("unsupported RGB temporal state")
+            result.append(_TemporalStateJudgment(region_id, t1_state, t2_state))
+        return tuple(result)
+
+    @staticmethod
+    def _effects_from_temporal_states(
+        temporal_judgments: tuple[_TemporalStateJudgment, ...],
+        mask_judgments: tuple[_EffectJudgment, ...] | None,
+        proposals: list[dict[str, Any]],
+    ) -> tuple[tuple[_EffectJudgment, ...], list[dict[str, Any]]]:
+        by_temporal = {item.region_id: item for item in temporal_judgments}
+        by_mask = {item.region_id: item.effect for item in (mask_judgments or ())}
+        result: list[_EffectJudgment] = []
+        detail: list[dict[str, Any]] = []
+        for proposal in proposals:
+            region_id = proposal["region_id"]
+            temporal = by_temporal[region_id]
+            states = {temporal.t1_state, temporal.t2_state}
+            if states & {"mixed", "uncertain"}:
+                effect = "uncertain"
+                temporal_change = None
+            else:
+                temporal_change = temporal.t1_state != temporal.t2_state
+                if proposal.get("effect_kind") == "added":
+                    effect = (
+                        "added_true_change" if temporal_change else "added_false_change"
+                    )
+                elif proposal.get("effect_kind") == "removed":
+                    effect = (
+                        "removed_true_change"
+                        if temporal_change
+                        else "removed_false_positive"
+                    )
+                else:
+                    raise ValueError("delta proposal has no valid effect_kind")
+            mask_effect = by_mask.get(region_id)
+            result.append(_EffectJudgment(region_id, effect))
+            detail.append(
+                {
+                    "region_id": region_id,
+                    "t1_state": temporal.t1_state,
+                    "t2_state": temporal.t2_state,
+                    "temporal_change": temporal_change,
+                    "derived_effect": effect,
+                    "mask_context_effect": mask_effect,
+                    "mask_context_agreement": (
+                        mask_effect == effect if mask_effect is not None else None
+                    ),
+                    "decision_source": "rgb_temporal_state",
+                }
+            )
+        return tuple(result), detail
+
     @staticmethod
     def _comparison_from_effects(
         judgments: tuple[_EffectJudgment, ...]
@@ -1004,7 +1126,7 @@ class Qwen3VLZeroShotVerifier:
             "action": previous_action.to_dict() if previous_action else None,
             "max_new_tokens": self.max_new_tokens,
             "max_retries": self.max_retries,
-            "effect_visual_modes": self.EFFECT_VISUAL_MODES,
+            "candidate_evidence_modes": self.CANDIDATE_EVIDENCE_MODES,
             "model": getattr(getattr(self.model, "config", None), "_name_or_path", None),
             "proposals": proposals,
             "facts": facts,

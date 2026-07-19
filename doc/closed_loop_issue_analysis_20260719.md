@@ -480,3 +480,27 @@ true_change/uncertain 的 target_view 必须为 null，模型输出 t1/t2 时重
 同时修复 invalid baseline 控制流：初始 Verifier 重试耗尽后，正式 runner 不再要求
 Agent 继续探索，也不调用分割工具，而以 `initial_verifier_invalid` 安全结束并保留初始
 mask，避免在没有有效基准诊断时提交局部候选。
+
+## 14. 2026-07-19 RGB 时相事实判定与有益候选放行
+
+`outputs/change_agent_levir_gpu_closed_loop_20260719_205825` 表明“双视觉抽象标签一致”
+仍不是可靠的安全门。`test_78_13` 的候选删除了 135 个 false-positive 像素，离线 IoU
+由 `0.75787116` 提升到 `0.76467070`，但两个分支都输出
+`removed_true_change`，导致真实有益修改被一致地误拒绝。与此同时，另外两个样本的
+初始 `true_change` 因携带无实际意义的 `target_view=t1/t2` 而耗尽重试并停止。
+
+本轮不再要求 Qwen 在第二视觉分支理解“删除动作是否有益”这一抽象语义，而只判断
+delta 对应 RGB 区域在 T1/T2 中分别是 `building/background/mixed/uncertain`。程序结合
+`effect_kind=added/removed` 推导：确定的 T1/T2 状态相异表示真实时相变化，相同表示
+无变化；新增真实变化和删除无变化区域为有益，新增无变化区域和删除真实变化为有害。
+RGB 请求本身不暴露 action、effect_kind 或新增/删除统计，避免这些动作语义反向诱导
+局部视觉分类。
+
+mask-context 标签只用于审计，不再拥有否决权。它与 RGB 推导冲突、甚至连续产生无效
+JSON 时，仍继续执行 RGB 时相判断；只要 RGB 状态明确，候选照常进入程序门控。RGB
+本身为 `mixed/uncertain` 或无效时仍保守拒绝。这样既避免审计分支误杀有益候选，又不
+放松 locality、面积、coverage、拓扑和 replay hash 等环境硬约束。
+
+初始阶段则把 `true_change/uncertain` 的多余 target view 规范化为 `null` 并记录
+`schema_warnings`，不再把无动作意义的字段错误升级为整轮 invalid。真正缺字段、非法
+枚举、事实冲突或未覆盖区域仍按原安全策略处理。
