@@ -95,6 +95,28 @@ or uncertain. These states and the final semantic verdict are all Qwen outputs a
 global synthesis. Runtime validates their schemas but deliberately does not map state pairs to
 FP/FN or better/worse, preserving the Verifier's core responsibility.
 
+Job `41506` evaluated v11 at commit `2b2c7e5`. It stopped all three samples safely at the
+first local region and retained aggregate IoU `0.69744116`. The new state chain worked:
+Qwen consistently observed `background/background` and explained that no real change was
+visible. It nevertheless called the already-white component `correct_unchanged` on the first
+attempt and `false_negative` on retry. Thus the visual observation improved, but FP/FN terms
+remained inverted relative to the final change mask.
+
+The v12 local schema requires Qwen to echo the authoritative mask state
+(`white_predicted_change` or `black_predicted_unchanged`) before its RGB states and verdict.
+The prompt gives an explicit four-case semantic table. Local terminology conflicts are retained
+with a `geometry_consistency` flag and passed to global Qwen for a second semantic review rather
+than invalidating the entire audit. The final synthesis still cannot target an already-white
+region as FN or an already-black region as FP. This is structural validation, not a programmatic
+replacement verdict.
+
+For better spatial grounding without artificial colors, the panel now contains six tiles: clean
+T1/T2, exact binary geometry, T1/T2 focus views that preserve every inside RGB pixel while
+dimming only outside context, and raw difference. Candidate output similarly echoes authoritative
+added/removed polarity before its RGB states and effect. Runtime verifies only that these copied
+geometry fields match the Environment; Qwen still produces every semantic label, score,
+comparison, and correction.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

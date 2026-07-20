@@ -639,3 +639,10 @@ comparison、score 或 correction 的语义。
 当作亮度变化。v11 因此去掉全部彩色 RGB 标注，要求 Qwen 先输出局部 `t1_state/t2_state`，
 再直接给出 FP/FN/true/mixed 或 candidate effect。状态只作为 Qwen 自己的可审计依据链，
 程序不会根据状态对推理结果做语义映射。
+
+作业 `41506` 中，Qwen 已能稳定看出首个区域是 `background/background`，但仍把“当前白色、
+两时相无变化”错误命名为 `correct_unchanged` 或 FN。v12 要求它先回显 Environment 提供的
+`white_predicted_change/black_predicted_unchanged`，再依据四格语义表给 verdict。局部术语
+冲突不再让整轮立即失效，而是带 `geometry_consistency=false` 进入全局 Qwen 复核；最终全局
+输出仍受白色不能为 FN、黑色不能为 FP 的结构检查。局部视觉同时增加无着色 focus tile：
+组件内 RGB 完全不变，只压暗组件外上下文。

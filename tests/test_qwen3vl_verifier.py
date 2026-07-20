@@ -68,6 +68,11 @@ def rich_regions(
         "regions": [
             {
                 "region_id": item["region_id"],
+                "change_mask_state": (
+                    "white_predicted_change"
+                    if item.get("audit_kind") == "present"
+                    else "black_predicted_unchanged"
+                ),
                 "t1_state": t1_state,
                 "t2_state": t2_state,
                 "verdict": verdict,
@@ -98,6 +103,7 @@ def rich_effects(
         "regions": [
             {
                 "region_id": item["region_id"],
+                "delta_kind": item["effect_kind"],
                 "t1_state": t1_state,
                 "t2_state": t2_state,
                 "effect": effect,
@@ -197,24 +203,33 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_region, (*seed, *seed))
         self.assertFalse(output.accept)
 
-    def test_present_component_cannot_be_labeled_false_negative(self):
+    def test_global_false_negative_cannot_target_present_component(self):
         state = make_state()
         proposals = attach_verifier_regions(state)
-        invalid = rich_regions(
+        local_conflict = rich_regions(
             proposals,
             "false_negative",
             target_view="t1",
             action="positive_point",
         )
+        global_conflict = synthesis(
+            quality=0.3,
+            error_type="false_negative",
+            target_view="t1",
+            region_id=proposals[0]["region_id"],
+            action="positive_point",
+        )
         verifier = Qwen3VLZeroShotVerifier(
-            model=FakeModel(), processor=FakeProcessor(invalid), max_retries=1
+            model=FakeModel(),
+            processor=FakeProcessor([local_conflict, global_conflict]),
+            max_retries=1,
         )
 
         output = verifier.verify(state, None, None)
 
         self.assertFalse(output.verifier_valid)
         self.assertIn(
-            "present change-mask component cannot be a false negative",
+            "global false_negative cannot target an already-white region",
             " ".join(verifier.last_evidence["validation_errors"]),
         )
 
@@ -646,12 +661,12 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("feedback (one or two concise diagnostic sentences", prompt)
         self.assertIn("Full predicted T1 object mask", prompt)
         self.assertIn("CLEAN T1 RGB", prompt)
-        self.assertIn("Bottom tiles are diagnostic data, not scene colors", prompt)
+        self.assertIn("diagnostic data, not scene colors", prompt)
 
         local_panels = [
             item["image"]
             for item in messages[0]["content"]
-            if item["type"] == "image" and item["image"].size == (384, 384)
+            if item["type"] == "image" and item["image"].size == (576, 384)
         ]
         panel = np.asarray(local_panels[0])
         x1, y1, x2, y2 = proposals[0]["box_pixels"]

@@ -71,8 +71,9 @@ separately validated latent/tool-ranking objective.
   mixed, or uncertain against the final change mask; it also returns the target view,
   proposed correction, confidence, severity, and
   one-to-three sentences explaining the local visual evidence. Each rich diagnosis also records
-  T1/T2 building/background/mixed/uncertain states as an explicit grounding chain; runtime does
-  not derive the verdict from these states.
+  authoritative white/black change-mask state and T1/T2 building/background/mixed/uncertain
+  states as an explicit grounding chain; runtime checks the copied geometry but does not derive
+  the verdict from the RGB states.
 - Candidate regional passes diagnose the actual action delta as added_true_change,
   added_false_change, removed_false_positive, removed_true_change, mixed, or
   uncertain, again with a corrective proposal and detailed feedback. A mixed component must
