@@ -1,5 +1,40 @@
 # Development log
 
+## 2026-07-20 — first rich-Verifier GPU result and executable long-output protocol
+
+Single-GPU job `41502` evaluated commit `26a79b7` in
+`change_agent_levir_gpu_closed_loop_20260720_015048`. The runner completed successfully
+in 171 seconds, but all three initial Verifier calls exhausted retries and safely stopped
+at step 0. Aggregate IoU therefore remained the fixed initial `0.69744116`; this run is
+diagnostic, not an accepted improvement.
+
+The failure was localized before any Agent/tool action. With six rich region records per
+call, one response hit the 1024-token ceiling after repeating a sentence and produced
+incomplete JSON. The other responses covered six IDs but repeatedly used
+`false_negative` for already-white change-mask components because they interpreted an
+empty temporal object mask as the evaluated FN. One valid `true_change` label was also
+discarded only because its advisory target/action fields were non-null.
+
+The next protocol keeps Qwen's semantic authority and changes only executability and
+definitions:
+
+- Initial long-output batches contain two regions instead of six; all components and exact
+  coverage are retained through additional batches. The output ceiling stays 1024.
+- The prompt defines FP/FN against the final current change mask. A missing T1 or T2 object
+  mask is explicitly not an FN by itself, and ordinary building appearance/disappearance is
+  explicitly a true change when supported by RGB.
+- `correct_unchanged` lets Qwen state that a black missing-proposal region correctly contains
+  no real RGB change. Environment-provided `allowed_verdicts` exposes the white/black geometry
+  constraint without choosing the semantic verdict.
+- Local target/action inconsistencies no longer invalidate an otherwise useful diagnosis;
+  Qwen's global synthesis owns the final error and correction. Impossible white-FN,
+  black-FP, unknown-region, polarity, schema, and coverage contradictions remain invalid.
+- Verifier generation is deterministic (`do_sample=false`) with repetition penalty `1.05`.
+  These settings are included in run metadata and candidate cache identity.
+
+This optimization does not restore any state-to-FP/FN or effect-to-better/worse runtime
+mapping. Qwen still owns local semantics, quality/progress, global comparison, and correction.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

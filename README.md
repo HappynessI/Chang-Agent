@@ -67,8 +67,9 @@ separately validated latent/tool-ranking objective.
   candidate added/removed component, gives it a stable rN/dN identifier, measures exact
   pixel coverage, and batches panels without dropping the remaining components.
 - Qwen is again the semantic Verifier rather than an elementary-state classifier. Its initial
-  regional pass diagnoses true_change, false_positive, false_negative, mixed, or
-  uncertain; it also returns the target view, proposed correction, confidence, severity, and
+  regional pass diagnoses true_change, correct_unchanged, false_positive, false_negative,
+  mixed, or uncertain against the final change mask; it also returns the target view,
+  proposed correction, confidence, severity, and
   one-to-three sentences explaining the local visual evidence.
 - Candidate regional passes diagnose the actual action delta as added_true_change,
   added_false_change, removed_false_positive, removed_true_change, mixed, or
@@ -84,9 +85,10 @@ separately validated latent/tool-ranking objective.
   an already-white component cannot be a false negative, exact region-to-coordinate conversion,
   identical-state handling, SHA256 decision caching, rollback, and locality/area hard gates.
   Runtime code does not infer semantic better/worse from effect labels.
-- The Verifier generation ceiling remains 1024 tokens. Rich outputs are split into bounded local
-  batches followed by one global synthesis, so Qwen has room for reasoning without silently
-  omitting components.
+- The Verifier generation ceiling remains 1024 tokens. Initial rich outputs use two local
+  regions per batch (candidate batches use three) followed by one global synthesis, so Qwen has
+  room for reasoning without silently omitting components. Verifier generation is deterministic
+  with a small repetition penalty; these settings are part of the decision-cache identity.
 - An initial state can finish only when Qwen reports no remaining error and its quality score meets
   the configured threshold. A candidate is semantically accepted only when Qwen calls it
   better; it may still contain a localized remaining error, in which case the accepted state

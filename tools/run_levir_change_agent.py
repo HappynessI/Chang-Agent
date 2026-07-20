@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--verifier-max-regions",
         type=int,
-        default=6,
+        default=2,
         help="Maximum initial components per Qwen call; all components are audited.",
     )
     parser.add_argument(
@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verifier-max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument("--verifier-retries", type=int, default=2)
+    parser.add_argument("--verifier-repetition-penalty", type=float, default=1.05)
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--tool-device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -197,6 +198,8 @@ def main() -> None:
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
                 "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
+                "verifier_do_sample": False,
+                "verifier_repetition_penalty": args.verifier_repetition_penalty,
                 "verifier_candidate_evidence_modes": list(
                     Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
                 )
@@ -353,6 +356,8 @@ def _build_verifier(args: argparse.Namespace, qwen: GroundingModelQwen3VL):
         max_new_tokens=args.verifier_max_new_tokens,
         accept_threshold=args.verifier_accept_threshold,
         max_retries=args.verifier_retries,
+        do_sample=False,
+        repetition_penalty=args.verifier_repetition_penalty,
     )
 
 
@@ -512,6 +517,8 @@ def _base_manifest(
         ),
         "verifier_max_initial_regions_per_batch": args.verifier_max_regions,
         "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
+        "verifier_do_sample": False,
+        "verifier_repetition_penalty": args.verifier_repetition_penalty,
         "verifier_candidate_evidence_modes": list(
             Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
         )

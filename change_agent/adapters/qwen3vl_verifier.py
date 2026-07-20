@@ -59,7 +59,7 @@ class Qwen3VLZeroShotVerifier:
     candidate comparison, and the next corrective action.
     """
 
-    SCHEMA_VERSION = "rich_region_diagnosis_and_synthesis_v8"
+    SCHEMA_VERSION = "rich_change_error_diagnosis_and_synthesis_v9"
     CANDIDATE_EVIDENCE_MODES = ("rich_delta_diagnosis", "global_synthesis")
     ERROR_TYPES = {
         "none",
@@ -71,6 +71,7 @@ class Qwen3VLZeroShotVerifier:
     COMPARISONS = {"better", "worse", "unchanged", "uncertain"}
     REGION_VERDICTS = {
         "true_change",
+        "correct_unchanged",
         "false_positive",
         "false_negative",
         "mixed",
@@ -93,12 +94,16 @@ class Qwen3VLZeroShotVerifier:
         max_new_tokens: int = 1024,
         accept_threshold: float = 0.82,
         max_retries: int = 2,
+        do_sample: bool = False,
+        repetition_penalty: float = 1.05,
         **legacy_localization_options: Any,
     ):
         if not 0 <= accept_threshold <= 1:
             raise ValueError("accept_threshold must be in [0, 1]")
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
+        if repetition_penalty < 1:
+            raise ValueError("repetition_penalty must be at least 1")
         self.model = model
         self.processor = processor
         self.max_new_tokens = max_new_tokens
@@ -106,6 +111,8 @@ class Qwen3VLZeroShotVerifier:
         # Candidate acceptance is based on Qwen's direct pairwise comparison.
         self.accept_threshold = accept_threshold
         self.max_retries = max_retries
+        self.do_sample = bool(do_sample)
+        self.repetition_penalty = float(repetition_penalty)
         self.legacy_localization_options = dict(legacy_localization_options)
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
@@ -685,15 +692,26 @@ class Qwen3VLZeroShotVerifier:
         )
         prompt = (
             "Act as the error-diagnosis core for building change detection, not as a simple "
-            "object classifier. For every exact Environment region, compare T1/T2 RGB, predicted "
-            "T1/T2 object masks, and the current change mask. Diagnose true_change, "
-            "false_positive, false_negative, mixed, or uncertain. For mixed, explain the "
-            "beneficial and harmful subparts instead of refusing to reason. Recommend the "
-            "temporal mask and corrective action that would best fix the error. Return exactly "
+            "object classifier. Judge whether the FINAL CURRENT CHANGE MASK is correct at every "
+            "exact Environment region. White in the current change mask means predicted change; "
+            "black means predicted unchanged. The T1/T2 object masks are auxiliary predicted "
+            "building occupancy, not ground truth. A missing object in one temporal object mask "
+            "is NOT automatically a false negative; T1=background and T2=building is a normal "
+            "true building appearance when RGB supports it. Use: true_change for a white region "
+            "supported by a real RGB building appearance/disappearance; correct_unchanged for a "
+            "black region correctly showing no RGB building change; false_positive for a white "
+            "region without real RGB building change; false_negative only for a black region "
+            "that misses real RGB building change; mixed when the exact component contains both "
+            "correct and erroneous parts; uncertain only when visual evidence cannot decide. "
+            "target_view means the predicted temporal object mask to EDIT so the final change "
+            "mask becomes correct, not merely the image where a building is visible. For mixed, "
+            "explain the beneficial and harmful subparts and their relative importance. Return exactly "
             "{\"regions\":[...]} with one item per supplied region. Every item must contain only "
             "region_id, verdict, target_view (t1/t2/null), suggested_action "
             "(positive_point/negative_point/box/null), confidence (0..1), severity (0..1), and "
-            "feedback (one to three diagnostic sentences). Do not output coordinates, scores for "
+            "feedback (one or two concise diagnostic sentences; do not repeat phrases). "
+            "For true_change or correct_unchanged use null target/action unless a boundary error "
+            "still needs correction. Do not output coordinates, scores for "
             "the whole image, comparison, accept, or GT claims.\n"
             f"{correction}"
         )
@@ -719,13 +737,22 @@ class Qwen3VLZeroShotVerifier:
                 )
                 if key in proposal
             }
+            audit_kind = proposal.get("audit_kind")
+            public_proposal["audit_kind"] = audit_kind
+            public_proposal["allowed_verdicts"] = (
+                ["true_change", "false_positive", "mixed", "uncertain"]
+                if audit_kind == "present"
+                else ["correct_unchanged", "false_negative", "mixed", "uncertain"]
+                if audit_kind == "missing"
+                else ["mixed", "uncertain"]
+            )
             content.extend(
                 [
                     {
                         "type": "text",
                         "text": (
                             f"Initial audit proposal {proposal['region_id']}: "
-                            f"{json.dumps({**public_proposal, 'audit_kind': proposal.get('audit_kind')}, ensure_ascii=False)}"
+                            f"{json.dumps(public_proposal, ensure_ascii=False)}"
                         ),
                     },
                     {"type": "image", "image": self._region_panel(state, proposal)},
@@ -752,12 +779,18 @@ class Qwen3VLZeroShotVerifier:
             "Act as the candidate-error verifier. Diagnose each exact added/removed delta using "
             "the RGB images, previous/candidate masks, local panel, action, and geometry. Do not "
             "collapse mixed evidence to uncertain: describe which parts improve and which parts "
-            "damage the result so a later global synthesis can weigh them. Return exactly "
+            "damage the FINAL CHANGE MASK and which side dominates so a later global synthesis "
+            "can weigh them. An added region is newly white: added_true_change means RGB supports "
+            "the new change and added_false_change means it does not. A removed region is newly "
+            "black: removed_false_positive means a spurious change was correctly removed and "
+            "removed_true_change means a real change was wrongly removed. Do not reinterpret "
+            "object-mask occupancy as candidate-delta polarity. Return exactly "
             "{\"regions\":[...]} with one item per supplied region. Each item contains only "
             "region_id, effect (added_true_change/added_false_change/removed_false_positive/"
             "removed_true_change/mixed/uncertain), target_view (t1/t2/null), suggested_action "
             "(positive_point/negative_point/box/finish/null), confidence (0..1), severity (0..1), "
-            "and feedback (one to three diagnostic sentences). Do not output overall comparison, "
+            "and feedback (one or two concise diagnostic sentences; do not repeat phrases). "
+            "Do not output overall comparison, "
             "quality/progress scores, coordinates, accept, or GT claims.\n"
             f"Exact candidate delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
@@ -931,12 +964,6 @@ class Qwen3VLZeroShotVerifier:
                 raise ValueError("regional suggested_action is unsupported")
             if not isinstance(feedback, str) or not feedback.strip():
                 raise ValueError("regional feedback must be a non-empty string")
-            if verdict == "true_change" and (target_view is not None or action is not None):
-                raise ValueError("true_change must not request a correction")
-            if verdict in {"false_positive", "false_negative"} and (
-                target_view is None or action is None
-            ):
-                raise ValueError("an identified error must name a target view and correction")
             audit_kind = by_id[region_id].get("audit_kind")
             if audit_kind == "present" and verdict == "false_negative":
                 raise ValueError("a present change-mask component cannot be a false negative")
@@ -945,6 +972,8 @@ class Qwen3VLZeroShotVerifier:
                 "false_positive",
             }:
                 raise ValueError("a missing proposal cannot be true_change or false_positive")
+            if audit_kind == "present" and verdict == "correct_unchanged":
+                raise ValueError("a present change-mask component cannot be correct_unchanged")
             parsed[region_id] = _RegionJudgment(
                 region_id=region_id,
                 verdict=verdict,
@@ -1109,6 +1138,8 @@ class Qwen3VLZeroShotVerifier:
             "max_new_tokens": self.max_new_tokens,
             "max_retries": self.max_retries,
             "accept_threshold": self.accept_threshold,
+            "do_sample": self.do_sample,
+            "repetition_penalty": self.repetition_penalty,
             "candidate_evidence_modes": self.CANDIDATE_EVIDENCE_MODES,
             "model": getattr(getattr(self.model, "config", None), "_name_or_path", None),
             "proposals": proposals,
@@ -1130,7 +1161,12 @@ class Qwen3VLZeroShotVerifier:
         device = getattr(self.model, "device", None)
         if device is not None and hasattr(inputs, "to"):
             inputs = inputs.to(device)
-        outputs = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=self.do_sample,
+            repetition_penalty=self.repetition_penalty,
+        )
         input_ids = inputs["input_ids"] if isinstance(inputs, dict) else inputs.input_ids
         generated = outputs[:, input_ids.shape[1] :]
         return self.processor.batch_decode(

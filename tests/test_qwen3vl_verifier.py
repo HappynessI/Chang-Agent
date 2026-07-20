@@ -34,9 +34,11 @@ class FakeModel:
 
     def __init__(self):
         self.max_new_tokens = []
+        self.generation_calls = []
 
     def generate(self, **kwargs):
         self.max_new_tokens.append(kwargs["max_new_tokens"])
+        self.generation_calls.append(dict(kwargs))
         return np.zeros((1, 5), dtype=np.int64)
 
 
@@ -142,6 +144,10 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertTrue(output.stop)
         self.assertEqual(processor.call_count, 2)
         self.assertEqual(model.max_new_tokens, [1024, 1024])
+        self.assertTrue(all(call["do_sample"] is False for call in model.generation_calls))
+        self.assertTrue(
+            all(call["repetition_penalty"] == 1.05 for call in model.generation_calls)
+        )
         self.assertEqual(
             verifier.last_evidence["decision_mode"],
             "qwen_region_diagnosis_then_global_synthesis",
@@ -203,6 +209,30 @@ class QwenVerifierTest(unittest.TestCase):
             " ".join(verifier.last_evidence["validation_errors"]),
         )
 
+    def test_local_true_change_advisory_action_is_left_for_qwen_synthesis(self):
+        state = make_state()
+        proposals = attach_verifier_regions(state)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    rich_regions(
+                        proposals,
+                        "true_change",
+                        target_view="t2",
+                        action="positive_point",
+                    ),
+                    synthesis(),
+                ]
+            ),
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_type, "none")
+        self.assertTrue(output.stop)
+
     def test_missing_proposal_can_drive_false_negative_correction(self):
         image = np.zeros((16, 16, 3), dtype=np.uint8)
         t1 = np.zeros((16, 16), dtype=bool)
@@ -236,6 +266,26 @@ class QwenVerifierTest(unittest.TestCase):
 
         self.assertEqual(output.error_type, "false_negative")
         self.assertEqual(output.suggested_action, "positive_point")
+
+    def test_missing_proposal_can_be_correct_unchanged(self):
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        t1 = np.zeros((16, 16), dtype=bool)
+        t2 = np.zeros_like(t1)
+        t2[4:8, 4:8] = True
+        state = ChangeState(image, image, "building", t1, t2, np.zeros_like(t1))
+        proposals = attach_verifier_regions(state)
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [rich_regions(proposals, "correct_unchanged"), synthesis()]
+            ),
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_type, "none")
+        self.assertTrue(output.stop)
 
     def test_candidate_mixed_effect_can_be_judged_better_and_accepted(self):
         previous = make_state(7)
@@ -556,7 +606,9 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("error-diagnosis core", prompt)
         self.assertIn("false_positive", prompt)
         self.assertIn("false_negative", prompt)
-        self.assertIn("feedback (one to three diagnostic sentences)", prompt)
+        self.assertIn("correct_unchanged", prompt)
+        self.assertIn("FINAL CURRENT CHANGE MASK", prompt)
+        self.assertIn("feedback (one or two concise diagnostic sentences", prompt)
         self.assertIn("Full predicted T1 object mask", prompt)
 
         judgments = tuple(
