@@ -117,6 +117,18 @@ added/removed polarity before its RGB states and effect. Runtime verifies only t
 geometry fields match the Environment; Qwen still produces every semantic label, score,
 comparison, and correction.
 
+Job `41507` evaluated v12 at commit `78aa4fb` and again stopped safely at step 0 with
+aggregate IoU `0.69744116`, but it confirmed the semantic fix. On all three samples Qwen's
+first response copied the mask state as the shorthand `"white"`, emitted
+`background/background`, selected `false_positive`, and explained that the white change was
+unsupported by RGB. The only rejection was that the schema expected the expanded literal
+`white_predicted_change`; retry then regressed to the old FN wording.
+
+The parser now canonicalizes only this authoritative geometry shorthand (`white`/`black` and
+their predicted-change variants) before checking it against the proposal. This is analogous to
+the existing T1/T2 case and JSON-null normalization: raw output is retained, and the Qwen
+`false_positive` verdict is neither created nor changed by runtime code.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

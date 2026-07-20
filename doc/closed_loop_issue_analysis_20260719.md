@@ -646,3 +646,8 @@ comparison、score 或 correction 的语义。
 冲突不再让整轮立即失效，而是带 `geometry_consistency=false` 进入全局 Qwen 复核；最终全局
 输出仍受白色不能为 FN、黑色不能为 FP 的结构检查。局部视觉同时增加无着色 focus tile：
 组件内 RGB 完全不变，只压暗组件外上下文。
+
+作业 `41507` 已在三个样本上首次稳定生成语义正确的局部 FP：`white +
+background/background -> false_positive`，反馈也明确指出白色 change 不受 RGB 支持。唯一
+失败是模型把几何回显缩写为 `"white"`。解析器现在只把 white/black 展开为协议全名后核对
+Environment geometry；Qwen 生成的 FP 结论保持原样。

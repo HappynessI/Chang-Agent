@@ -262,6 +262,7 @@ class QwenVerifierTest(unittest.TestCase):
         proposals = attach_verifier_regions(state)
         regions = rich_regions(proposals)
         for item in regions["regions"]:
+            item["change_mask_state"] = "WHITE"
             item["target_view"] = "T1"
             item["suggested_action"] = "null"
         global_decision = synthesis()

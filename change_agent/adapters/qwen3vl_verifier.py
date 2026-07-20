@@ -1040,6 +1040,23 @@ class Qwen3VLZeroShotVerifier:
             return None
         return cls._enum_token(value, allowed, name)
 
+    @classmethod
+    def _change_mask_state_token(cls, value: Any) -> str:
+        aliases = {
+            "white": "white_predicted_change",
+            "predicted_change": "white_predicted_change",
+            "black": "black_predicted_unchanged",
+            "predicted_unchanged": "black_predicted_unchanged",
+        }
+        if isinstance(value, str):
+            normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+            value = aliases.get(normalized, normalized)
+        return cls._enum_token(
+            value,
+            {"white_predicted_change", "black_predicted_unchanged"},
+            "change_mask_state",
+        )
+
     def _parse_rich_region_payload(
         self, payload: dict[str, Any], proposals: list[dict[str, Any]]
     ) -> tuple[_RegionJudgment, ...]:
@@ -1066,10 +1083,8 @@ class Qwen3VLZeroShotVerifier:
             region_id = item["region_id"]
             if region_id not in by_id or region_id in parsed:
                 raise ValueError("regional diagnosis has an unknown or duplicate region_id")
-            change_mask_state = self._enum_token(
-                item["change_mask_state"],
-                {"white_predicted_change", "black_predicted_unchanged"},
-                "change_mask_state",
+            change_mask_state = self._change_mask_state_token(
+                item["change_mask_state"]
             )
             t1_state = self._enum_token(
                 item["t1_state"], self.RGB_STATES, "T1 RGB state"
