@@ -44,7 +44,7 @@ class AgentAction:
 @dataclass(frozen=True)
 class VerifierOutput:
     # ``quality_score`` remains optional for rule/trained baselines and old artifacts.
-    # The Qwen pairwise verifier deliberately leaves it unset.
+    # The rich Qwen verifier supplies it; older rule/trained outputs may leave it unset.
     quality_score: float | None = None
     score_delta: float = 0.0
     progress_score: float | None = None

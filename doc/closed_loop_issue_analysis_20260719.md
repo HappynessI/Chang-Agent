@@ -597,3 +597,20 @@ large-delta consensus gate 改为 uncertain；离线 IoU 虽会降至 0.78909026
 变化硬门拒绝。两者最终都保留 initial。最终聚合 IoU/F1 为 0.70117909/0.82434482，
 高于 initial 的 0.69744116/0.82175592，并且三个样本均未低于各自 initial。本轮结果
 达到既定验收条件，可作为下一阶段回归基线。
+## 2026-07-20 后续设计修正：Qwen 恢复为语义 Verifier
+
+上一版已经在三样本闭环中首次达到验收标准，因此用 Git 标签
+`closed-loop-effective-v1` 固化，作为有效但偏工程化的第一版闭环基线。它解决了候选
+重复裁决、覆盖缺失、局部灾难和输出截断问题，但把 Qwen 收缩为
+`building/background/mixed/uncertain` 分类器，再由程序决定 FP/FN 与 better/worse，确实
+弱化了最初希望 Verifier 承担的语义诊断和纠错职责，尤其无法正面处理 mixed/uncertain。
+
+新协议恢复三类 Qwen 责任：初始局部错误诊断、候选 delta 效果诊断、全局质量/进度/
+better-worse/纠错综合。局部输出重新包含详细自然语言证据、置信度、严重度、目标时相和
+建议动作；全局输出由 Qwen 对有益和有害部分进行权衡。程序不再执行“全部有益才 better、
+出现 mixed 就 uncertain”规则，只保留可验证的结构和安全边界。1024 token 预算保持不变，
+并通过局部分批加一次全局综合控制单次长度。
+
+这不是取消安全机制：Environment 仍保证区域真实存在、delta 全覆盖、region ID 到坐标的
+精确映射、added/removed 标签方向一致；闭环仍保留 identical-state、SHA256 缓存、重复动作
+拒绝、rollback、locality 与面积硬门。区别是这些机制不再替 Qwen 做视觉语义判断。

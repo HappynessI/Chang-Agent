@@ -96,9 +96,9 @@ class Trajectory:
         ]
         if not accepted:
             return self.entries[0]
-        # Pairwise candidates form a monotonic accepted chain: only ``better`` is
-        # committed, so the latest accepted entry is the best without inventing an
-        # absolute scalar score. Legacy score-based verifiers retain old behavior.
+        # Pairwise candidates form a monotonic accepted chain: only Qwen-judged
+        # ``better`` candidates are committed, so the latest accepted entry remains
+        # the closed-loop best. Rich quality scores are retained for audit/history.
         if any(item.verifier.comparison is not None for item in accepted):
             return accepted[-1]
         return max(

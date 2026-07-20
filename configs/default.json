@@ -13,14 +13,13 @@
   "t12_min_instance_area": 0,
   "cd_min_instance_area": 0,
   "verifier": {
-    "type": "qwen3vl_compact_delta_effect_zero_shot",
+    "type": "qwen3vl_rich_region_synthesis_zero_shot",
     "shared_agent_weights": true,
     "max_new_tokens": 1024,
     "max_initial_regions_per_batch": 6,
     "max_delta_regions_per_batch": 3,
-    "max_unilateral_delta_ratio": 0.05,
-    "candidate_evidence_modes": ["mask_context", "rgb_temporal_state"],
-    "decision": "programmatic_initial_and_batched_candidate_from_rgb_temporal_state"
+    "candidate_evidence_modes": ["rich_delta_diagnosis", "global_synthesis"],
+    "decision": "qwen_diagnosis_quality_progress_comparison_and_correction"
   },
   "seed": 42
 }

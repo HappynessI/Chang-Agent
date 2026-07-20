@@ -25,8 +25,9 @@ The current code implements the v0–v3 research skeleton:
 - SimpleClick point and SAM3 box boundaries;
 - per-step instance extraction, default OmniOVCD overlap-presence matching, optional
   one-to-one greedy ablation, and change-mask reconstruction;
-- a region-grounded Qwen3-VL zero-shot Verifier with elementary T1/T2 RGB-state labels
-  and programmatic initial/candidate decisions that shares the Agent model weights, plus a
+- a region-grounded Qwen3-VL zero-shot Verifier that produces rich local diagnoses and
+  directly synthesizes quality, progress, candidate comparison, and correction while sharing
+  the Agent model weights, plus a
   transparent rule Verifier ablation and a legacy trainable
   frozen-feature Verifier head for offline quality/error-map/error-type experiments;
 - offline GT perturbations for Verifier supervision;
@@ -62,58 +63,36 @@ separately validated latent/tool-ranking objective.
 
 ## Verifier feedback boundary
 
-- Initial verification keeps every auditable connected component from the current
-  change mask and T1/T2 object-mask XOR, assigns stable `rN` identifiers, and sends at
-  most six components per Qwen batch. Candidate verification likewise keeps every
-  added/removed delta component, assigns stable `dN` identifiers, and sends at most
-  three per batch. Neither batch size is a lossy global cap; covered pixels must equal
-  the complete initial audit or candidate delta.
-- Initial Qwen calls see T1/T2 RGB with a one-pixel yellow ring outside the exact audit
-  component, plus its binary geometry and raw RGB difference. The ring never overwrites
-  audited RGB pixels or enters the difference image. Predicted masks, change status,
-  FP/FN semantics, and target views are hidden. Responses contain only
-  `[t1_state,t2_state]` using `building`, `background`, `mixed`, or `uncertain`;
-  per-region prose is not requested.
-- Initial audit coverage is measured over current change pixels plus mask-derived missing
-  pixels. Uncovered pixels receive a deterministic box and prevent initial `finish`, even
-  when every inspected proposal is supported. Runtime code combines RGB states with
-  Environment-owned `present/missing` geometry to derive `true_change`, FP, FN,
-  no-error, or uncertain; therefore an existing white component cannot become FN by a
-  model-generated abstract label.
-- Target view, suggested action, and point coordinate are derived rather than generated.
-  Point feedback carries the exact connected-component seed as a degenerate normalized
-  `error_region`; the Agent is instructed to copy that Environment-owned anchor exactly.
-  When several actionable components have the same error class, the runtime starts with
-  the smallest component to bound the impact of an imperfect visual judgment.
-  For example, an
-  unchanged background in one spurious predicted view maps to a negative point there,
-  while an unchanged building missing from the opposite predicted view maps to a
-  positive point in that missing view. Ambiguous matching cases map to a box.
-- Qwen no longer outputs candidate `better/worse`. The runtime derives it
-  deterministically: true-change additions and false-positive removals are beneficial;
-  false-change additions and true-change removals are harmful; mixed, conflicting, or
-  uncertain judgments are rejected.
-  `quality_score` and `progress_score` remain `null`.
-- Every candidate component has two evidence records. The mask-context pass emits an
-  advisory effect label. The decisive pass sees clean T1/T2 RGB and the exact binary
-  delta, with the same external yellow ring for correspondence, then emits only the two
-  elementary temporal states. Runtime code combines
-  those states with added/removed polarity to derive the effect. A mask-context
-  disagreement or malformed advisory response remains auditable but cannot filter an
-  RGB-supported small beneficial edit; mixed/uncertain RGB evidence still rejects safely.
-  If the complete delta or any one component exceeds 5% of the previous change mask,
-  mask-context and RGB effects must agree. This large-edit consensus guard prevents one
-  uncertain semantic judgment from deleting a dominant component while preserving the
-  small false-positive corrections observed in prior runs.
-- `error_type`, `error_region`, `suggested_action`, and stop are derived by the runtime
-  from RGB states, predicted-mask occupancy, and Environment boxes. False negatives map
-  to a positive point; false positives use either a negative point for a spurious object
-  or a positive point for a missing unchanged counterpart; mixed/uncertain results use a
-  box, and fully supported proposals finish. Invalid analysis cannot authorize action or stop.
-- A valid, error-free initial state may finish without a redundant tool action. The
-  saved-candidate replay challenge in `tools/replay_verifier_challenge.py` evaluates
-  delta-effect decisions without exposing GT to the Verifier. Replay reconstructs the
-  accepted-state chain and requires online/replay mask hashes to match before scoring.
+- The Environment still owns geometry: it enumerates every auditable initial component or
+  candidate added/removed component, gives it a stable rN/dN identifier, measures exact
+  pixel coverage, and batches panels without dropping the remaining components.
+- Qwen is again the semantic Verifier rather than an elementary-state classifier. Its initial
+  regional pass diagnoses true_change, false_positive, false_negative, mixed, or
+  uncertain; it also returns the target view, proposed correction, confidence, severity, and
+  one-to-three sentences explaining the local visual evidence.
+- Candidate regional passes diagnose the actual action delta as added_true_change,
+  added_false_change, removed_false_positive, removed_true_change, mixed, or
+  uncertain, again with a corrective proposal and detailed feedback. A mixed component must
+  describe both its beneficial and harmful portions instead of being automatically rejected.
+- A separate Qwen global-synthesis call sees the images, current/previous masks, authoritative
+  geometry facts, action, and every local diagnosis. Qwen directly returns quality_score,
+  progress_score, better/worse/unchanged/uncertain, the main remaining error, an exact
+  region ID, and the next correction. Thus mixed, uncertainty, or simultaneous beneficial and
+  harmful evidence are weighed by the Verifier rather than collapsed by a program rule.
+- Runtime checks are deliberately limited to protocol and safety invariants: exact JSON schema,
+  enums/ranges, complete region coverage, valid region IDs, added/removed polarity, the fact that
+  an already-white component cannot be a false negative, exact region-to-coordinate conversion,
+  identical-state handling, SHA256 decision caching, rollback, and locality/area hard gates.
+  Runtime code does not infer semantic better/worse from effect labels.
+- The Verifier generation ceiling remains 1024 tokens. Rich outputs are split into bounded local
+  batches followed by one global synthesis, so Qwen has room for reasoning without silently
+  omitting components.
+- An initial state can finish only when Qwen reports no remaining error and its quality score meets
+  the configured threshold. A candidate is semantically accepted only when Qwen calls it
+  better; it may still contain a localized remaining error, in which case the accepted state
+  continues with Qwen's next correction. Invalid output never authorizes an action or stop.
+- The saved-candidate replay challenge in tools/replay_verifier_challenge.py reconstructs the
+  accepted-state chain and requires online/replay mask hashes to match before offline GT scoring.
 
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
 policies. All attempted candidate masks are retained, and initial, verifier-best,

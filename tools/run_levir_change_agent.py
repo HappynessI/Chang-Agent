@@ -86,15 +86,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verifier-max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument("--verifier-retries", type=int, default=2)
-    parser.add_argument(
-        "--verifier-max-unilateral-delta-ratio",
-        type=float,
-        default=0.05,
-        help=(
-            "Largest fraction of the previous change mask that RGB evidence may "
-            "approve without matching mask-context evidence."
-        ),
-    )
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--tool-device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -200,15 +191,12 @@ def main() -> None:
                 "agent": "Qwen3-VL-2B-Instruct",
                 "verifier": args.verifier,
                 "verifier_decision_mode": (
-                    "rgb_temporal_state_initial_and_batched_delta_effect"
+                    "qwen_rich_region_diagnosis_and_global_synthesis"
                     if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
                 "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
-                "verifier_max_unilateral_delta_ratio": (
-                    args.verifier_max_unilateral_delta_ratio
-                ),
                 "verifier_candidate_evidence_modes": list(
                     Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
                 )
@@ -365,9 +353,6 @@ def _build_verifier(args: argparse.Namespace, qwen: GroundingModelQwen3VL):
         max_new_tokens=args.verifier_max_new_tokens,
         accept_threshold=args.verifier_accept_threshold,
         max_retries=args.verifier_retries,
-        max_delta_component_ratio_without_consensus=(
-            args.verifier_max_unilateral_delta_ratio
-        ),
     )
 
 
@@ -521,15 +506,12 @@ def _base_manifest(
         "verifier": args.verifier,
         "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
         "verifier_decision_mode": (
-            "rgb_temporal_state_initial_and_batched_delta_effect"
+            "qwen_rich_region_diagnosis_and_global_synthesis"
             if args.verifier == "qwen_zero_shot"
             else "legacy_rule_score"
         ),
         "verifier_max_initial_regions_per_batch": args.verifier_max_regions,
         "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
-        "verifier_max_unilateral_delta_ratio": (
-            args.verifier_max_unilateral_delta_ratio
-        ),
         "verifier_candidate_evidence_modes": list(
             Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
         )

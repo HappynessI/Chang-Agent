@@ -221,7 +221,7 @@ def replay_run(
     summary = _summary(samples)
     metrics = json.loads((run_dir / "per_sample_metrics.json").read_text())
     return {
-        "decision_mode": "batched_rgb_temporal_state_effect_then_programmatic_comparison",
+        "decision_mode": "qwen_rich_delta_diagnosis_then_global_synthesis",
         "gt_policy": "GT opened only after every verifier output for a sample",
         "run_dir": str(run_dir),
         "samples": samples,

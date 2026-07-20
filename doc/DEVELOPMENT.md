@@ -1,5 +1,40 @@
 # Development log
 
+## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
+
+The first closed-loop result that met the acceptance criteria is preserved as the
+annotated Git tag `closed-loop-effective-v1`. The tag and `main` were pushed before
+this redesign; both resolved to `a39d3510ca63f9dbbdd0f93bccef13cd9942b1c4` at that
+point. Its accepted GPU artifact remains
+`change_agent_levir_gpu_closed_loop_20260719_151344` (job 41410): aggregate IoU
+`0.70117909`, exact audit coverage, and no per-sample regression. This gives the compact,
+programmatic Verifier a reproducible rollback/reference point.
+
+The next design deliberately restores Qwen as the semantic error-diagnosis and correction
+core while retaining the 1024-token ceiling:
+
+- Initial batched calls now output rich region records: FP/FN/true-change/mixed/uncertain,
+  target view, proposed correction, confidence, severity, and diagnostic prose.
+- Candidate batched calls explain each exact added/removed delta, including beneficial and
+  harmful subparts of a mixed component, rather than reducing it to two temporal-state words.
+- A separate global Qwen call directly emits quality and progress scores, candidate
+  better/worse/unchanged/uncertain, the principal remaining error, exact region ID, next action,
+  and a multi-sentence rationale. Mixed or conflicting evidence is not automatically rejected;
+  Qwen must weigh it and make the global decision.
+- The removed runtime path no longer maps elementary state/effect labels to semantic verdicts or
+  better/worse. Runtime authority is limited to schema/range checks, complete coverage, valid
+  region/polarity constraints, exact Environment geometry, identical-state handling, caching,
+  rollback, and locality/area hard gates.
+- Rich output remains bounded by batching all regions and then requesting one synthesis. Candidate
+  cache identity includes the new schema, 1024-token setting, threshold, masks, action, facts,
+  regions, query, images, and model identity, so old compact decisions cannot be reused.
+
+CPU regression coverage was rewritten around this boundary: Qwen-owned scores and finish,
+FP/FN geometry constraints, mixed-but-better acceptance, harmful rejection, full multi-batch
+coverage, synthesis region validation, invalid-output fail-safe, identical/cached decisions,
+prompt contents, and the 1024-token generation argument. A GPU result is not claimed for the
+new rich protocol until a separate closed-loop run is requested and completed.
+
 ## 2026-07-19 — accepted three-sample GPU validation
 
 GPU job `41410` (`change_agent_levir_gpu_closed_loop_20260719_151344`) validated commit
