@@ -73,6 +73,28 @@ local advisory target/actions so Qwen must independently plan the final correcti
 asks Qwen itself to favor compact high-confidence errors and calibrate quality over the full
 mask. There is still no programmatic semantic ranking or mixed rejection rule.
 
+Job `41505` evaluated this clean-panel v10 at commit `6bf9360` and completed in 385 seconds.
+It produced the first effective rich-Verifier result: aggregate IoU improved from
+`0.69744116` to `0.69816521` with no sample regression. `test_20_15` improved from
+`0.84638554` to `0.84746063`, and `test_85_16` improved from `0.30658070` to
+`0.31478642`; `test_78_13` retained its initial mask. Qwen directly accepted both beneficial
+candidates as `better`, while hard gates and Qwen `unchanged` rejected the others.
+
+The result is useful but not yet semantically satisfactory. Every initial present component
+(8, 8, and 19 regions) was still labeled `true_change` with near-constant 0.95 confidence.
+Candidate regions likewise defaulted to the first allowed `added_true_change` label and sometimes
+described the identical yellow correspondence ring as brightness evidence. This shows label-order
+anchoring rather than grounded mixed/error reasoning, even though the final accepted edits happened
+to improve offline IoU. Aggregate performance also remains below the preserved compact baseline
+`0.70117909`.
+
+The v11 protocol removes colored outlines entirely: top tiles are unannotated clean RGB at identical
+crop coordinates, and the separate binary geometry locates the evaluated pixels. Before emitting
+its rich verdict/effect, Qwen must record `t1_state` and `t2_state` as building, background, mixed,
+or uncertain. These states and the final semantic verdict are all Qwen outputs and are passed to
+global synthesis. Runtime validates their schemas but deliberately does not map state pairs to
+FP/FN or better/worse, preserving the Verifier's core responsibility.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

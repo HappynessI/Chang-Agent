@@ -20,6 +20,8 @@ from ..verifier_regions import attach_verifier_regions
 @dataclass(frozen=True)
 class _RegionJudgment:
     region_id: str
+    t1_state: str
+    t2_state: str
     verdict: str
     target_view: str | None
     feedback: str
@@ -31,6 +33,8 @@ class _RegionJudgment:
 @dataclass(frozen=True)
 class _EffectJudgment:
     region_id: str
+    t1_state: str
+    t2_state: str
     effect: str
     target_view: str | None = None
     suggested_action: str | None = None
@@ -59,7 +63,7 @@ class Qwen3VLZeroShotVerifier:
     candidate comparison, and the next corrective action.
     """
 
-    SCHEMA_VERSION = "clean_rgb_single_region_rich_synthesis_v10"
+    SCHEMA_VERSION = "grounded_rgb_states_rich_synthesis_v11"
     CANDIDATE_EVIDENCE_MODES = ("rich_delta_diagnosis", "global_synthesis")
     ERROR_TYPES = {
         "none",
@@ -78,6 +82,7 @@ class Qwen3VLZeroShotVerifier:
         "uncertain",
     }
     ACTIONS = {"positive_point", "negative_point", "box", "finish"}
+    RGB_STATES = {"building", "background", "mixed", "uncertain"}
     EFFECT_LABELS = {
         "added_true_change",
         "added_false_change",
@@ -199,6 +204,8 @@ class Qwen3VLZeroShotVerifier:
             "region_judgments": [
                 {
                     "region_id": item.region_id,
+                    "t1_state": item.t1_state,
+                    "t2_state": item.t2_state,
                     "verdict": item.verdict,
                     "target_view": item.target_view,
                     "feedback": item.feedback,
@@ -361,6 +368,8 @@ class Qwen3VLZeroShotVerifier:
             "effect_judgments": [
                 {
                     "region_id": item.region_id,
+                    "t1_state": item.t1_state,
+                    "t2_state": item.t2_state,
                     "effect": item.effect,
                     "target_view": item.target_view,
                     "suggested_action": item.suggested_action,
@@ -703,11 +712,16 @@ class Qwen3VLZeroShotVerifier:
             "region without real RGB building change; false_negative only for a black region "
             "that misses real RGB building change; mixed when the exact component contains both "
             "correct and erroneous parts; uncertain only when visual evidence cannot decide. "
-            "target_view means the predicted temporal object mask to EDIT so the final change "
+            "Before choosing a verdict, independently record the clean-RGB state at the exact "
+            "component pixels in T1 and T2 as building, background, mixed, or uncertain. Same "
+            "decisive states normally mean no real building change; different decisive states "
+            "normally mean a real appearance/disappearance. These state fields are supporting "
+            "evidence, but you still own the final error verdict. target_view means the predicted "
+            "temporal object mask to EDIT so the final change "
             "mask becomes correct, not merely the image where a building is visible. For mixed, "
             "explain the beneficial and harmful subparts and their relative importance. Return exactly "
             "{\"regions\":[...]} with one item per supplied region. Every item must contain only "
-            "region_id, verdict, target_view (t1/t2/null), suggested_action "
+            "region_id, t1_state, t2_state, verdict, target_view (t1/t2/null), suggested_action "
             "(positive_point/negative_point/box/null), confidence (0..1), severity (0..1), and "
             "feedback (one or two concise diagnostic sentences; do not repeat phrases). "
             "Write lowercase enum values and literal JSON null, never strings such as \"T1\" or "
@@ -740,12 +754,12 @@ class Qwen3VLZeroShotVerifier:
             }
             audit_kind = proposal.get("audit_kind")
             public_proposal["audit_kind"] = audit_kind
-            public_proposal["allowed_verdicts"] = (
-                ["true_change", "false_positive", "mixed", "uncertain"]
+            public_proposal["geometry_rule"] = (
+                "currently white: false_negative and correct_unchanged are impossible"
                 if audit_kind == "present"
-                else ["correct_unchanged", "false_negative", "mixed", "uncertain"]
+                else "currently black: true_change and false_positive are impossible"
                 if audit_kind == "missing"
-                else ["mixed", "uncertain"]
+                else "geometry is mixed; inspect cautiously"
             )
             content.extend(
                 [
@@ -754,11 +768,12 @@ class Qwen3VLZeroShotVerifier:
                         "text": (
                             f"Initial audit proposal {proposal['region_id']}: "
                             f"{json.dumps(public_proposal, ensure_ascii=False)}. "
-                            "Panel layout: top-left is CLEAN T1 RGB, top-right is CLEAN T2 RGB; "
-                            "the yellow ring lies outside and identifies the exact component. "
-                            "Bottom-left is binary component geometry and bottom-right is "
+                            "Panel layout: top-left is CLEAN T1 RGB and top-right is CLEAN T2 RGB "
+                            "at identical crop coordinates, with no colored annotation. "
+                            "Bottom-left is the exact binary component geometry and bottom-right is "
                             "amplified raw RGB difference. Bottom tiles are diagnostic data, "
-                            "not scene colors. Judge only RGB pixels inside the yellow ring."
+                            "not scene colors. Use bottom-left only to locate which clean RGB "
+                            "pixels to judge."
                         ),
                     },
                     {"type": "image", "image": self._rgb_initial_panel(state, proposal)},
@@ -784,7 +799,9 @@ class Qwen3VLZeroShotVerifier:
         prompt = (
             "Act as the candidate-error verifier. Diagnose each exact added/removed delta using "
             "the RGB images, previous/candidate masks, local panel, action, and geometry. Do not "
-            "collapse mixed evidence to uncertain: describe which parts improve and which parts "
+            "First independently record t1_state and t2_state at the exact delta pixels using "
+            "only clean RGB. Then diagnose the candidate effect. Do not collapse mixed evidence "
+            "to uncertain: describe which parts improve and which parts "
             "damage the FINAL CHANGE MASK and which side dominates so a later global synthesis "
             "can weigh them. An added region is newly white: added_true_change means RGB supports "
             "the new change and added_false_change means it does not. A removed region is newly "
@@ -792,7 +809,7 @@ class Qwen3VLZeroShotVerifier:
             "removed_true_change means a real change was wrongly removed. Do not reinterpret "
             "object-mask occupancy as candidate-delta polarity. Return exactly "
             "{\"regions\":[...]} with one item per supplied region. Each item contains only "
-            "region_id, effect (added_true_change/added_false_change/removed_false_positive/"
+            "region_id, t1_state, t2_state, effect (added_true_change/added_false_change/removed_false_positive/"
             "removed_true_change/mixed/uncertain), target_view (t1/t2/null), suggested_action "
             "(positive_point/negative_point/box/finish/null), confidence (0..1), severity (0..1), "
             "and feedback (one or two concise diagnostic sentences; do not repeat phrases). "
@@ -825,8 +842,8 @@ class Qwen3VLZeroShotVerifier:
                         "text": (
                             f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
                             f"{json.dumps(proposal, ensure_ascii=False)}. Panel layout: top-left "
-                            "is CLEAN T1 RGB, top-right is CLEAN T2 RGB; the yellow ring lies "
-                            "outside and identifies the exact delta component. Bottom-left is "
+                            "is CLEAN T1 RGB and top-right is CLEAN T2 RGB at identical crop "
+                            "coordinates, with no colored annotation. Bottom-left is "
                             "binary delta geometry and bottom-right is amplified raw RGB "
                             "difference. Bottom tiles are diagnostic data, not scene colors."
                         ),
@@ -864,6 +881,8 @@ class Qwen3VLZeroShotVerifier:
                 summaries.append(
                     {
                         "region_id": item.region_id,
+                        "t1_state": item.t1_state,
+                        "t2_state": item.t2_state,
                         "verdict": item.verdict,
                         "audit_kind": proposal.get("audit_kind"),
                         "component_area": proposal.get("component_area"),
@@ -891,6 +910,8 @@ class Qwen3VLZeroShotVerifier:
                 summaries.append(
                     {
                         "region_id": item.region_id,
+                        "t1_state": item.t1_state,
+                        "t2_state": item.t2_state,
                         "effect": item.effect,
                         "effect_kind": proposal.get("effect_kind"),
                         "component_area": proposal.get("component_area"),
@@ -995,6 +1016,8 @@ class Qwen3VLZeroShotVerifier:
         expected = [item["region_id"] for item in proposals]
         expected_fields = {
             "region_id",
+            "t1_state",
+            "t2_state",
             "verdict",
             "target_view",
             "suggested_action",
@@ -1010,6 +1033,12 @@ class Qwen3VLZeroShotVerifier:
             region_id = item["region_id"]
             if region_id not in by_id or region_id in parsed:
                 raise ValueError("regional diagnosis has an unknown or duplicate region_id")
+            t1_state = self._enum_token(
+                item["t1_state"], self.RGB_STATES, "T1 RGB state"
+            )
+            t2_state = self._enum_token(
+                item["t2_state"], self.RGB_STATES, "T2 RGB state"
+            )
             verdict = self._enum_token(
                 item["verdict"], self.REGION_VERDICTS, "regional verdict"
             )
@@ -1035,6 +1064,8 @@ class Qwen3VLZeroShotVerifier:
                 raise ValueError("a present change-mask component cannot be correct_unchanged")
             parsed[region_id] = _RegionJudgment(
                 region_id=region_id,
+                t1_state=t1_state,
+                t2_state=t2_state,
                 verdict=verdict,
                 target_view=target_view,
                 feedback=feedback.strip(),
@@ -1054,6 +1085,8 @@ class Qwen3VLZeroShotVerifier:
         expected = [item["region_id"] for item in proposals]
         expected_fields = {
             "region_id",
+            "t1_state",
+            "t2_state",
             "effect",
             "target_view",
             "suggested_action",
@@ -1069,6 +1102,12 @@ class Qwen3VLZeroShotVerifier:
             region_id = item["region_id"]
             if region_id not in by_id or region_id in parsed:
                 raise ValueError("delta diagnosis has an unknown or duplicate region_id")
+            t1_state = self._enum_token(
+                item["t1_state"], self.RGB_STATES, "T1 RGB state"
+            )
+            t2_state = self._enum_token(
+                item["t2_state"], self.RGB_STATES, "T2 RGB state"
+            )
             effect = self._enum_token(
                 item["effect"], self.EFFECT_LABELS, "candidate effect label"
             )
@@ -1089,6 +1128,8 @@ class Qwen3VLZeroShotVerifier:
                 raise ValueError("delta feedback must be a non-empty string")
             parsed[region_id] = _EffectJudgment(
                 region_id=region_id,
+                t1_state=t1_state,
+                t2_state=t2_state,
                 effect=effect,
                 target_view=target_view,
                 suggested_action=action,
@@ -1285,7 +1326,7 @@ class Qwen3VLZeroShotVerifier:
         proposal: dict[str, Any],
         panel_size: int = 192,
     ) -> Image.Image:
-        """Show outlined RGB evidence, exact delta geometry, and raw difference."""
+        """Show clean RGB evidence, exact delta geometry, and raw difference."""
 
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
@@ -1294,8 +1335,8 @@ class Qwen3VLZeroShotVerifier:
         )[region]
         raw_t1 = state.t1_image[region]
         raw_t2 = state.t2_image[region]
-        t1 = Qwen3VLZeroShotVerifier._outline_component(raw_t1, delta)
-        t2 = Qwen3VLZeroShotVerifier._outline_component(raw_t2, delta)
+        t1 = np.array(raw_t1, dtype=np.uint8, copy=True)
+        t2 = np.array(raw_t2, dtype=np.uint8, copy=True)
         delta_rgb = np.repeat((delta.astype(np.uint8) * 255)[..., None], 3, axis=2)
         absolute_difference = np.abs(
             raw_t2.astype(np.int16) - raw_t1.astype(np.int16)
@@ -1322,7 +1363,7 @@ class Qwen3VLZeroShotVerifier:
         proposal: dict[str, Any],
         panel_size: int = 192,
     ) -> Image.Image:
-        """Show outlined RGB evidence and exact initial component geometry."""
+        """Show clean RGB evidence and exact initial component geometry."""
 
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
@@ -1331,8 +1372,8 @@ class Qwen3VLZeroShotVerifier:
         )[region]
         raw_t1 = state.t1_image[region]
         raw_t2 = state.t2_image[region]
-        t1 = Qwen3VLZeroShotVerifier._outline_component(raw_t1, component)
-        t2 = Qwen3VLZeroShotVerifier._outline_component(raw_t2, component)
+        t1 = np.array(raw_t1, dtype=np.uint8, copy=True)
+        t2 = np.array(raw_t2, dtype=np.uint8, copy=True)
         component_rgb = np.repeat(
             (component.astype(np.uint8) * 255)[..., None], 3, axis=2
         )

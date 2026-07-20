@@ -632,3 +632,10 @@ comparison、score 或 correction 的语义。
 `true_change`。v10 改为每次只看一个精确区域；上排仅保留黄色外轮廓的干净 T1/T2 RGB，
 下排明确为二值几何和原始差分。全局 Qwen 获取 region 面积、框、极性和长诊断，但不再
 接收局部阶段容易产生锚定的 advisory action，最终 target/action 仍由 Qwen 独立规划。
+
+作业 `41505` 的 aggregate IoU 达到 `0.69816521`，并在 `test_20_15`、`test_85_16`
+接受了真实有益候选，说明 rich synthesis 已具备工作能力。但所有 initial 区域仍机械输出
+`true_change`，candidate 也倾向首个 `added_true_change`，甚至把两时相共有的黄色定位环
+当作亮度变化。v11 因此去掉全部彩色 RGB 标注，要求 Qwen 先输出局部 `t1_state/t2_state`，
+再直接给出 FP/FN/true/mixed 或 candidate effect。状态只作为 Qwen 自己的可审计依据链，
+程序不会根据状态对推理结果做语义映射。

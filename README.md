@@ -70,7 +70,9 @@ separately validated latent/tool-ranking objective.
   regional pass diagnoses true_change, correct_unchanged, false_positive, false_negative,
   mixed, or uncertain against the final change mask; it also returns the target view,
   proposed correction, confidence, severity, and
-  one-to-three sentences explaining the local visual evidence.
+  one-to-three sentences explaining the local visual evidence. Each rich diagnosis also records
+  T1/T2 building/background/mixed/uncertain states as an explicit grounding chain; runtime does
+  not derive the verdict from these states.
 - Candidate regional passes diagnose the actual action delta as added_true_change,
   added_false_change, removed_false_positive, removed_true_change, mixed, or
   uncertain, again with a corrective proposal and detailed feedback. A mixed component must
@@ -86,7 +88,8 @@ separately validated latent/tool-ranking objective.
   identical-state handling, SHA256 decision caching, rollback, and locality/area hard gates.
   Runtime code does not infer semantic better/worse from effect labels.
 - The Verifier generation ceiling remains 1024 tokens. Rich diagnosis uses one exact local
-  region per call followed by one global synthesis, so Qwen can focus on clean RGB evidence and has
+  region per call followed by one global synthesis. The local panel contains unannotated clean
+  T1/T2 RGB, separate binary geometry, and raw difference, so Qwen can focus on evidence and has
   room for reasoning without silently omitting components. Verifier generation is deterministic
   with a small repetition penalty; these settings are part of the decision-cache identity.
 - An initial state can finish only when Qwen reports no remaining error and its quality score meets

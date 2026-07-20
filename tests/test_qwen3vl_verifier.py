@@ -2,6 +2,7 @@ import json
 import unittest
 
 import numpy as np
+from PIL import Image
 
 from change_agent.adapters.qwen3vl_verifier import Qwen3VLZeroShotVerifier
 from change_agent.state import AgentAction, ChangeState
@@ -60,11 +61,15 @@ def rich_regions(
     confidence=0.92,
     severity=0.1,
     feedback="The exact RGB evidence supports this local diagnosis.",
+    t1_state="background",
+    t2_state="building",
 ):
     return {
         "regions": [
             {
                 "region_id": item["region_id"],
+                "t1_state": t1_state,
+                "t2_state": t2_state,
                 "verdict": verdict,
                 "target_view": target_view,
                 "suggested_action": action,
@@ -86,11 +91,15 @@ def rich_effects(
     confidence=0.88,
     severity=0.2,
     feedback="The candidate delta improves the local change boundary.",
+    t1_state="background",
+    t2_state="building",
 ):
     return {
         "regions": [
             {
                 "region_id": item["region_id"],
+                "t1_state": t1_state,
+                "t2_state": t2_state,
                 "effect": effect,
                 "target_view": target_view,
                 "suggested_action": action,
@@ -645,7 +654,14 @@ class QwenVerifierTest(unittest.TestCase):
             if item["type"] == "image" and item["image"].size == (384, 384)
         ]
         panel = np.asarray(local_panels[0])
-        self.assertTrue(np.any(np.all(panel[:192, :192] == [255, 255, 0], axis=2)))
+        x1, y1, x2, y2 = proposals[0]["box_pixels"]
+        expected_crop = np.asarray(state.t1_image)[y1 : y2 + 1, x1 : x2 + 1]
+        expected_resized = np.asarray(
+            Qwen3VLZeroShotVerifier._as_image(expected_crop).resize(
+                (192, 192), Image.Resampling.BILINEAR
+            )
+        )
+        np.testing.assert_array_equal(panel[:192, :192], expected_resized)
         self.assertFalse(np.any(np.all(panel[:192, :192] == [140, 0, 140], axis=2)))
 
         judgments = tuple(
