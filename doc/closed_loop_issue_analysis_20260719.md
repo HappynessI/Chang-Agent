@@ -651,3 +651,7 @@ comparison、score 或 correction 的语义。
 background/background -> false_positive`，反馈也明确指出白色 change 不受 RGB 支持。唯一
 失败是模型把几何回显缩写为 `"white"`。解析器现在只把 white/black 展开为协议全名后核对
 Environment geometry；Qwen 生成的 FP 结论保持原样。
+
+作业 `41508` 表明 focus tile 的外部压暗会诱导 Qwen 输出 `dark/dark`，而 dark 不能安全映射
+成 building/background。v13 删除 focus 和所有 RGB 标注，只提供逐字节不变的 T1/T2 crop、
+独立二值 geometry 和 raw difference；状态链、长诊断和 Qwen 全局决策职责保持不变。

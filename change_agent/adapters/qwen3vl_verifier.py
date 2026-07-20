@@ -65,7 +65,7 @@ class Qwen3VLZeroShotVerifier:
     candidate comparison, and the next corrective action.
     """
 
-    SCHEMA_VERSION = "mask_state_grounded_focused_rgb_synthesis_v12"
+    SCHEMA_VERSION = "mask_state_grounded_unmodified_rgb_synthesis_v13"
     CANDIDATE_EVIDENCE_MODES = ("rich_delta_diagnosis", "global_synthesis")
     ERROR_TYPES = {
         "none",
@@ -788,12 +788,11 @@ class Qwen3VLZeroShotVerifier:
                         "text": (
                             f"Initial audit proposal {proposal['region_id']}: "
                             f"{json.dumps(public_proposal, ensure_ascii=False)}. "
-                            "Panel layout: top-left is CLEAN T1 RGB, top-center is CLEAN T2 RGB, "
-                            "and top-right is exact binary geometry. Bottom-left/bottom-center "
-                            "repeat T1/T2 with pixels OUTSIDE the component darkened while all "
-                            "inside RGB pixels remain unchanged; bottom-right is amplified raw "
-                            "RGB difference. Geometry/focus/difference tiles are diagnostic data, "
-                            "not scene colors."
+                            "Panel layout: top-left is unmodified CLEAN T1 RGB, top-right is "
+                            "unmodified CLEAN T2 RGB, bottom-left is exact binary geometry, and "
+                            "bottom-right is amplified raw RGB difference. Geometry/difference "
+                            "tiles are diagnostic data, not scene colors. No RGB pixel has been "
+                            "outlined, recolored, masked, brightened, or darkened."
                         ),
                     },
                     {"type": "image", "image": self._rgb_initial_panel(state, proposal)},
@@ -866,10 +865,10 @@ class Qwen3VLZeroShotVerifier:
                         "text": (
                             f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
                             f"{json.dumps(proposal, ensure_ascii=False)}. Panel layout: top-left "
-                            "is CLEAN T1 RGB, top-center is CLEAN T2 RGB, and top-right is binary "
-                            "delta geometry. Bottom-left/bottom-center repeat T1/T2 with pixels "
-                            "OUTSIDE the delta darkened and inside RGB unchanged; bottom-right is "
-                            "amplified raw RGB difference. Diagnostic tiles are not scene colors."
+                            "is unmodified CLEAN T1 RGB, top-right is unmodified CLEAN T2 RGB, "
+                            "bottom-left is binary delta geometry, and bottom-right is amplified "
+                            "raw RGB difference. Diagnostic tiles are not scene colors. No RGB "
+                            "pixel has been outlined, recolored, masked, brightened, or darkened."
                         ),
                     },
                     {"type": "image", "image": self._rgb_delta_panel(state, previous_state, proposal)},
@@ -1408,8 +1407,6 @@ class Qwen3VLZeroShotVerifier:
         raw_t2 = state.t2_image[region]
         t1 = np.array(raw_t1, dtype=np.uint8, copy=True)
         t2 = np.array(raw_t2, dtype=np.uint8, copy=True)
-        focused_t1 = Qwen3VLZeroShotVerifier._focus_component(raw_t1, delta)
-        focused_t2 = Qwen3VLZeroShotVerifier._focus_component(raw_t2, delta)
         delta_rgb = np.repeat((delta.astype(np.uint8) * 255)[..., None], 3, axis=2)
         absolute_difference = np.abs(
             raw_t2.astype(np.int16) - raw_t1.astype(np.int16)
@@ -1419,16 +1416,14 @@ class Qwen3VLZeroShotVerifier:
             Image.fromarray(t1),
             Image.fromarray(t2),
             Image.fromarray(delta_rgb),
-            Image.fromarray(focused_t1),
-            Image.fromarray(focused_t2),
             Image.fromarray(absolute_difference),
         ]
-        canvas = Image.new("RGB", (panel_size * 3, panel_size * 2))
+        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
         for index, tile in enumerate(tiles):
             resample = Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
             canvas.paste(
                 tile.resize((panel_size, panel_size), resample),
-                ((index % 3) * panel_size, (index // 3) * panel_size),
+                ((index % 2) * panel_size, (index // 2) * panel_size),
             )
         return canvas
 
@@ -1449,8 +1444,6 @@ class Qwen3VLZeroShotVerifier:
         raw_t2 = state.t2_image[region]
         t1 = np.array(raw_t1, dtype=np.uint8, copy=True)
         t2 = np.array(raw_t2, dtype=np.uint8, copy=True)
-        focused_t1 = Qwen3VLZeroShotVerifier._focus_component(raw_t1, component)
-        focused_t2 = Qwen3VLZeroShotVerifier._focus_component(raw_t2, component)
         component_rgb = np.repeat(
             (component.astype(np.uint8) * 255)[..., None], 3, axis=2
         )
@@ -1462,28 +1455,16 @@ class Qwen3VLZeroShotVerifier:
             Image.fromarray(t1),
             Image.fromarray(t2),
             Image.fromarray(component_rgb),
-            Image.fromarray(focused_t1),
-            Image.fromarray(focused_t2),
             Image.fromarray(absolute_difference),
         ]
-        canvas = Image.new("RGB", (panel_size * 3, panel_size * 2))
+        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
         for index, tile in enumerate(tiles):
             resample = Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
             canvas.paste(
                 tile.resize((panel_size, panel_size), resample),
-                ((index % 3) * panel_size, (index // 3) * panel_size),
+                ((index % 2) * panel_size, (index // 2) * panel_size),
             )
         return canvas
-
-    @staticmethod
-    def _focus_component(rgb: np.ndarray, component: np.ndarray) -> np.ndarray:
-        """Keep component RGB exact while dimming unrelated crop context."""
-
-        image = np.asarray(rgb, dtype=np.uint8)
-        mask = np.asarray(component, dtype=bool)
-        focused = np.rint(image.astype(np.float32) * 0.2).astype(np.uint8)
-        focused[mask] = image[mask]
-        return focused
 
     @staticmethod
     def _outline_component(rgb: np.ndarray, component: np.ndarray) -> np.ndarray:

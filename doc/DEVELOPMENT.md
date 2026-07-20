@@ -129,6 +129,18 @@ their predicted-change variants) before checking it against the proposal. This i
 the existing T1/T2 case and JSON-null normalization: raw output is retained, and the Qwen
 `false_positive` verdict is neither created nor changed by runtime code.
 
+Job `41508` evaluated commit `25ddec4`. The white shorthand was accepted, but the added
+focus tiles caused a new evidence artifact: Qwen emitted `dark/dark` as RGB states for later
+regions because pixels outside the component had been deliberately dimmed. Since `dark` cannot
+be safely canonicalized to building or background, `test_20_15` stopped at region 1 and
+`test_78_13` at region 4; all samples retained the initial aggregate IoU `0.69744116`.
+
+The v13 panel removes focus tiles and every other RGB annotation. It contains only byte-identical
+T1/T2 crops, a separate binary geometry tile, and raw difference. The prompt explicitly states
+that no RGB pixel is outlined, recolored, masked, brightened, or darkened. The mask-state and
+T1/T2 reasoning fields remain unchanged, so this removes an artificial cue without weakening
+Qwen's diagnostic role.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

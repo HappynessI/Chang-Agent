@@ -667,7 +667,7 @@ class QwenVerifierTest(unittest.TestCase):
         local_panels = [
             item["image"]
             for item in messages[0]["content"]
-            if item["type"] == "image" and item["image"].size == (576, 384)
+            if item["type"] == "image" and item["image"].size == (384, 384)
         ]
         panel = np.asarray(local_panels[0])
         x1, y1, x2, y2 = proposals[0]["box_pixels"]
