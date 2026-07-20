@@ -59,7 +59,7 @@ class Qwen3VLZeroShotVerifier:
     candidate comparison, and the next corrective action.
     """
 
-    SCHEMA_VERSION = "rich_change_error_diagnosis_and_synthesis_v9"
+    SCHEMA_VERSION = "clean_rgb_single_region_rich_synthesis_v10"
     CANDIDATE_EVIDENCE_MODES = ("rich_delta_diagnosis", "global_synthesis")
     ERROR_TYPES = {
         "none",
@@ -753,10 +753,15 @@ class Qwen3VLZeroShotVerifier:
                         "type": "text",
                         "text": (
                             f"Initial audit proposal {proposal['region_id']}: "
-                            f"{json.dumps(public_proposal, ensure_ascii=False)}"
+                            f"{json.dumps(public_proposal, ensure_ascii=False)}. "
+                            "Panel layout: top-left is CLEAN T1 RGB, top-right is CLEAN T2 RGB; "
+                            "the yellow ring lies outside and identifies the exact component. "
+                            "Bottom-left is binary component geometry and bottom-right is "
+                            "amplified raw RGB difference. Bottom tiles are diagnostic data, "
+                            "not scene colors. Judge only RGB pixels inside the yellow ring."
                         ),
                     },
-                    {"type": "image", "image": self._region_panel(state, proposal)},
+                    {"type": "image", "image": self._rgb_initial_panel(state, proposal)},
                 ]
             )
         content.append({"type": "text", "text": prompt})
@@ -807,6 +812,10 @@ class Qwen3VLZeroShotVerifier:
             {"type": "image", "image": self._mask_image(previous_state.change_mask)},
             {"type": "text", "text": "Candidate final change mask:"},
             {"type": "image", "image": self._mask_image(state.change_mask)},
+            {"type": "text", "text": "Candidate predicted T1 object mask:"},
+            {"type": "image", "image": self._mask_image(state.t1_mask)},
+            {"type": "text", "text": "Candidate predicted T2 object mask:"},
+            {"type": "image", "image": self._mask_image(state.t2_mask)},
         ]
         for proposal in proposals:
             content.extend(
@@ -815,10 +824,14 @@ class Qwen3VLZeroShotVerifier:
                         "type": "text",
                         "text": (
                             f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
-                            f"{json.dumps(proposal, ensure_ascii=False)}"
+                            f"{json.dumps(proposal, ensure_ascii=False)}. Panel layout: top-left "
+                            "is CLEAN T1 RGB, top-right is CLEAN T2 RGB; the yellow ring lies "
+                            "outside and identifies the exact delta component. Bottom-left is "
+                            "binary delta geometry and bottom-right is amplified raw RGB "
+                            "difference. Bottom tiles are diagnostic data, not scene colors."
                         ),
                     },
-                    {"type": "image", "image": self._region_panel(state, proposal, previous_state)},
+                    {"type": "image", "image": self._rgb_delta_panel(state, previous_state, proposal)},
                 ]
             )
         content.append({"type": "text", "text": prompt})
@@ -842,43 +855,57 @@ class Qwen3VLZeroShotVerifier:
             else ""
         )
         if initial:
-            summaries = [
-                {
-                    "region_id": item.region_id,
-                    "verdict": item.verdict,
-                    "target_view": item.target_view,
-                    "suggested_action": item.suggested_action,
-                    "confidence": item.confidence,
-                    "severity": item.severity,
-                    "feedback": item.feedback,
-                }
-                for item in judgments
-                if isinstance(item, _RegionJudgment)
-            ]
+            summaries = []
+            proposal_by_id = {item["region_id"]: item for item in proposals}
+            for item in judgments:
+                if not isinstance(item, _RegionJudgment):
+                    continue
+                proposal = proposal_by_id[item.region_id]
+                summaries.append(
+                    {
+                        "region_id": item.region_id,
+                        "verdict": item.verdict,
+                        "audit_kind": proposal.get("audit_kind"),
+                        "component_area": proposal.get("component_area"),
+                        "box_normalized": proposal.get("box_normalized"),
+                        "confidence": item.confidence,
+                        "severity": item.severity,
+                        "feedback": item.feedback,
+                    }
+                )
             mode = (
                 "This is the initial state: comparison must be initial and progress_score must "
                 "be 0.0. Select the most useful next correction, including a mixed/uncertain "
-                "region when further correction can resolve it."
+                "region when further correction can resolve it. Independently plan the final "
+                "target/action from RGB and geometry; local target/action suggestions are not "
+                "part of the synthesis evidence. Prefer a compact, high-confidence "
+                "error over a large or uncertain edit."
             )
         else:
-            summaries = [
-                {
-                    "region_id": item.region_id,
-                    "effect": item.effect,
-                    "target_view": item.target_view,
-                    "suggested_action": item.suggested_action,
-                    "confidence": item.confidence,
-                    "severity": item.severity,
-                    "feedback": item.feedback,
-                }
-                for item in judgments
-                if isinstance(item, _EffectJudgment)
-            ]
+            summaries = []
+            proposal_by_id = {item["region_id"]: item for item in proposals}
+            for item in judgments:
+                if not isinstance(item, _EffectJudgment):
+                    continue
+                proposal = proposal_by_id[item.region_id]
+                summaries.append(
+                    {
+                        "region_id": item.region_id,
+                        "effect": item.effect,
+                        "effect_kind": proposal.get("effect_kind"),
+                        "component_area": proposal.get("component_area"),
+                        "box_normalized": proposal.get("box_normalized"),
+                        "confidence": item.confidence,
+                        "severity": item.severity,
+                        "feedback": item.feedback,
+                    }
+                )
             mode = (
                 "Compare the candidate with the previous accepted state. Weigh beneficial and "
                 "harmful portions, including mixed regions, and directly decide better, worse, "
                 "unchanged, or uncertain. Do not use a rule that mixed automatically means "
-                "uncertain."
+                "uncertain. Independently plan the remaining correction; local target/action "
+                "suggestions are not part of the synthesis evidence."
             )
         prompt = (
             "You are the core Change Verifier and correction planner. Synthesize the local "
@@ -891,6 +918,9 @@ class Qwen3VLZeroShotVerifier:
             "explaining the tradeoff and correction). If error_type is none, use null region_id "
             "and finish. Write lowercase enum values and literal JSON null, not the string "
             "\"null\". Otherwise select an exact region_id and a non-finish correction. "
+            "Calibrate quality_score as the estimated correctness of the complete final change "
+            "mask, not confidence in one easy region; do not assign above 0.9 when any credible "
+            "error remains. "
             f"{mode}\n"
             f"Authoritative mask/delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
@@ -1247,69 +1277,6 @@ class Qwen3VLZeroShotVerifier:
         if action.box is not None:
             result["box"] = list(pixel_box_to_normalized(action.box, image_size))
         return result
-
-    @staticmethod
-    def _region_panel(
-        state: ChangeState,
-        proposal: dict[str, Any],
-        previous_state: ChangeState | None = None,
-        panel_size: int = 192,
-    ) -> Image.Image:
-        x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
-        region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
-        change = np.asarray(state.change_mask[region], dtype=bool)
-        delta_component = None
-        if previous_state is not None and proposal.get("component_seed_pixels"):
-            delta_component = Qwen3VLZeroShotVerifier._proposal_delta_component(
-                state, previous_state, proposal
-            )[region]
-        t1 = np.array(
-            Qwen3VLZeroShotVerifier._as_image(state.t1_image[region]).convert("RGB"),
-            copy=True,
-        )
-        t2 = np.array(
-            Qwen3VLZeroShotVerifier._as_image(state.t2_image[region]).convert("RGB"),
-            copy=True,
-        )
-        overlay = change if delta_component is None else delta_component
-        for image in (t1, t2):
-            image[overlay] = np.clip(
-                image[overlay].astype(np.float32) * 0.45 + np.array([140, 0, 140]),
-                0,
-                255,
-            ).astype(np.uint8)
-        if previous_state is None:
-            change_rgb = np.repeat((change.astype(np.uint8) * 255)[..., None], 3, axis=2)
-        else:
-            previous_change = np.asarray(previous_state.change_mask[region], dtype=bool)
-            if delta_component is not None:
-                stable = np.logical_and(previous_change, change)
-                previous_change = np.logical_or(
-                    stable, np.logical_and(previous_change, delta_component)
-                )
-                change = np.logical_or(stable, np.logical_and(change, delta_component))
-            change_rgb = np.zeros((*change.shape, 3), dtype=np.uint8)
-            change_rgb[..., 0] = previous_change.astype(np.uint8) * 255
-            change_rgb[..., 1] = change.astype(np.uint8) * 255
-            change_rgb[..., 2] = overlay.astype(np.uint8) * 255
-        temporal = np.zeros((*change.shape, 3), dtype=np.uint8)
-        temporal[..., 0] = np.asarray(state.t1_mask[region], dtype=np.uint8) * 255
-        temporal[..., 1] = np.asarray(state.t2_mask[region], dtype=np.uint8) * 255
-        temporal[..., 2] = overlay.astype(np.uint8) * 255
-        tiles = [
-            Image.fromarray(t1),
-            Image.fromarray(t2),
-            Image.fromarray(change_rgb),
-            Image.fromarray(temporal),
-        ]
-        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
-        for index, tile in enumerate(tiles):
-            resample = Image.Resampling.BILINEAR if index < 2 else Image.Resampling.NEAREST
-            canvas.paste(
-                tile.resize((panel_size, panel_size), resample),
-                ((index % 2) * panel_size, (index // 2) * panel_size),
-            )
-        return canvas
 
     @staticmethod
     def _rgb_delta_panel(

@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--verifier-max-regions",
         type=int,
-        default=2,
+        default=1,
         help="Maximum initial components per Qwen call; all components are audited.",
     )
     parser.add_argument(
@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         "--verifier-max-delta-regions",
         dest="verifier_max_delta_regions",
         type=int,
-        default=3,
+        default=1,
         help="Maximum delta components per Qwen call; all components are still audited.",
     )
     parser.add_argument("--verifier-min-region-area", type=int, default=4)

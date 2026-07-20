@@ -49,6 +49,30 @@ unknown labels/regions, incomplete coverage, invalid numeric ranges, and schema 
 fail. Prompts also state the literal JSON-null requirement, and regression coverage includes
 the exact field drift observed in job `41503`.
 
+Single-GPU job `41504` then evaluated commit `7f8723e` in
+`change_agent_levir_gpu_closed_loop_20260720_020605`. All initial schemas and global
+syntheses were valid, proving the rich pipeline can execute end to end. `test_20_15`
+generated two point candidates (one Qwen-judged unchanged, one rejected by hard locality
+gates); `test_78_13` generated one hard-gated global candidate; `test_85_16` was incorrectly
+finished at the initial state. No candidate was accepted and aggregate IoU stayed
+`0.69744116`.
+
+The semantic trace exposed contaminated visual evidence rather than a missing decision rule.
+Qwen repeatedly described purple, pink, and cyan areas as if they were scene objects because
+the old local panel blended mask colors into the T1/T2 RGB tiles. It labeled all 19
+`test_85_16` proposals `true_change` and assigned quality `0.95`, even though that sample has
+many false positives offline. Local true-change records also carried inappropriate point
+suggestions, which anchored global synthesis toward large positive-point edits.
+
+The v10 evidence protocol uses one component per rich call. Top tiles are clean T1/T2 RGB with
+an external yellow correspondence ring that never overwrites audited pixels; bottom tiles are
+explicitly identified as binary geometry and raw RGB difference, not scene colors. Candidate
+calls also receive predicted T1/T2 masks. Global synthesis receives component area, box,
+audit/delta polarity, verdict/effect, confidence, severity, and prose, but intentionally omits
+local advisory target/actions so Qwen must independently plan the final correction. The prompt
+asks Qwen itself to favor compact high-confidence errors and calibrate quality over the full
+mask. There is still no programmatic semantic ranking or mixed rejection rule.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

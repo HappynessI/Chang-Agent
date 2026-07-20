@@ -636,6 +636,17 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("FINAL CURRENT CHANGE MASK", prompt)
         self.assertIn("feedback (one or two concise diagnostic sentences", prompt)
         self.assertIn("Full predicted T1 object mask", prompt)
+        self.assertIn("CLEAN T1 RGB", prompt)
+        self.assertIn("Bottom tiles are diagnostic data, not scene colors", prompt)
+
+        local_panels = [
+            item["image"]
+            for item in messages[0]["content"]
+            if item["type"] == "image" and item["image"].size == (384, 384)
+        ]
+        panel = np.asarray(local_panels[0])
+        self.assertTrue(np.any(np.all(panel[:192, :192] == [255, 255, 0], axis=2)))
+        self.assertFalse(np.any(np.all(panel[:192, :192] == [140, 0, 140], axis=2)))
 
         judgments = tuple(
             verifier._parse_rich_region_payload(rich_regions(proposals), proposals)
@@ -657,6 +668,10 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("quality_score", synthesis_prompt)
         self.assertIn("progress_score", synthesis_prompt)
         self.assertIn("better/worse/unchanged", synthesis_prompt.replace(", ", "/"))
+        self.assertIn('"component_area": 16', synthesis_prompt)
+        local_summary = synthesis_prompt.split("Local diagnoses:", 1)[1]
+        self.assertNotIn('"suggested_action"', local_summary)
+        self.assertNotIn('"target_view"', local_summary)
 
     def test_component_outline_preserves_audited_rgb_pixels(self):
         rgb = np.zeros((5, 5, 3), dtype=np.uint8)

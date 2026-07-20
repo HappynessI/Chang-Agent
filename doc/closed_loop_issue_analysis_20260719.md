@@ -626,3 +626,9 @@ Qwen 完成。
 写出大写 `"T1"/"T2"` 和字符串 `"null"`，被严格枚举解析拒绝。这类差异不涉及视觉判断，
 因此解析层现在只做格式规范化后再校验，原始生成仍完整留档；程序不会借此改变 verdict、
 comparison、score 或 correction 的语义。
+
+作业 `41504` 首次让 rich Verifier 全流程有效，但局部 panel 把 mask 颜色混入 RGB，Qwen
+反复把紫/粉/青色诊断图当成真实场景，最终把 `test_85_16` 的 19 个组件全部判成
+`true_change`。v10 改为每次只看一个精确区域；上排仅保留黄色外轮廓的干净 T1/T2 RGB，
+下排明确为二值几何和原始差分。全局 Qwen 获取 region 面积、框、极性和长诊断，但不再
+接收局部阶段容易产生锚定的 advisory action，最终 target/action 仍由 Qwen 独立规划。

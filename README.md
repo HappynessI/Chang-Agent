@@ -85,8 +85,8 @@ separately validated latent/tool-ranking objective.
   an already-white component cannot be a false negative, exact region-to-coordinate conversion,
   identical-state handling, SHA256 decision caching, rollback, and locality/area hard gates.
   Runtime code does not infer semantic better/worse from effect labels.
-- The Verifier generation ceiling remains 1024 tokens. Initial rich outputs use two local
-  regions per batch (candidate batches use three) followed by one global synthesis, so Qwen has
+- The Verifier generation ceiling remains 1024 tokens. Rich diagnosis uses one exact local
+  region per call followed by one global synthesis, so Qwen can focus on clean RGB evidence and has
   room for reasoning without silently omitting components. Verifier generation is deterministic
   with a small repetition penalty; these settings are part of the decision-cache identity.
 - An initial state can finish only when Qwen reports no remaining error and its quality score meets
