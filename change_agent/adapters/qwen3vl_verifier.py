@@ -710,7 +710,8 @@ class Qwen3VLZeroShotVerifier:
             "region_id, verdict, target_view (t1/t2/null), suggested_action "
             "(positive_point/negative_point/box/null), confidence (0..1), severity (0..1), and "
             "feedback (one or two concise diagnostic sentences; do not repeat phrases). "
-            "For true_change or correct_unchanged use null target/action unless a boundary error "
+            "Write lowercase enum values and literal JSON null, never strings such as \"T1\" or "
+            "\"null\". For true_change or correct_unchanged use null target/action unless a boundary error "
             "still needs correction. Do not output coordinates, scores for "
             "the whole image, comparison, accept, or GT claims.\n"
             f"{correction}"
@@ -790,6 +791,7 @@ class Qwen3VLZeroShotVerifier:
             "removed_true_change/mixed/uncertain), target_view (t1/t2/null), suggested_action "
             "(positive_point/negative_point/box/finish/null), confidence (0..1), severity (0..1), "
             "and feedback (one or two concise diagnostic sentences; do not repeat phrases). "
+            "Write lowercase enum values and literal JSON null, not the string \"null\". "
             "Do not output overall comparison, "
             "quality/progress scores, coordinates, accept, or GT claims.\n"
             f"Exact candidate delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
@@ -887,7 +889,8 @@ class Qwen3VLZeroShotVerifier:
             "target_view (t1/t2/null), region_id (one supplied ID or null), suggested_action "
             "(positive_point/negative_point/box/finish), and feedback (two to four sentences "
             "explaining the tradeoff and correction). If error_type is none, use null region_id "
-            "and finish. Otherwise select an exact region_id and a non-finish correction. "
+            "and finish. Write lowercase enum values and literal JSON null, not the string "
+            "\"null\". Otherwise select an exact region_id and a non-finish correction. "
             f"{mode}\n"
             f"Authoritative mask/delta facts: {json.dumps(facts, ensure_ascii=False)}\n"
             f"Action: {json.dumps(self._public_action(previous_action, state.image_size), ensure_ascii=False)}\n"
@@ -929,6 +932,31 @@ class Qwen3VLZeroShotVerifier:
             raise ValueError(f"{name} must be in [{lower}, {upper}]")
         return number
 
+    @staticmethod
+    def _enum_token(value: Any, allowed: set[str], name: str) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string")
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized not in allowed:
+            raise ValueError(f"unsupported {name}")
+        return normalized
+
+    @classmethod
+    def _nullable_enum_token(
+        cls, value: Any, allowed: set[str], name: str
+    ) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {
+            "",
+            "null",
+            "none",
+            "n/a",
+            "na",
+        }:
+            return None
+        return cls._enum_token(value, allowed, name)
+
     def _parse_rich_region_payload(
         self, payload: dict[str, Any], proposals: list[dict[str, Any]]
     ) -> tuple[_RegionJudgment, ...]:
@@ -952,16 +980,17 @@ class Qwen3VLZeroShotVerifier:
             region_id = item["region_id"]
             if region_id not in by_id or region_id in parsed:
                 raise ValueError("regional diagnosis has an unknown or duplicate region_id")
-            verdict = item["verdict"]
-            target_view = item["target_view"]
-            action = item["suggested_action"]
+            verdict = self._enum_token(
+                item["verdict"], self.REGION_VERDICTS, "regional verdict"
+            )
+            target_view = self._nullable_enum_token(
+                item["target_view"], {"t1", "t2"}, "target_view"
+            )
+            action = self._nullable_enum_token(
+                item["suggested_action"], self.ACTIONS - {"finish"},
+                "regional suggested_action",
+            )
             feedback = item["feedback"]
-            if verdict not in self.REGION_VERDICTS:
-                raise ValueError("unsupported regional verdict")
-            if target_view not in {None, "t1", "t2"}:
-                raise ValueError("target_view must be t1, t2, or null")
-            if action not in self.ACTIONS - {"finish"} | {None}:
-                raise ValueError("regional suggested_action is unsupported")
             if not isinstance(feedback, str) or not feedback.strip():
                 raise ValueError("regional feedback must be a non-empty string")
             audit_kind = by_id[region_id].get("audit_kind")
@@ -1010,21 +1039,22 @@ class Qwen3VLZeroShotVerifier:
             region_id = item["region_id"]
             if region_id not in by_id or region_id in parsed:
                 raise ValueError("delta diagnosis has an unknown or duplicate region_id")
-            effect = item["effect"]
-            target_view = item["target_view"]
-            action = item["suggested_action"]
+            effect = self._enum_token(
+                item["effect"], self.EFFECT_LABELS, "candidate effect label"
+            )
+            target_view = self._nullable_enum_token(
+                item["target_view"], {"t1", "t2"}, "target_view"
+            )
+            action = self._nullable_enum_token(
+                item["suggested_action"], self.ACTIONS,
+                "delta suggested_action",
+            )
             feedback = item["feedback"]
-            if effect not in self.EFFECT_LABELS:
-                raise ValueError("unsupported candidate effect label")
             effect_kind = by_id[region_id].get("effect_kind")
             if effect_kind == "added" and effect.startswith("removed_"):
                 raise ValueError("added delta region cannot receive a removed effect label")
             if effect_kind == "removed" and effect.startswith("added_"):
                 raise ValueError("removed delta region cannot receive an added effect label")
-            if target_view not in {None, "t1", "t2"}:
-                raise ValueError("target_view must be t1, t2, or null")
-            if action not in self.ACTIONS | {None}:
-                raise ValueError("delta suggested_action is unsupported")
             if not isinstance(feedback, str) or not feedback.strip():
                 raise ValueError("delta feedback must be a non-empty string")
             parsed[region_id] = _EffectJudgment(
@@ -1061,27 +1091,37 @@ class Qwen3VLZeroShotVerifier:
             raise ValueError("global synthesis must use the exact rich schema")
         quality = self._bounded_number(payload["quality_score"], "quality_score", 0, 1)
         progress = self._bounded_number(payload["progress_score"], "progress_score", -1, 1)
-        comparison = payload["comparison"]
+        comparison = self._enum_token(
+            payload["comparison"], self.COMPARISONS | {"initial"}, "comparison"
+        )
         if initial:
             if comparison != "initial" or progress != 0.0:
                 raise ValueError("initial synthesis requires comparison=initial and progress_score=0")
         elif comparison not in self.COMPARISONS:
             raise ValueError("candidate comparison is unsupported")
-        error_type = payload["error_type"]
-        target_view = payload["target_view"]
+        error_type = self._enum_token(
+            payload["error_type"], self.ERROR_TYPES, "global error_type"
+        )
+        target_view = self._nullable_enum_token(
+            payload["target_view"], {"t1", "t2"}, "target_view"
+        )
         region_id = payload["region_id"]
-        action = payload["suggested_action"]
+        if isinstance(region_id, str) and region_id.strip().lower() in {
+            "",
+            "null",
+            "none",
+            "n/a",
+            "na",
+        }:
+            region_id = None
+        action = self._enum_token(
+            payload["suggested_action"], self.ACTIONS, "global suggested_action"
+        )
         feedback = payload["feedback"]
-        if error_type not in self.ERROR_TYPES:
-            raise ValueError("unsupported global error_type")
-        if target_view not in {None, "t1", "t2"}:
-            raise ValueError("target_view must be t1, t2, or null")
         if region_id is not None and region_id not in {
             item["region_id"] for item in proposals
         }:
             raise ValueError("global synthesis references an unknown region_id")
-        if action not in self.ACTIONS:
-            raise ValueError("unsupported global suggested_action")
         if not isinstance(feedback, str) or not feedback.strip():
             raise ValueError("global feedback must be a non-empty string")
         if error_type == "none":

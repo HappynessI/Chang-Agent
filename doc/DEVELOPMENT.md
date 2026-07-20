@@ -35,6 +35,20 @@ definitions:
 This optimization does not restore any state-to-FP/FN or effect-to-better/worse runtime
 mapping. Qwen still owns local semantics, quality/progress, global comparison, and correction.
 
+Follow-up single-GPU job `41503` evaluated clean commit `99aca7a` in
+`change_agent_levir_gpu_closed_loop_20260720_020152`. Reducing the batch to two eliminated
+all token truncation: complete two-region responses were 797–992 characters. The remaining
+failure was purely representational and deterministic: Qwen emitted `"T1"`/`"T2"` and the
+string `"null"` instead of lowercase enums and JSON null. Every sample therefore stopped at
+the initial fail-safe and aggregate IoU again remained `0.69744116`.
+
+The parser now canonicalizes enum case, spaces/hyphens, and common null spellings before
+validating against the same closed enum sets. Raw generations remain unchanged in evidence.
+This normalization does not reinterpret a visual verdict or comparison; impossible geometry,
+unknown labels/regions, incomplete coverage, invalid numeric ranges, and schema drift still
+fail. Prompts also state the literal JSON-null requirement, and regression coverage includes
+the exact field drift observed in job `41503`.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

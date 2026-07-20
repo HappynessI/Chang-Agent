@@ -233,6 +233,32 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_type, "none")
         self.assertTrue(output.stop)
 
+    def test_cosmetic_enum_and_string_null_drift_is_canonicalized(self):
+        state = make_state()
+        proposals = attach_verifier_regions(state)
+        regions = rich_regions(proposals)
+        for item in regions["regions"]:
+            item["target_view"] = "T1"
+            item["suggested_action"] = "null"
+        global_decision = synthesis()
+        global_decision["comparison"] = "Initial"
+        global_decision["target_view"] = "null"
+        global_decision["region_id"] = "None"
+        global_decision["suggested_action"] = "FINISH"
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor([regions, global_decision]),
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.comparison, "initial")
+        self.assertTrue(output.stop)
+        self.assertIsNone(
+            verifier.last_evidence["synthesis_decision"]["target_view"]
+        )
+
     def test_missing_proposal_can_drive_false_negative_correction(self):
         image = np.zeros((16, 16, 3), dtype=np.uint8)
         t1 = np.zeros((16, 16), dtype=bool)
