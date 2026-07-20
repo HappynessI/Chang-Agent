@@ -257,6 +257,64 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertEqual(output.error_type, "none")
         self.assertTrue(output.stop)
 
+    def test_global_correction_cannot_select_locally_correct_region(self):
+        state = make_state()
+        proposals = attach_verifier_regions(state)
+        selected = proposals[0]
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    rich_regions(proposals, "true_change"),
+                    synthesis(
+                        quality=0.4,
+                        error_type="false_positive_change",
+                        target_view="t2",
+                        region_id=selected["region_id"],
+                        action="negative_point",
+                    ),
+                ]
+            ),
+            max_retries=1,
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "global correction cannot select a region that the local diagnosis marked correct",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
+
+    def test_global_negative_point_requires_white_seed_in_target_mask(self):
+        state = make_state()
+        proposals = attach_verifier_regions(state)
+        selected = proposals[0]
+        verifier = Qwen3VLZeroShotVerifier(
+            model=FakeModel(),
+            processor=FakeProcessor(
+                [
+                    rich_regions(proposals, "false_positive"),
+                    synthesis(
+                        quality=0.4,
+                        error_type="false_positive_change",
+                        target_view="t1",
+                        region_id=selected["region_id"],
+                        action="negative_point",
+                    ),
+                ]
+            ),
+            max_retries=1,
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "global negative_point targets a black seed in the editable object mask",
+            " ".join(verifier.last_evidence["validation_errors"]),
+        )
+
     def test_cosmetic_enum_and_string_null_drift_is_canonicalized(self):
         state = make_state()
         proposals = attach_verifier_regions(state)
@@ -667,7 +725,7 @@ class QwenVerifierTest(unittest.TestCase):
         local_panels = [
             item["image"]
             for item in messages[0]["content"]
-            if item["type"] == "image" and item["image"].size == (384, 384)
+            if item["type"] == "image" and item["image"].size == (576, 384)
         ]
         panel = np.asarray(local_panels[0])
         x1, y1, x2, y2 = proposals[0]["box_pixels"]
@@ -679,6 +737,14 @@ class QwenVerifierTest(unittest.TestCase):
         )
         np.testing.assert_array_equal(panel[:192, :192], expected_resized)
         self.assertFalse(np.any(np.all(panel[:192, :192] == [140, 0, 140], axis=2)))
+        component = verifier._proposal_initial_component(state, proposals[0])
+        tight_region = verifier._tight_component_region(component)
+        expected_tight = np.asarray(
+            Qwen3VLZeroShotVerifier._as_image(state.t1_image[tight_region]).resize(
+                (192, 192), Image.Resampling.BILINEAR
+            )
+        )
+        np.testing.assert_array_equal(panel[192:, :192], expected_tight)
 
         judgments = tuple(
             verifier._parse_rich_region_payload(rich_regions(proposals), proposals)
@@ -701,6 +767,8 @@ class QwenVerifierTest(unittest.TestCase):
         self.assertIn("progress_score", synthesis_prompt)
         self.assertIn("better/worse/unchanged", synthesis_prompt.replace(", ", "/"))
         self.assertIn('"component_area": 16', synthesis_prompt)
+        self.assertIn('"component_t1_mask_pixels": 0', synthesis_prompt)
+        self.assertIn('"component_seed_t2_mask_white": true', synthesis_prompt)
         local_summary = synthesis_prompt.split("Local diagnoses:", 1)[1]
         self.assertNotIn('"suggested_action"', local_summary)
         self.assertNotIn('"target_view"', local_summary)

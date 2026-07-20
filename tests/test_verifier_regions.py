@@ -25,6 +25,10 @@ class VerifierRegionTest(unittest.TestCase):
         self.assertIn("temporal_difference", proposals[0]["sources"])
         self.assertEqual(state.evidence["verifier_mask_facts"]["change_pixels"], 30)
         self.assertEqual(proposals[0]["change_pixels"], 30)
+        self.assertEqual(proposals[0]["component_t1_mask_pixels"], 0)
+        self.assertEqual(proposals[0]["component_t2_mask_pixels"], 30)
+        self.assertFalse(proposals[0]["component_seed_t1_mask_white"])
+        self.assertTrue(proposals[0]["component_seed_t2_mask_white"])
         self.assertEqual(len(proposals[0]["component_seed_normalized"]), 2)
         self.assertEqual(
             state.evidence["verifier_mask_facts"]["initial_audit_coverage_ratio"],
@@ -79,6 +83,13 @@ class VerifierRegionTest(unittest.TestCase):
         self.assertEqual({item["effect_kind"] for item in proposals}, {"added", "removed"})
         self.assertTrue(
             all(len(item["sources"]) == 1 for item in proposals)
+        )
+        self.assertTrue(
+            all(
+                item["component_t1_mask_pixels"] <= item["component_area"]
+                and item["component_t2_mask_pixels"] <= item["component_area"]
+                for item in proposals
+            )
         )
 
     def test_initial_batching_covers_exact_components_not_padded_boxes(self):

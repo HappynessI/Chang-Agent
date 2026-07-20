@@ -141,6 +141,30 @@ that no RGB pixel is outlined, recolored, masked, brightened, or darkened. The m
 T1/T2 reasoning fields remain unchanged, so this removes an artificial cue without weakening
 Qwen's diagnostic role.
 
+Job `41509` evaluated v13 at commit `331d8ea` and completed every long regional diagnosis:
+35/35 components produced valid rich JSON without truncation. Qwen correctly diagnosed most
+present regions as false positives from `background/background` RGB evidence (6/8 in
+`test_20_15`, 7/8 in `test_78_13`, and 18/19 in `test_85_16`). This is a substantial semantic
+improvement over the former all-`true_change` behavior. No candidate was accepted, so aggregate
+IoU stayed at the fixed initial `0.69744116`.
+
+The remaining failure was correction planning rather than local recognition. Global Qwen selected
+`test_85_16/r11` for a positive correction even though its own local diagnosis called r11 the
+only supported true change and described the other regions as false positives. On the other two
+samples it selected a negative click on an object-mask side whose exact component seed was black,
+producing a no-op before later hard-gated attempts. The padded crop also leaves very small
+components visually under-resolved.
+
+The v14 evidence protocol keeps Qwen as the decision-maker and addresses those failures without
+deriving a semantic label in code. Every proposal now reports exact component pixel occupancy and
+seed occupancy in the editable T1/T2 masks. Global Qwen uses these facts to choose the target side;
+runtime rejects only a guaranteed no-op negative click. Local summaries are ordered from smaller
+to larger components to reduce largest/first-region anchoring, while Qwen still chooses which
+error matters. Each panel adds byte-identical tight T1/T2 crops alongside padded context, binary
+geometry, and raw difference. Finally, global synthesis must be coherent with Qwen's own local
+output: it cannot request correction of a region that the local pass explicitly and
+geometry-consistently marked correct. This forces a Qwen retry rather than replacing its verdict.
+
 ## 2026-07-20 — preserve the first effective baseline and restore a semantic Verifier
 
 The first closed-loop result that met the acceptance criteria is preserved as the

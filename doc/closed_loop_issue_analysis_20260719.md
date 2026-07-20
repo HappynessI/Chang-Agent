@@ -655,3 +655,16 @@ Environment geometry；Qwen 生成的 FP 结论保持原样。
 作业 `41508` 表明 focus tile 的外部压暗会诱导 Qwen 输出 `dark/dark`，而 dark 不能安全映射
 成 building/background。v13 删除 focus 和所有 RGB 标注，只提供逐字节不变的 T1/T2 crop、
 独立二值 geometry 和 raw difference；状态链、长诊断和 Qwen 全局决策职责保持不变。
+
+作业 `41509` 验证了 v13：35 个局部区域全部生成完整长 JSON，不再截断；三个样本中多数
+白色区域已由 Qwen 依据 `background/background` 正确诊断为 FP（分别为 6/8、7/8、18/19）。
+但全局综合仍会选中自己刚判为正确的 `test_85_16/r11`，并在另外两个样本中把 negative
+point 放到目标 mask 为黑色的组件 seed 上，形成空操作。因此最终没有候选被接受，聚合 IoU
+保持 `0.69744116`。这说明当前主要矛盾已经从局部语义识别转为 Qwen 自身的全局一致性和
+可执行纠错规划。
+
+v14 不用程序替代 Qwen 判断 FP/FN 或 better/worse，而是补充精确组件级 T1/T2 mask 占用、
+点击 seed 占用和逐字节不变的 tight T1/T2 crop。全局局部摘要按组件从小到大呈现，降低默认
+选择最大/首个区域的锚定。运行时新增的约束只检查 Qwen 自身输出与确定几何：全局不能把局部
+已明确判为正确的同一区域再次作为错误纠正；negative point 不能点击目标 object mask 的黑色
+seed。发生冲突时要求 Qwen 重试，不由程序生成新的语义裁决。

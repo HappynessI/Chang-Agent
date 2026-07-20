@@ -223,6 +223,14 @@ def build_candidate_delta_regions(
                 else 0,
                 "t1_mask_pixels": int(np.logical_and(state.t1_mask, crop).sum()),
                 "t2_mask_pixels": int(np.logical_and(state.t2_mask, crop).sum()),
+                "component_t1_mask_pixels": int(
+                    np.logical_and(state.t1_mask, component).sum()
+                ),
+                "component_t2_mask_pixels": int(
+                    np.logical_and(state.t2_mask, component).sum()
+                ),
+                "component_seed_t1_mask_white": bool(state.t1_mask[seed_y, seed_x]),
+                "component_seed_t2_mask_white": bool(state.t2_mask[seed_y, seed_x]),
             }
         )
     return result
@@ -351,6 +359,14 @@ def build_verifier_regions(
                 ),
                 "t1_mask_pixels": int(np.logical_and(state.t1_mask, crop).sum()),
                 "t2_mask_pixels": int(np.logical_and(state.t2_mask, crop).sum()),
+                "component_t1_mask_pixels": int(
+                    np.logical_and(state.t1_mask, item["component"]).sum()
+                ),
+                "component_t2_mask_pixels": int(
+                    np.logical_and(state.t2_mask, item["component"]).sum()
+                ),
+                "component_seed_t1_mask_white": bool(state.t1_mask[seed_y, seed_x]),
+                "component_seed_t2_mask_white": bool(state.t2_mask[seed_y, seed_x]),
             }
         )
     return result

@@ -65,7 +65,7 @@ class Qwen3VLZeroShotVerifier:
     candidate comparison, and the next corrective action.
     """
 
-    SCHEMA_VERSION = "mask_state_grounded_unmodified_rgb_synthesis_v13"
+    SCHEMA_VERSION = "tight_rgb_mask_occupancy_coherent_synthesis_v14"
     CANDIDATE_EVIDENCE_MODES = ("rich_delta_diagnosis", "global_synthesis")
     ERROR_TYPES = {
         "none",
@@ -555,7 +555,7 @@ class Qwen3VLZeroShotVerifier:
             try:
                 payload = self._extract_json_object(raw)
                 decision = self._parse_synthesis_payload(
-                    payload, proposals, initial=initial
+                    payload, proposals, judgments, initial=initial
                 )
                 attempts.append({"raw": raw, "output": payload})
                 return decision, attempts, errors
@@ -769,6 +769,10 @@ class Qwen3VLZeroShotVerifier:
                     "region_id",
                     "component_area",
                     "box_normalized",
+                    "component_t1_mask_pixels",
+                    "component_t2_mask_pixels",
+                    "component_seed_t1_mask_white",
+                    "component_seed_t2_mask_white",
                 )
                 if key in proposal
             }
@@ -788,9 +792,9 @@ class Qwen3VLZeroShotVerifier:
                         "text": (
                             f"Initial audit proposal {proposal['region_id']}: "
                             f"{json.dumps(public_proposal, ensure_ascii=False)}. "
-                            "Panel layout: top-left is unmodified CLEAN T1 RGB, top-right is "
-                            "unmodified CLEAN T2 RGB, bottom-left is exact binary geometry, and "
-                            "bottom-right is amplified raw RGB difference. Geometry/difference "
+                            "Panel layout: top row is padded CLEAN T1 RGB, padded CLEAN T2 RGB, "
+                            "and exact binary geometry; bottom row is tight CLEAN T1 RGB, tight "
+                            "CLEAN T2 RGB, and amplified raw RGB difference. Geometry/difference "
                             "tiles are diagnostic data, not scene colors. No RGB pixel has been "
                             "outlined, recolored, masked, brightened, or darkened."
                         ),
@@ -864,10 +868,10 @@ class Qwen3VLZeroShotVerifier:
                         "type": "text",
                         "text": (
                             f"Candidate delta proposal {proposal['region_id']} with exact metadata: "
-                            f"{json.dumps(proposal, ensure_ascii=False)}. Panel layout: top-left "
-                            "is unmodified CLEAN T1 RGB, top-right is unmodified CLEAN T2 RGB, "
-                            "bottom-left is binary delta geometry, and bottom-right is amplified "
-                            "raw RGB difference. Diagnostic tiles are not scene colors. No RGB "
+                            f"{json.dumps(proposal, ensure_ascii=False)}. Panel layout: top row "
+                            "is padded CLEAN T1 RGB, padded CLEAN T2 RGB, and exact binary delta "
+                            "geometry; bottom row is tight CLEAN T1 RGB, tight CLEAN T2 RGB, "
+                            "and amplified raw RGB difference. Diagnostic tiles are not scene colors. No RGB "
                             "pixel has been outlined, recolored, masked, brightened, or darkened."
                         ),
                     },
@@ -910,6 +914,18 @@ class Qwen3VLZeroShotVerifier:
                         "verdict": item.verdict,
                         "audit_kind": proposal.get("audit_kind"),
                         "component_area": proposal.get("component_area"),
+                        "component_t1_mask_pixels": proposal.get(
+                            "component_t1_mask_pixels"
+                        ),
+                        "component_t2_mask_pixels": proposal.get(
+                            "component_t2_mask_pixels"
+                        ),
+                        "component_seed_t1_mask_white": proposal.get(
+                            "component_seed_t1_mask_white"
+                        ),
+                        "component_seed_t2_mask_white": proposal.get(
+                            "component_seed_t2_mask_white"
+                        ),
                         "box_normalized": proposal.get("box_normalized"),
                         "confidence": item.confidence,
                         "severity": item.severity,
@@ -919,6 +935,9 @@ class Qwen3VLZeroShotVerifier:
                         ),
                     }
                 )
+            summaries.sort(
+                key=lambda value: (value.get("component_area", 0), value["region_id"])
+            )
             mode = (
                 "This is the initial state: comparison must be initial and progress_score must "
                 "be 0.0. Select the most useful next correction, including a mixed/uncertain "
@@ -928,7 +947,12 @@ class Qwen3VLZeroShotVerifier:
                 "error over a large or uncertain edit. A false geometry_consistency flag means "
                 "the local Qwen wording conflicts with authoritative white/black mask state; "
                 "resolve that conflict yourself using change_mask_state, T1/T2 states, and "
-                "feedback instead of copying the inconsistent verdict."
+                "feedback instead of copying the inconsistent verdict. The local diagnoses are "
+                "ordered from smallest to largest component for risk-aware planning; do not "
+                "default to the first region unless its evidence makes it the best correction. "
+                "component_t1_mask_pixels/component_t2_mask_pixels and seed mask values describe "
+                "the editable predicted object masks, so choose a target/action that can actually "
+                "change the selected error."
             )
         else:
             summaries = []
@@ -946,18 +970,36 @@ class Qwen3VLZeroShotVerifier:
                         "effect": item.effect,
                         "effect_kind": proposal.get("effect_kind"),
                         "component_area": proposal.get("component_area"),
+                        "component_t1_mask_pixels": proposal.get(
+                            "component_t1_mask_pixels"
+                        ),
+                        "component_t2_mask_pixels": proposal.get(
+                            "component_t2_mask_pixels"
+                        ),
+                        "component_seed_t1_mask_white": proposal.get(
+                            "component_seed_t1_mask_white"
+                        ),
+                        "component_seed_t2_mask_white": proposal.get(
+                            "component_seed_t2_mask_white"
+                        ),
                         "box_normalized": proposal.get("box_normalized"),
                         "confidence": item.confidence,
                         "severity": item.severity,
                         "feedback": item.feedback,
                     }
                 )
+            summaries.sort(
+                key=lambda value: (value.get("component_area", 0), value["region_id"])
+            )
             mode = (
                 "Compare the candidate with the previous accepted state. Weigh beneficial and "
                 "harmful portions, including mixed regions, and directly decide better, worse, "
                 "unchanged, or uncertain. Do not use a rule that mixed automatically means "
                 "uncertain. Independently plan the remaining correction; local target/action "
-                "suggestions are not part of the synthesis evidence."
+                "suggestions are not part of the synthesis evidence. The local diagnoses are "
+                "ordered from smallest to largest component. Exact component and seed mask "
+                "occupancy describe the editable predicted object masks; use them to avoid an "
+                "action that cannot change the chosen region."
             )
         prompt = (
             "You are the core Change Verifier and correction planner. Synthesize the local "
@@ -1205,6 +1247,7 @@ class Qwen3VLZeroShotVerifier:
         self,
         payload: dict[str, Any],
         proposals: list[dict[str, Any]],
+        judgments: tuple[_RegionJudgment, ...] | tuple[_EffectJudgment, ...],
         *,
         initial: bool,
     ) -> _SynthesisDecision:
@@ -1261,15 +1304,39 @@ class Qwen3VLZeroShotVerifier:
         elif region_id is None or target_view is None or action == "finish":
             raise ValueError("a global error requires an exact region, target, and correction")
         if initial and region_id is not None:
-            audit_kind = next(
-                item.get("audit_kind")
-                for item in proposals
-                if item["region_id"] == region_id
+            proposal = next(
+                item for item in proposals if item["region_id"] == region_id
             )
+            audit_kind = proposal.get("audit_kind")
             if audit_kind == "present" and error_type == "false_negative":
                 raise ValueError("global false_negative cannot target an already-white region")
             if audit_kind == "missing" and error_type == "false_positive_change":
                 raise ValueError("global false_positive cannot target an already-black region")
+            local = next(
+                (
+                    item
+                    for item in judgments
+                    if isinstance(item, _RegionJudgment) and item.region_id == region_id
+                ),
+                None,
+            )
+            if (
+                local is not None
+                and local.verdict in {"true_change", "correct_unchanged"}
+                and self._initial_geometry_consistent(local.verdict, audit_kind)
+            ):
+                raise ValueError(
+                    "global correction cannot select a region that the local diagnosis marked correct"
+                )
+        if region_id is not None and action == "negative_point":
+            proposal = next(
+                item for item in proposals if item["region_id"] == region_id
+            )
+            seed_key = f"component_seed_{target_view}_mask_white"
+            if proposal.get(seed_key) is False:
+                raise ValueError(
+                    "global negative_point targets a black seed in the editable object mask"
+                )
         return _SynthesisDecision(
             quality_score=quality,
             progress_score=progress,
@@ -1396,13 +1463,14 @@ class Qwen3VLZeroShotVerifier:
         proposal: dict[str, Any],
         panel_size: int = 192,
     ) -> Image.Image:
-        """Show clean RGB evidence, exact delta geometry, and raw difference."""
+        """Show padded/tight clean RGB, exact delta geometry, and raw difference."""
 
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
-        delta = Qwen3VLZeroShotVerifier._proposal_delta_component(
+        full_delta = Qwen3VLZeroShotVerifier._proposal_delta_component(
             state, previous_state, proposal
-        )[region]
+        )
+        delta = full_delta[region]
         raw_t1 = state.t1_image[region]
         raw_t2 = state.t2_image[region]
         t1 = np.array(raw_t1, dtype=np.uint8, copy=True)
@@ -1412,18 +1480,23 @@ class Qwen3VLZeroShotVerifier:
             raw_t2.astype(np.int16) - raw_t1.astype(np.int16)
         )
         absolute_difference = np.clip(absolute_difference * 2, 0, 255).astype(np.uint8)
+        tight_region = Qwen3VLZeroShotVerifier._tight_component_region(full_delta)
         tiles = [
             Image.fromarray(t1),
             Image.fromarray(t2),
             Image.fromarray(delta_rgb),
+            Image.fromarray(np.asarray(state.t1_image[tight_region], dtype=np.uint8)),
+            Image.fromarray(np.asarray(state.t2_image[tight_region], dtype=np.uint8)),
             Image.fromarray(absolute_difference),
         ]
-        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
+        canvas = Image.new("RGB", (panel_size * 3, panel_size * 2))
         for index, tile in enumerate(tiles):
-            resample = Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
+            resample = (
+                Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
+            )
             canvas.paste(
                 tile.resize((panel_size, panel_size), resample),
-                ((index % 2) * panel_size, (index // 2) * panel_size),
+                ((index % 3) * panel_size, (index // 3) * panel_size),
             )
         return canvas
 
@@ -1433,13 +1506,14 @@ class Qwen3VLZeroShotVerifier:
         proposal: dict[str, Any],
         panel_size: int = 192,
     ) -> Image.Image:
-        """Show clean RGB evidence and exact initial component geometry."""
+        """Show padded/tight clean RGB and exact initial component geometry."""
 
         x1, y1, x2, y2 = (int(value) for value in proposal["box_pixels"])
         region = (slice(y1, y2 + 1), slice(x1, x2 + 1))
-        component = Qwen3VLZeroShotVerifier._proposal_initial_component(
+        full_component = Qwen3VLZeroShotVerifier._proposal_initial_component(
             state, proposal
-        )[region]
+        )
+        component = full_component[region]
         raw_t1 = state.t1_image[region]
         raw_t2 = state.t2_image[region]
         t1 = np.array(raw_t1, dtype=np.uint8, copy=True)
@@ -1451,20 +1525,35 @@ class Qwen3VLZeroShotVerifier:
             raw_t2.astype(np.int16) - raw_t1.astype(np.int16)
         )
         absolute_difference = np.clip(absolute_difference * 2, 0, 255).astype(np.uint8)
+        tight_region = Qwen3VLZeroShotVerifier._tight_component_region(full_component)
         tiles = [
             Image.fromarray(t1),
             Image.fromarray(t2),
             Image.fromarray(component_rgb),
+            Image.fromarray(np.asarray(state.t1_image[tight_region], dtype=np.uint8)),
+            Image.fromarray(np.asarray(state.t2_image[tight_region], dtype=np.uint8)),
             Image.fromarray(absolute_difference),
         ]
-        canvas = Image.new("RGB", (panel_size * 2, panel_size * 2))
+        canvas = Image.new("RGB", (panel_size * 3, panel_size * 2))
         for index, tile in enumerate(tiles):
-            resample = Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
+            resample = (
+                Image.Resampling.NEAREST if index == 2 else Image.Resampling.BILINEAR
+            )
             canvas.paste(
                 tile.resize((panel_size, panel_size), resample),
-                ((index % 2) * panel_size, (index // 2) * panel_size),
+                ((index % 3) * panel_size, (index // 3) * panel_size),
             )
         return canvas
+
+    @staticmethod
+    def _tight_component_region(component: np.ndarray) -> tuple[slice, slice]:
+        ys, xs = np.nonzero(np.asarray(component, dtype=bool))
+        if not len(xs):
+            raise ValueError("cannot crop an empty verifier component")
+        return (
+            slice(int(ys.min()), int(ys.max()) + 1),
+            slice(int(xs.min()), int(xs.max()) + 1),
+        )
 
     @staticmethod
     def _outline_component(rgb: np.ndarray, component: np.ndarray) -> np.ndarray:

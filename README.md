@@ -86,12 +86,16 @@ separately validated latent/tool-ranking objective.
 - Runtime checks are deliberately limited to protocol and safety invariants: exact JSON schema,
   enums/ranges, complete region coverage, valid region IDs, added/removed polarity, the fact that
   an already-white component cannot be a false negative, exact region-to-coordinate conversion,
-  identical-state handling, SHA256 decision caching, rollback, and locality/area hard gates.
+  local/global Qwen outputs cannot select the same region as both correct and erroneous, a
+  negative click cannot target a black seed in its editable mask, identical-state handling,
+  SHA256 decision caching, rollback, and locality/area hard gates.
   Runtime code does not infer semantic better/worse from effect labels.
 - The Verifier generation ceiling remains 1024 tokens. Rich diagnosis uses one exact local
-  region per call followed by one global synthesis. The local panel contains unannotated clean
-  T1/T2 RGB, separate binary geometry, and raw difference, so Qwen can focus on evidence and has
-  room for reasoning without silently omitting components. Verifier generation is deterministic
+  region per call followed by one global synthesis. The local panel contains both padded and
+  tight unannotated clean T1/T2 RGB, separate binary geometry, and raw difference. Exact
+  per-component and click-seed occupancy in the editable T1/T2 masks is supplied separately, so
+  Qwen can diagnose the scene and plan an executable correction without artificial RGB cues.
+  Verifier generation is deterministic
   with a small repetition penalty; these settings are part of the decision-cache identity.
 - An initial state can finish only when Qwen reports no remaining error and its quality score meets
   the configured threshold. A candidate is semantically accepted only when Qwen calls it
