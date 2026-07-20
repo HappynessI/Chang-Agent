@@ -8,4 +8,8 @@ dist/
 artifacts/
 checkpoints/
 outputs/
-
+outputs_archive_*/
+.env
+*.env
+*apiKey*.csv
+*apikey*.csv

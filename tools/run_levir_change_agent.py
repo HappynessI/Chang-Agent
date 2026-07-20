@@ -22,6 +22,12 @@ from change_agent.action_parser import ActionValidationError
 from change_agent.adapters.omniovcd_adapter import MaskPairProcessor, OmniOVCDAdapter
 from change_agent.adapters.qwen3vl_adapter import GroundingModelQwen3VL
 from change_agent.adapters.qwen3vl_verifier import Qwen3VLZeroShotVerifier
+from change_agent.adapters.staged_verifier import StagedQwenVerifier
+from change_agent.adapters.stage_backends import (
+    BailianQwen3VLStageBackend,
+    LocalQwen3VLStageBackend,
+)
+from change_agent.adapters.bailian_adapter import BailianGroundingModelQwen3VL
 from change_agent.adapters.subprocess_adapters import (
     SubprocessBoxBackend,
     SubprocessPointBackend,
@@ -47,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--query", default="building")
+    parser.add_argument(
+        "--samples",
+        nargs="+",
+        default=list(SAMPLES),
+        help="Optional subset of the fixed LEVIR smoke samples (filenames or stems).",
+    )
     parser.add_argument("--max-steps", type=int, default=3)
     parser.add_argument(
         "--selection-policy",
@@ -74,15 +86,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--verifier-min-region-area", type=int, default=4)
     parser.add_argument("--verifier-region-padding-ratio", type=float, default=0.25)
+    parser.add_argument("--staged-verifier-max-total-regions", type=int, default=128)
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
     parser.add_argument("--overlap-threshold", type=float, default=0.25)
     parser.add_argument("--t12-min-instance-area", type=int, default=0)
     parser.add_argument("--cd-min-instance-area", type=int, default=0)
     parser.add_argument("--model-path", default=str(root / "models/Qwen3-VL-2B-Instruct"))
+    parser.add_argument(
+        "--agent-backend", choices=("local", "bailian"), default="local"
+    )
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument(
-        "--verifier", choices=("qwen_zero_shot", "rule"), default="qwen_zero_shot"
+        "--verifier",
+        choices=("qwen_zero_shot", "qwen_staged", "rule"),
+        default="qwen_zero_shot",
     )
+    parser.add_argument(
+        "--staged-verifier-backend",
+        choices=("local", "bailian"),
+        default="local",
+    )
+    parser.add_argument("--bailian-model", default="qwen3-vl-plus")
+    parser.add_argument("--bailian-base-url", default=None)
+    parser.add_argument("--bailian-api-key-env", default="DASHSCOPE_API_KEY")
     parser.add_argument("--verifier-max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument("--verifier-retries", type=int, default=2)
@@ -113,14 +139,47 @@ def main() -> None:
     manifest = _base_manifest(args, seed_runtime)
     (args.output / "run_manifest.md").write_text(_render_manifest(manifest), encoding="utf-8")
 
-    qwen = GroundingModelQwen3VL(
-        args.model_path,
-        device_map=args.device_map,
-        max_new_tokens=args.max_new_tokens,
+    local_qwen = None
+    needs_local_qwen = (
+        args.agent_backend == "local"
+        or args.verifier == "qwen_zero_shot"
+        or (
+            args.verifier == "qwen_staged"
+            and args.staged_verifier_backend == "local"
+        )
     )
-    verifier = _build_verifier(args, qwen)
+    if needs_local_qwen:
+        local_qwen = GroundingModelQwen3VL(
+            args.model_path,
+            device_map=args.device_map,
+            max_new_tokens=args.max_new_tokens,
+        )
+    hosted_client = None
+    if args.agent_backend == "bailian" or (
+        args.verifier == "qwen_staged"
+        and args.staged_verifier_backend == "bailian"
+    ):
+        hosted_client = BailianQwen3VLStageBackend(
+            model=args.bailian_model,
+            base_url=args.bailian_base_url,
+            api_key_env=args.bailian_api_key_env,
+            max_completion_tokens=args.verifier_max_new_tokens,
+            seed=args.seed,
+        )
+    qwen = (
+        local_qwen
+        if args.agent_backend == "local"
+        else BailianGroundingModelQwen3VL(client=hosted_client)
+    )
+    if qwen is None:
+        raise RuntimeError("agent backend was not initialized")
+    verifier = _build_verifier(args, local_qwen, hosted_client)
     rollout_records: dict[str, dict[str, Any]] = {}
-    for sample_file in SAMPLES:
+    sample_files = tuple(
+        name if str(name).endswith(".png") else f"{name}.png"
+        for name in args.samples
+    )
+    for sample_file in sample_files:
         sample_start = time.monotonic()
         sample = Path(sample_file).stem
         image1 = np.asarray(Image.open(args.input_root / "A" / sample_file).convert("RGB"))
@@ -189,11 +248,17 @@ def main() -> None:
             run_metadata={
                 "sample": sample_file,
                 "query": args.query,
-                "agent": "Qwen3-VL-2B-Instruct",
+                "agent": (
+                    args.model_path
+                    if args.agent_backend == "local"
+                    else args.bailian_model
+                ),
                 "verifier": args.verifier,
                 "verifier_decision_mode": (
                     "qwen_rich_region_diagnosis_and_global_synthesis"
                     if args.verifier == "qwen_zero_shot"
+                    else "qwen_staged_evidence_diagnosis_plan_decision"
+                    if args.verifier == "qwen_staged"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
@@ -347,12 +412,39 @@ def main() -> None:
     print(json.dumps({"status": "success", "output": str(args.output), **metrics["aggregate"]}, indent=2))
 
 
-def _build_verifier(args: argparse.Namespace, qwen: GroundingModelQwen3VL):
+def _build_verifier(
+    args: argparse.Namespace,
+    local_qwen: GroundingModelQwen3VL | None,
+    hosted_client: BailianQwen3VLStageBackend | None,
+):
     if args.verifier == "rule":
         return RuleBasedVerifier(accept_threshold=args.verifier_accept_threshold)
+    if args.verifier == "qwen_staged":
+        if args.staged_verifier_backend == "local":
+            if local_qwen is None:
+                raise RuntimeError("local staged verifier requires local Qwen weights")
+            stage_backend = LocalQwen3VLStageBackend(
+                model=local_qwen.model,
+                processor=local_qwen.processor,
+                max_new_tokens=args.verifier_max_new_tokens,
+                do_sample=False,
+                repetition_penalty=args.verifier_repetition_penalty,
+            )
+        else:
+            if hosted_client is None:
+                raise RuntimeError("BaiLian staged verifier client was not initialized")
+            stage_backend = hosted_client
+        return StagedQwenVerifier(
+            stage_backend,
+            accept_threshold=args.verifier_accept_threshold,
+            max_regions=args.staged_verifier_max_total_regions,
+            max_retries=args.verifier_retries,
+        )
+    if local_qwen is None:
+        raise RuntimeError("legacy qwen_zero_shot verifier requires local Qwen weights")
     return Qwen3VLZeroShotVerifier(
-        model=qwen.model,
-        processor=qwen.processor,
+        model=local_qwen.model,
+        processor=local_qwen.processor,
         max_new_tokens=args.verifier_max_new_tokens,
         accept_threshold=args.verifier_accept_threshold,
         max_retries=args.verifier_retries,
@@ -481,7 +573,17 @@ def _metrics_from_counts(counts: np.ndarray) -> tuple[dict[str, Any], np.ndarray
 
 
 def _validate_inputs(args: argparse.Namespace) -> None:
-    files = [Path(args.model_path), Path(args.simpleclick_checkpoint), Path(args.sam3_checkpoint), Path(args.sam3_bpe)]
+    needs_local_qwen = (
+        args.agent_backend == "local"
+        or args.verifier == "qwen_zero_shot"
+        or (
+            args.verifier == "qwen_staged"
+            and args.staged_verifier_backend == "local"
+        )
+    )
+    files = [Path(args.simpleclick_checkpoint), Path(args.sam3_checkpoint), Path(args.sam3_bpe)]
+    if needs_local_qwen:
+        files.append(Path(args.model_path))
     for sample in SAMPLES:
         files.extend([
             args.input_root / "A" / sample,
@@ -505,14 +607,31 @@ def _base_manifest(
         "input_root": str(args.input_root),
         "initialization": "fresh dual-view SAM3 text prompting for every sample; no cached masks",
         "initialization_artifacts": str(args.output / "tool_runs" / "<sample>" / "sam3_initialization"),
-        "agent_model": args.model_path,
+        "agent_model": (
+            args.model_path if args.agent_backend == "local" else args.bailian_model
+        ),
+        "agent_backend": args.agent_backend,
         "point_executor": f"SimpleClick {args.simpleclick_checkpoint}",
         "box_executor": f"SAM3 {args.sam3_checkpoint}",
         "verifier": args.verifier,
-        "verifier_model": "shared Qwen3-VL weights" if args.verifier == "qwen_zero_shot" else None,
+        "verifier_model": (
+            "shared local Qwen3-VL weights"
+            if args.verifier == "qwen_zero_shot"
+            else args.model_path
+            if args.verifier == "qwen_staged"
+            and args.staged_verifier_backend == "local"
+            else args.bailian_model
+            if args.verifier == "qwen_staged"
+            else None
+        ),
+        "staged_verifier_backend": (
+            args.staged_verifier_backend if args.verifier == "qwen_staged" else None
+        ),
         "verifier_decision_mode": (
             "qwen_rich_region_diagnosis_and_global_synthesis"
             if args.verifier == "qwen_zero_shot"
+            else "qwen_staged_evidence_diagnosis_plan_decision"
+            if args.verifier == "qwen_staged"
             else "legacy_rule_score"
         ),
         "verifier_max_initial_regions_per_batch": args.verifier_max_regions,
@@ -543,7 +662,16 @@ def _base_manifest(
         "seed_runtime": seed_runtime,
         "python": sys.version,
         "platform": platform.platform(),
-        "model_identity": _model_identity(Path(args.model_path)),
+        "model_identity": (
+            _model_identity(Path(args.model_path))
+            if args.agent_backend == "local"
+            or args.verifier == "qwen_zero_shot"
+            or (
+                args.verifier == "qwen_staged"
+                and args.staged_verifier_backend == "local"
+            )
+            else {"provider": "bailian", "model": args.bailian_model}
+        ),
         "git_commit": source["git_commit"],
         "git_dirty": source["git_dirty"],
         "git_worktree_sha256": source["git_worktree_sha256"],

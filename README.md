@@ -10,6 +10,8 @@ not GT.
 The implementation follows [`../CHANGE_AGENT_DEVELOPMENT_SPEC.md`](../CHANGE_AGENT_DEVELOPMENT_SPEC.md).
 
 本轮完整开发记录见：[DEVELOPMENT_WORK_REPORT.md](DEVELOPMENT_WORK_REPORT.md)。
+分步 Verifier 与商业模型接入维护说明见：
+[`doc/verifier_protocol_maintenance.md`](doc/verifier_protocol_maintenance.md)。
 
 ## Current milestone
 
@@ -40,6 +42,15 @@ are not accepted by the entry point. It saves the initial masks, confidence maps
 presence/object scores, prompt/configuration, stdout/stderr, and worker report before
 running Qwen3-VL Agent actions. Qwen3-VL zero-shot verification is the default and the
 rule Verifier remains an explicit `--verifier rule` ablation.
+
+An opt-in `--verifier qwen_staged` path now separates visual evidence,
+error/target diagnosis, executable action planning, and previous/candidate comparison.
+Its typed intermediate records reject cross-stage semantic and geometry contradictions.
+The same staged interface supports local Transformers weights and BaiLian
+`qwen3-vl-plus`; `--agent-backend bailian` also moves Agent action generation to the
+hosted model while preserving the existing Environment and ActionParser trust boundary.
+API credentials are read only from `DASHSCOPE_API_KEY` (or the variable named by
+`--bailian-api-key-env`) and are never stored in run artifacts.
 
 The offline training schema deliberately has no `target_view` target. Earlier smoke
 data alternated T1/T2 by sample index, which was not a real label and must not be used
