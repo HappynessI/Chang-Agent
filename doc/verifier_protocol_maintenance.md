@@ -198,6 +198,22 @@ probed node in `NODE` and requires `BAILIAN_NETWORK_MODE=direct|proxy`.  Use
 fingerprints.  The helper archives Slurm stdout/stderr under the experiment
 output's `logs/` directory before cleaning temporary `/tmp` copies.
 
+The standard Direct-rubric entry point is
+`tools/submit_ca0721_direct_rubric.sh`.  It accepts a run index followed by
+sample names; `OUTPUT`, `NODE`, `BAILIAN_NETWORK_MODE`, `MAX_STEPS`, and
+`SAMPLES_CSV` can be overridden without rebuilding a temporary script:
+
+```bash
+NODE=gpu46 BAILIAN_NETWORK_MODE=direct \
+  bash tools/submit_ca0721_direct_rubric.sh 11 \
+  test_20_15 test_78_13 test_85_16
+```
+
+The helper performs `scontrol ping` before calling `sbatch`, pins the tested
+node, and refuses an existing output directory.  A failure containing
+`Error creating slurm stream socket` or `Slurmctld ... is DOWN` is a cluster
+control-plane/connectivity failure; it is not a verifier or job-script error.
+
 ## Runner modes
 
 The runner exposes independent Agent and Verifier backend selection:
