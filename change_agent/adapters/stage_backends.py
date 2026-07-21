@@ -511,26 +511,57 @@ def _stage_prompt(
         mode = str(payload.get("mode", "initial"))
         candidate_mode = mode == "candidate"
         replan_mode = mode == "replan"
-        comparison_example = "uncertain" if candidate_mode or replan_mode else "initial"
+        candidate_effect = (
+            '{"intended_error_improved":<BOOLEAN>,'
+            '"introduced_false_positive":<BOOLEAN>,'
+            '"introduced_false_negative":<BOOLEAN>,'
+            '"boundary_or_artifact_worsened":<BOOLEAN>,'
+            '"evidence":"short paired evidence"}'
+            if candidate_mode
+            else "null"
+        )
         schema = (
-            '{"verdict":{"comparison":"' + comparison_example + '",'
-            '"quality_score":<QUALITY_0_TO_1>,"progress_score":<PROGRESS_NEG1_TO_1>,'
-            '"accept":<BOOLEAN>,'
+            '{"verdict":{"rubric":{'
+            '"evidence_sufficient":{"pass":<BOOLEAN>,"evidence":"short evidence"},'
+            '"target_class_only":{"pass":<BOOLEAN>,"evidence":"short evidence"},'
+            '"change_semantic_precision":{"pass":<BOOLEAN>,"evidence":"short evidence"},'
+            '"change_semantic_recall":{"pass":<BOOLEAN>,"evidence":"short evidence"},'
+            '"changed_object_extent":{"pass":<BOOLEAN>,"evidence":"short evidence"},'
+            '"change_boundary_alignment":{"pass":<BOOLEAN>,"evidence":"short evidence"},'
+            '"change_artifact_control":{"pass":<BOOLEAN>,"evidence":"short evidence"}},'
+            '"candidate_effect":' + candidate_effect + ','
             '"error_type":<ERROR_TYPE>,"target_view":<TARGET_VIEW_OR_NULL>,'
             '"suggested_action":<ACTION>,"coordinate_normalized_1000":<POINT_OR_NULL>,'
             '"box_normalized_1000":<BOX_OR_NULL>,"feedback":"short explanation"}}'
         )
         task = (
-            "Diagnose complete supplied T1/T2 RGB, predicted object masks, and change mask "
-            "without Proposal geometry. Inspect whole-mask coverage, boundaries, and internal "
-            "gaps. error_type must be exactly one of none, false_positive_change, "
-            "false_negative, mixed_error, or uncertain_region. For none, use target_view null, "
-            "suggested_action finish, and null geometry. "
+            "Apply the binary rubric to the complete T1/T2 pair and final change mask without "
+            "Proposal geometry. The only semantic target is target_class in Environment facts. "
+            "For target_class=building, roads, parking areas, vehicles, vegetation, bare ground, "
+            "shadows, illumination, and registration differences are context, never target "
+            "changes. Predicted T1/T2 object masks are fallible aids, not ground truth; do not "
+            "demand that they segment non-target content or unchanged target objects when the "
+            "final change mask is correct. White change pixels are correct only for a real "
+            "appearance, disappearance, construction, or demolition of target objects. "
+            "Set evidence_sufficient for visual judgeability and target_class_only only when "
+            "every judgment obeys this target scope. Set change_semantic_precision when no "
+            "material white region is unsupported, change_semantic_recall when no obvious target "
+            "change is missing, changed_object_extent when changed targets have materially "
+            "complete coverage, change_boundary_alignment when boundaries follow changed target "
+            "objects, and change_artifact_control when no material fragments, holes, or noise "
+            "remain. Give one short observable evidence string per item; do not provide hidden "
+            "chain-of-thought. Runtime computes quality, progress, comparison, and acceptance, "
+            "so never output those fields. error_type must be exactly one of none, "
+            "false_positive_change, false_negative, mixed_error, or uncertain_region. Every "
+            "rubric item passing requires none; none requires every item to pass. A failed "
+            "evidence_sufficient or target_class_only gate requires uncertain_region. For none, "
+            "use target_view null, suggested_action finish, and null geometry. "
             "For an error, choose t1 or t2 and one executable positive_point, negative_point, "
             "or box. A point needs normalized [0,1000] coordinate; a box needs normalized "
-            "[0,1000] XYXY box. Initial comparison must be initial; candidate comparison must "
-            "be better, worse, unchanged, or uncertain. accept may be true for an initial state "
-            "only when no error remains, and for a candidate only when comparison is better."
+            "[0,1000] XYXY box. For a candidate, compare actual candidate versus previous "
+            "accepted masks: intended_error_improved means the attempted target-class error was "
+            "materially reduced; the three harm flags report newly introduced semantic or "
+            "shape damage."
         )
         if replan_mode:
             task += (
@@ -539,8 +570,8 @@ def _stage_prompt(
                 "previous action failed. Do not repeat the rejected action or geometry. Choose a "
                 "materially different executable correction, or finish only if no error remains. "
                 "Use the bounded rejection_history to avoid all recently failed actions. "
-                "This is not a candidate-quality decision: comparison must be uncertain and "
-                "accept must be false."
+                "This is action replanning, not candidate evaluation; candidate_effect must be "
+                "JSON null."
             )
     else:
         candidate_mode = payload.get("mode") == "candidate"

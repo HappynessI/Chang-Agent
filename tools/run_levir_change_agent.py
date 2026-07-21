@@ -284,7 +284,7 @@ def main() -> None:
                 "proposal_mode": args.proposal_mode,
                 "proposal_grounding_enabled": args.proposal_mode != "direct",
                 "verifier_decision_mode": (
-                    "qwen_full_context_direct_action"
+                    "qwen_full_context_direct_binary_rubric"
                     if args.proposal_mode == "direct"
                     else "qwen_staged_proposal_local_diagnosis"
                     if args.proposal_mode == "proposal"
@@ -762,7 +762,7 @@ def _base_manifest(
         "verifier_decision_mode": (
             "qwen_rich_region_diagnosis_and_global_synthesis"
             if args.verifier == "qwen_zero_shot"
-            else "qwen_full_context_direct_action"
+            else "qwen_full_context_direct_binary_rubric"
             if args.verifier == "qwen_staged" and args.proposal_mode == "direct"
             else "qwen_staged_proposal_local_diagnosis"
             if args.verifier == "qwen_staged" and args.proposal_mode == "proposal"

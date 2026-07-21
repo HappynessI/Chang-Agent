@@ -52,9 +52,51 @@ regenerate their Agent action from the retained trajectory history. Direct calls
 its full-context verifier in `replan` mode, with the rejected action, candidate
 mask delta, candidate verdict, rejection reasons, and a bounded four-entry
 rejection history. The current images/masks in that call are the accepted state;
-additional masks are explicitly labelled as the rejected candidate. Its output
-has `comparison="uncertain"` and `accept=false`, and must author a different
+additional masks are explicitly labelled as the rejected candidate. Runtime
+assigns `comparison="uncertain"` and `accept=false`; Qwen must author a different
 action or `finish`. If this replan is invalid, no action is authorized.
+
+### Direct binary rubric
+
+The current BaiLian operational path is `proposal_mode=direct`. The hosted model
+can inspect complete T1/T2 RGB, predicted temporal masks, and the final change
+mask without Proposal crops. Proposal and Hybrid remain controlled ablation arms.
+
+Direct schema `direct_change_rubric_v2` forbids model-authored
+`quality_score`, `progress_score`, `comparison`, and `accept`. Qwen returns exact
+binary judgments with a short observable evidence string for each item:
+
+- `evidence_sufficient`: hard gate for visual judgeability;
+- `target_class_only`: hard gate requiring every judgment to concern only the
+  configured query target;
+- `change_semantic_precision`: weight 3;
+- `change_semantic_recall`: weight 3;
+- `changed_object_extent`: weight 2;
+- `change_boundary_alignment`: weight 1;
+- `change_artifact_control`: weight 1.
+
+Runtime computes quality as passed weight divided by total weight. Gate items do
+not add score. A failed gate authorizes no action. `error_type=none` is valid only
+when every rubric item passes; every item passing also requires `none`. For the
+LEVIR `building` query, roads, parking areas, vehicles, vegetation, bare ground,
+shadows, illumination, and registration differences are non-target context.
+Predicted T1/T2 masks are fallible evidence rather than GT and are not required
+to segment non-target or unchanged content merely to raise a score.
+
+Candidate calls add four binary paired-state judgments:
+
+- intended error materially improved;
+- new semantic false positive introduced;
+- new semantic false negative introduced;
+- boundary or artifact damage introduced.
+
+Runtime derives `better` from benefit without harm, `worse` from harm without
+benefit, `unchanged` from neither, and `uncertain` from simultaneous benefit and
+harm. Candidate `accept` is true only for runtime-derived `better`, after normal
+Environment hard gates. `progress_score` and `score_delta` are the difference
+between runtime-computed current and accepted quality. Replan calls set
+`candidate_effect=null` because they choose a replacement action rather than
+judge candidate quality.
 
 Each model call has a minimal exact JSON schema.  The runtime rejects unknown
 fields, unknown region IDs, non-enum values, string booleans, non-integer public
@@ -172,8 +214,9 @@ This supports the intended 2x2 comparison:
 | BaiLian Qwen3-VL-Plus | legacy is not hosted | `bailian + qwen_staged/bailian` |
 
 A mixed test is also supported, such as local Agent actions with a BaiLian
-staged verifier. `direct` is the designated Proposal ablation: Qwen sees only
-complete state and authors its action geometry; Proposals are not attached.
+staged verifier. `direct` is the current BaiLian operational mode and the
+no-Proposal comparison arm: Qwen sees complete state and authors action geometry;
+Proposals are not attached.
 `proposal` uses regional crops and Environment-owned Proposal geometry. `hybrid`
 uses complete state plus regional crops for diagnosis while retaining
 Environment-owned Proposal geometry for execution and candidate verification.
@@ -209,7 +252,8 @@ The protocol tests are CPU-only and do not call external services:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. \
   /guisongxia01/pangchao/wangyihan/omniovcd-env/bin/python \
-  -m unittest tests.test_staged_verifier tests.test_bailian_adapter -v
+  -m unittest tests.test_direct_verifier tests.test_staged_verifier \
+  tests.test_bailian_adapter -v
 ```
 
 `test_bailian_adapter` uses an injected fake HTTP opener and a temporary fake

@@ -56,6 +56,11 @@ API credentials are read only from `DASHSCOPE_API_KEY` (or the variable named by
 Direct sends full state to Qwen and accepts model-authored action geometry; Proposal
 uses local Proposal crops and Environment geometry; Hybrid sends full state plus
 local crops while keeping Environment geometry for execution and candidate checks.
+The current BaiLian production path uses Direct because the hosted model handles the
+complete visual context; Proposal and Hybrid remain comparison arms rather than
+requirements for hosted inference. Direct uses a target-class-locked binary
+change-detection rubric and runtime-owned aggregation instead of model-authored
+quality/progress scores.
 See [`doc/proposal_ablation.md`](doc/proposal_ablation.md).
 
 The offline training schema deliberately has no `target_view` target. Earlier smoke
@@ -100,6 +105,18 @@ separately validated latent/tool-ranking objective.
   progress_score, better/worse/unchanged/uncertain, the main remaining error, an exact
   region ID, and the next correction. Thus mixed, uncertainty, or simultaneous beneficial and
   harmful evidence are weighed by the Verifier rather than collapsed by a program rule.
+- Direct is a separate full-context contract. Qwen returns seven binary rubric judgments
+  with short observable evidence, an error type, and action geometry. It never returns
+  `quality_score`, `progress_score`, `comparison`, or `accept`. Runtime computes weighted
+  quality from semantic precision/recall, changed-object extent, boundary alignment, and
+  artifact control. Evidence sufficiency and target-class-only reasoning are hard gates.
+  For the building query, roads, parking areas, vehicles, vegetation, bare ground, shadows,
+  illumination, and registration differences are explicitly non-target context.
+- A Direct candidate additionally reports whether the intended error improved and whether
+  it introduced a false positive, false negative, or boundary/artifact regression. Runtime
+  derives comparison and acceptance from those booleans. Benefit without harm is `better`;
+  harm without benefit is `worse`; neither is `unchanged`; simultaneous benefit and harm is
+  `uncertain`.
 - Runtime checks are deliberately limited to protocol and safety invariants: exact JSON schema,
   enums/ranges, complete region coverage, valid region IDs, added/removed polarity, the fact that
   an already-white component cannot be a false negative, exact region-to-coordinate conversion,
@@ -114,10 +131,11 @@ separately validated latent/tool-ranking objective.
   Qwen can diagnose the scene and plan an executable correction without artificial RGB cues.
   Verifier generation is deterministic
   with a small repetition penalty; these settings are part of the decision-cache identity.
-- An initial state can finish only when Qwen reports no remaining error and its quality score meets
-  the configured threshold. A candidate is semantically accepted only when Qwen calls it
-  better **and explicitly accepts it**; it may still contain a localized remaining error, in which case the accepted state
-  continues with Qwen's next correction. Invalid output never authorizes an action or stop.
+- An initial state can finish only when no remaining error is reported and its quality score meets
+  the configured threshold. In Direct, this score and acceptance are runtime-derived from the
+  rubric; in Proposal/Hybrid, the staged model decision remains authoritative. A candidate may
+  still contain a localized remaining error, in which case the accepted state continues with the
+  next correction. Invalid output never authorizes an action or stop.
 - The saved-candidate replay challenge in tools/replay_verifier_challenge.py reconstructs the
   accepted-state chain and requires online/replay mask hashes to match before offline GT scoring.
 

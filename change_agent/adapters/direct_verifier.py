@@ -1,24 +1,21 @@
-"""Full-context Qwen verifier without mask-derived Proposal grounding.
+"""Full-context Qwen verifier with a deterministic change-detection rubric.
 
-Used only for the Direct arm of the Proposal ablation.  It deliberately gives
-the model global visual context and lets it author action geometry, while the
-Environment still owns coordinate parsing, tool execution, and safety gates.
+Direct mode deliberately avoids mask-derived Proposals: Qwen sees the complete
+T1/T2 pair and masks and authors action geometry.  Qwen does not author quality,
+progress, comparison, or acceptance scores.  It answers auditable binary rubric
+items; runtime aggregates them and retains ownership of every decision gate.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Mapping, Sequence
 
 from ..action_parser import ActionParser, ActionValidationError
 from ..state import AgentAction, ChangeState, VerifierOutput
 from ..verifier_protocol import ERROR_TYPES, StageBackend, StageProtocolError
 
 
-# The direct arm has no region diagnosis schema to keep its vocabulary in line
-# with. Qwen nevertheless commonly uses these plain-language equivalents.
-# Canonicalize them at the boundary rather than discarding a structurally safe
-# full-state verdict and biasing the ablation toward a no-op.
 _ERROR_TYPE_ALIASES = {
     "false_negative_change": "false_negative",
     "missing_detection": "false_negative",
@@ -30,15 +27,49 @@ _ERROR_TYPE_ALIASES = {
     "spurious_detection": "false_positive_change",
 }
 _ACTIONS = {"positive_point", "negative_point", "box", "finish"}
-_COMPARISONS = {"initial", "better", "worse", "unchanged", "uncertain"}
+
+# Evidence and target-scope judgments are hard gates, not score padding.  The
+# remaining weights express the final change-mask objective.  Precision/recall
+# dominate cosmetic boundary and artifact judgments, and every weight is owned
+# by runtime rather than supplied by Qwen.
+_RUBRIC_GATES = ("evidence_sufficient", "target_class_only")
+_RUBRIC_WEIGHTS = {
+    "change_semantic_precision": 3,
+    "change_semantic_recall": 3,
+    "changed_object_extent": 2,
+    "change_boundary_alignment": 1,
+    "change_artifact_control": 1,
+}
+_RUBRIC_IDS = _RUBRIC_GATES + tuple(_RUBRIC_WEIGHTS)
+_CANDIDATE_EFFECT_KEYS = {
+    "intended_error_improved",
+    "introduced_false_positive",
+    "introduced_false_negative",
+    "boundary_or_artifact_worsened",
+    "evidence",
+}
+
+
+@dataclass(frozen=True)
+class _RubricJudgment:
+    rubric_id: str
+    passed: bool
+    evidence: str
+
+
+@dataclass(frozen=True)
+class _CandidateEffect:
+    intended_error_improved: bool
+    introduced_false_positive: bool
+    introduced_false_negative: bool
+    boundary_or_artifact_worsened: bool
+    evidence: str
 
 
 @dataclass(frozen=True)
 class _DirectVerdict:
-    comparison: str
-    quality_score: float
-    progress_score: float
-    accept: bool
+    rubric: tuple[_RubricJudgment, ...]
+    candidate_effect: _CandidateEffect | None
     error_type: str
     target_view: str | None
     suggested_action: str
@@ -48,9 +79,9 @@ class _DirectVerdict:
 
 
 class DirectQwenVerifier:
-    """Global visual diagnosis/action grounding ablation without Proposals."""
+    """Global visual diagnosis/action grounding without Proposal geometry."""
 
-    SCHEMA_VERSION = "direct_full_context_v1"
+    SCHEMA_VERSION = "direct_change_rubric_v2"
 
     def __init__(
         self,
@@ -91,19 +122,13 @@ class DirectQwenVerifier:
         rejection_reasons: Sequence[str],
         rejection_history: Sequence[Mapping[str, Any]],
     ) -> VerifierOutput:
-        """Author a new Direct action after Environment rolls a candidate back.
-
-        The accepted masks remain the current state.  The rejected candidate is
-        attached only as visual and structured evidence so Qwen can avoid the
-        failed edit.  This is deliberately a replan, not a candidate-quality
-        decision, therefore its contract requires ``comparison=uncertain`` and
-        ``accept=false``.
-        """
+        """Author a different Direct action after Environment rollback."""
 
         audit_start = self._audit_length()
         payload = {
             "mode": "replan",
-            "schema": "direct_replan_v1",
+            "schema": self.SCHEMA_VERSION,
+            "target_class": accepted_state.query,
             "accepted_score": accepted_feedback.quality_score,
             "accepted_feedback": accepted_feedback.to_dict(),
             "rejected_action": rejected_action.to_dict(),
@@ -121,18 +146,22 @@ class DirectQwenVerifier:
                 mode="replan",
                 previous_state=rejected_candidate,
             )
+            if not _rubric_gates_pass(verdict):
+                raise StageProtocolError(
+                    "direct rollback replan rubric hard gates failed"
+                )
             replanned_action = _verdict_action(verdict, accepted_state.image_size)
             if replanned_action == rejected_action:
                 raise StageProtocolError(
                     "direct rollback replan repeated the rejected action"
                 )
-            output = self._output(
-                verdict, accepted_feedback.quality_score, initial=False
+            output, aggregate = self._output(
+                verdict, accepted_feedback.quality_score, mode="replan"
             )
             self.last_evidence = {
                 "type": "direct_qwen_verifier",
                 "schema_version": self.SCHEMA_VERSION,
-                "decision_mode": "qwen_full_context_direct_replan",
+                "decision_mode": "qwen_full_context_direct_rubric_replan",
                 "proposal_mode": "direct",
                 "verifier_valid": True,
                 "localization_valid": output.localization_valid,
@@ -144,17 +173,27 @@ class DirectQwenVerifier:
                         "rejected_candidate_mask_delta"
                     ],
                 },
-                "direct_verdict": verdict.__dict__,
+                "direct_verdict": _verdict_to_dict(verdict),
+                "rubric_aggregation": aggregate,
                 "validation_errors": [],
                 "backend_calls": self._backend_calls_since(audit_start),
             }
-            self._last_valid_output = output
+            # Replan contract keeps accept=false in audit output.  If replan
+            # nevertheless proves accepted state clean and asks for finish,
+            # retain an internal finish authorization for the following
+            # programmatic identical-state check.
+            self._last_valid_output = (
+                replace(output, accept=True, stop=True)
+                if output.error_type == "none"
+                and output.suggested_action == "finish"
+                else output
+            )
             return output
         except (KeyError, TypeError, ValueError, StageProtocolError) as error:
             self.last_evidence = {
                 "type": "direct_qwen_verifier",
                 "schema_version": self.SCHEMA_VERSION,
-                "decision_mode": "qwen_full_context_direct_replan",
+                "decision_mode": "qwen_full_context_direct_rubric_replan",
                 "proposal_mode": "direct",
                 "verifier_valid": False,
                 "localization_valid": False,
@@ -214,32 +253,36 @@ class DirectQwenVerifier:
                     "proposal_mode": "direct",
                     "verifier_valid": True,
                     "localization_valid": output.localization_valid,
+                    "rubric_reused_from_accepted_state": True,
                     "validation_errors": [],
                     "backend_calls": self._backend_calls_since(audit_start),
                 }
                 return output
-            initial = previous_state is None
-            mode = "initial" if initial else "candidate"
+            mode = "initial" if previous_state is None else "candidate"
             verdict = self._run_stage(
                 state,
                 {
                     "mode": mode,
-                    "schema": "direct_verdict_v1",
+                    "schema": self.SCHEMA_VERSION,
+                    "target_class": state.query,
                     "previous_score": previous_score,
-                    "previous_action": previous_action.to_dict() if previous_action else None,
+                    "previous_action": (
+                        previous_action.to_dict() if previous_action else None
+                    ),
                 },
                 mode=mode,
                 previous_state=previous_state,
             )
-            output = self._output(verdict, previous_score, initial=initial)
+            output, aggregate = self._output(verdict, previous_score, mode=mode)
             self.last_evidence = {
                 "type": "direct_qwen_verifier",
                 "schema_version": self.SCHEMA_VERSION,
-                "decision_mode": "qwen_full_context_direct_action",
+                "decision_mode": "qwen_full_context_direct_rubric_action",
                 "proposal_mode": "direct",
                 "verifier_valid": True,
                 "localization_valid": output.localization_valid,
-                "direct_verdict": verdict.__dict__,
+                "direct_verdict": _verdict_to_dict(verdict),
+                "rubric_aggregation": aggregate,
                 "validation_errors": [],
                 "backend_calls": self._backend_calls_since(audit_start),
             }
@@ -310,41 +353,71 @@ class DirectQwenVerifier:
         verdict: _DirectVerdict,
         previous_score: float | None,
         *,
-        initial: bool,
-    ) -> VerifierOutput:
+        mode: str,
+    ) -> tuple[VerifierOutput, dict[str, Any]]:
+        computed_quality = _rubric_quality(verdict)
+        quality = (
+            previous_score
+            if mode == "replan" and previous_score is not None
+            else computed_quality
+        )
+        score_delta = 0.0 if previous_score is None else quality - previous_score
+        comparison = _derived_comparison(verdict, mode)
+        gates_pass = _rubric_gates_pass(verdict)
         region = (
-            (verdict.coordinate_normalized_1000[0], verdict.coordinate_normalized_1000[1],
-             verdict.coordinate_normalized_1000[0], verdict.coordinate_normalized_1000[1])
+            (
+                verdict.coordinate_normalized_1000[0],
+                verdict.coordinate_normalized_1000[1],
+                verdict.coordinate_normalized_1000[0],
+                verdict.coordinate_normalized_1000[1],
+            )
             if verdict.coordinate_normalized_1000 is not None
             else verdict.box_normalized_1000
         )
         accept = (
-            verdict.error_type == "none" and verdict.quality_score >= self.accept_threshold
-            if initial
-            else verdict.accept and verdict.comparison == "better"
+            gates_pass
+            and verdict.error_type == "none"
+            and quality >= self.accept_threshold
+            if mode == "initial"
+            else gates_pass and comparison == "better"
+            if mode == "candidate"
+            else False
         )
         stop = bool(
             accept
             and verdict.error_type == "none"
             and verdict.suggested_action == "finish"
         )
+        suggested_action = verdict.suggested_action if gates_pass else None
+        localization_valid = bool(
+            gates_pass and (suggested_action == "finish" or region is not None)
+        )
+        aggregate = {
+            "source": "runtime_weighted_binary_rubric",
+            "quality_score": quality,
+            "computed_rubric_quality": computed_quality,
+            "score_delta": score_delta,
+            "comparison": comparison,
+            "accept": accept,
+            "hard_gates": list(_RUBRIC_GATES),
+            "hard_gates_pass": gates_pass,
+            "weights": dict(_RUBRIC_WEIGHTS),
+        }
         return VerifierOutput(
-            quality_score=verdict.quality_score,
-            progress_score=verdict.progress_score,
-            score_delta=(
-                0.0 if previous_score is None else verdict.quality_score - previous_score
-            ),
-            comparison=verdict.comparison,
+            quality_score=quality,
+            progress_score=score_delta,
+            score_delta=score_delta,
+            comparison=comparison,
             error_type=verdict.error_type,
             target_view=verdict.target_view or "t2",
-            error_region=region,
-            suggested_action=verdict.suggested_action,
+            error_region=region if gates_pass else None,
+            suggested_action=suggested_action,
             feedback=verdict.feedback,
             accept=accept,
             verifier_valid=True,
-            localization_valid=(verdict.suggested_action == "finish" or region is not None),
+            localization_valid=localization_valid,
             stop=stop,
-        )
+        ), aggregate
 
     def _audit_length(self) -> int:
         history = getattr(self.backend, "call_history", None)
@@ -368,12 +441,12 @@ class DirectQwenVerifier:
 def _parse_direct_verdict(payload: Mapping[str, Any], *, mode: str) -> _DirectVerdict:
     if set(payload) != {"verdict"} or not isinstance(payload["verdict"], Mapping):
         raise StageProtocolError("direct response must contain exactly a verdict object")
+    if mode not in {"initial", "candidate", "replan"}:
+        raise StageProtocolError(f"unsupported direct verdict mode: {mode!r}")
     body = payload["verdict"]
     expected = {
-        "comparison",
-        "quality_score",
-        "progress_score",
-        "accept",
+        "rubric",
+        "candidate_effect",
         "error_type",
         "target_view",
         "suggested_action",
@@ -385,69 +458,167 @@ def _parse_direct_verdict(payload: Mapping[str, Any], *, mode: str) -> _DirectVe
         raise StageProtocolError(
             f"direct verdict must contain exactly {sorted(expected)}; got {sorted(body)}"
         )
-    if mode not in {"initial", "candidate", "replan"}:
-        raise StageProtocolError(f"unsupported direct verdict mode: {mode!r}")
-    initial = mode == "initial"
-    comparison = str(body["comparison"])
-    if comparison not in _COMPARISONS or (initial and comparison != "initial") or (
-        mode == "candidate" and comparison == "initial"
-    ) or (mode == "replan" and comparison != "uncertain"):
-        raise StageProtocolError("direct verdict comparison is invalid for this state")
-    quality = _number(body["quality_score"], "quality_score", 0.0, 1.0)
-    progress = _number(body["progress_score"], "progress_score", -1.0, 1.0)
-    if not isinstance(body["accept"], bool):
-        raise StageProtocolError("direct verdict accept must be a JSON boolean")
-    accept = bool(body["accept"])
+    rubric = _parse_rubric(body["rubric"])
+    candidate_effect = _parse_candidate_effect(body["candidate_effect"], mode)
     error_type = _canonical_error_type(body["error_type"])
     if error_type not in ERROR_TYPES:
         raise StageProtocolError("direct verdict error_type is unsupported")
-    if mode == "replan" and accept:
-        raise StageProtocolError("direct replan verdict accept must be false")
-    if mode == "candidate" and accept and comparison != "better":
-        raise StageProtocolError("direct candidate accept=true requires comparison=better")
     action = str(body["suggested_action"])
     if action not in _ACTIONS:
         raise StageProtocolError("direct verdict suggested_action is unsupported")
     target = body["target_view"]
     coordinate = _point(body["coordinate_normalized_1000"])
     box = _box(body["box_normalized_1000"])
-    if error_type == "none":
-        if target is not None or action != "finish" or coordinate is not None or box is not None:
-            raise StageProtocolError("none direct verdict must finish with null target and geometry")
-    else:
-        if target not in {"t1", "t2"} or action == "finish":
-            raise StageProtocolError("direct error verdict needs target_view and tool action")
-        if action in {"positive_point", "negative_point"}:
-            if coordinate is None or box is not None:
-                raise StageProtocolError("direct point action needs only coordinate_normalized_1000")
-        elif box is None or coordinate is not None:
-            raise StageProtocolError("direct box action needs only box_normalized_1000")
-    return _DirectVerdict(
-        comparison=comparison,
-        quality_score=quality,
-        progress_score=progress,
-        accept=accept,
+    feedback = body["feedback"]
+    if not isinstance(feedback, str) or not feedback.strip():
+        raise StageProtocolError("direct verdict feedback must be a non-empty string")
+    verdict = _DirectVerdict(
+        rubric=rubric,
+        candidate_effect=candidate_effect,
         error_type=error_type,
         target_view=target,
         suggested_action=action,
         coordinate_normalized_1000=coordinate,
         box_normalized_1000=box,
-        feedback=str(body["feedback"]),
+        feedback=feedback.strip(),
     )
+    all_quality_pass = all(
+        _rubric_passes(verdict, rubric_id) for rubric_id in _RUBRIC_WEIGHTS
+    )
+    gates_pass = _rubric_gates_pass(verdict)
+    if not gates_pass and error_type != "uncertain_region":
+        raise StageProtocolError(
+            "failed Direct rubric hard gate requires error_type=uncertain_region"
+        )
+    if error_type == "none" and not (gates_pass and all_quality_pass):
+        raise StageProtocolError("error_type=none requires every Direct rubric item to pass")
+    if gates_pass and all_quality_pass and error_type != "none":
+        raise StageProtocolError("all Direct rubric items pass requires error_type=none")
+    if error_type == "none":
+        if target is not None or action != "finish" or coordinate is not None or box is not None:
+            raise StageProtocolError(
+                "none direct verdict must finish with null target and geometry"
+            )
+    else:
+        if target not in {"t1", "t2"} or action == "finish":
+            raise StageProtocolError("direct error verdict needs target_view and tool action")
+        if action in {"positive_point", "negative_point"}:
+            if coordinate is None or box is not None:
+                raise StageProtocolError(
+                    "direct point action needs only coordinate_normalized_1000"
+                )
+        elif box is None or coordinate is not None:
+            raise StageProtocolError(
+                "direct box action needs only box_normalized_1000"
+            )
+    return verdict
+
+
+def _parse_rubric(value: Any) -> tuple[_RubricJudgment, ...]:
+    if not isinstance(value, Mapping) or set(value) != set(_RUBRIC_IDS):
+        got = sorted(value) if isinstance(value, Mapping) else type(value).__name__
+        raise StageProtocolError(
+            f"direct rubric must contain exactly {sorted(_RUBRIC_IDS)}; got {got}"
+        )
+    judgments: list[_RubricJudgment] = []
+    for rubric_id in _RUBRIC_IDS:
+        item = value[rubric_id]
+        if not isinstance(item, Mapping) or set(item) != {"pass", "evidence"}:
+            raise StageProtocolError(
+                f"direct rubric {rubric_id} must contain exactly pass and evidence"
+            )
+        if not isinstance(item["pass"], bool):
+            raise StageProtocolError(f"direct rubric {rubric_id} pass must be boolean")
+        evidence = item["evidence"]
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise StageProtocolError(
+                f"direct rubric {rubric_id} evidence must be non-empty"
+            )
+        judgments.append(
+            _RubricJudgment(rubric_id, bool(item["pass"]), evidence.strip())
+        )
+    return tuple(judgments)
+
+
+def _parse_candidate_effect(value: Any, mode: str) -> _CandidateEffect | None:
+    if mode != "candidate":
+        if value is not None:
+            raise StageProtocolError(
+                "initial/replan direct candidate_effect must be JSON null"
+            )
+        return None
+    if not isinstance(value, Mapping) or set(value) != _CANDIDATE_EFFECT_KEYS:
+        raise StageProtocolError(
+            "candidate direct verdict needs exact binary candidate_effect fields"
+        )
+    boolean_keys = _CANDIDATE_EFFECT_KEYS - {"evidence"}
+    if any(not isinstance(value[key], bool) for key in boolean_keys):
+        raise StageProtocolError("direct candidate_effect flags must be booleans")
+    evidence = value["evidence"]
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise StageProtocolError("direct candidate_effect evidence must be non-empty")
+    return _CandidateEffect(
+        intended_error_improved=bool(value["intended_error_improved"]),
+        introduced_false_positive=bool(value["introduced_false_positive"]),
+        introduced_false_negative=bool(value["introduced_false_negative"]),
+        boundary_or_artifact_worsened=bool(
+            value["boundary_or_artifact_worsened"]
+        ),
+        evidence=evidence.strip(),
+    )
+
+
+def _rubric_mapping(verdict: _DirectVerdict) -> dict[str, _RubricJudgment]:
+    return {item.rubric_id: item for item in verdict.rubric}
+
+
+def _rubric_passes(verdict: _DirectVerdict, rubric_id: str) -> bool:
+    return _rubric_mapping(verdict)[rubric_id].passed
+
+
+def _rubric_gates_pass(verdict: _DirectVerdict) -> bool:
+    return all(_rubric_passes(verdict, rubric_id) for rubric_id in _RUBRIC_GATES)
+
+
+def _rubric_quality(verdict: _DirectVerdict) -> float:
+    total = sum(_RUBRIC_WEIGHTS.values())
+    passed = sum(
+        weight
+        for rubric_id, weight in _RUBRIC_WEIGHTS.items()
+        if _rubric_passes(verdict, rubric_id)
+    )
+    return round(passed / total, 6)
+
+
+def _derived_comparison(verdict: _DirectVerdict, mode: str) -> str:
+    if mode == "initial":
+        return "initial"
+    if mode == "replan" or not _rubric_gates_pass(verdict):
+        return "uncertain"
+    effect = verdict.candidate_effect
+    if effect is None:
+        raise StageProtocolError("candidate comparison requires candidate_effect")
+    harm = (
+        effect.introduced_false_positive
+        or effect.introduced_false_negative
+        or effect.boundary_or_artifact_worsened
+    )
+    if effect.intended_error_improved and not harm:
+        return "better"
+    if harm and not effect.intended_error_improved:
+        return "worse"
+    if not effect.intended_error_improved and not harm:
+        return "unchanged"
+    return "uncertain"
+
+
+def _verdict_to_dict(verdict: _DirectVerdict) -> dict[str, Any]:
+    return asdict(verdict)
 
 
 def _canonical_error_type(value: Any) -> str:
     raw = str(value).strip().lower().replace("-", " ").replace(" ", "_")
     return _ERROR_TYPE_ALIASES.get(raw, raw)
-
-
-def _number(value: Any, name: str, lower: float, upper: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise StageProtocolError(f"direct verdict {name} must be numeric")
-    result = float(value)
-    if not lower <= result <= upper:
-        raise StageProtocolError(f"direct verdict {name} is outside [{lower}, {upper}]")
-    return result
 
 
 def _point(value: Any) -> tuple[int, int] | None:
@@ -457,7 +628,9 @@ def _point(value: Any) -> tuple[int, int] | None:
         isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 1000
         for item in value
     ):
-        raise StageProtocolError("direct coordinate_normalized_1000 must be two [0,1000] integers")
+        raise StageProtocolError(
+            "direct coordinate_normalized_1000 must be two [0,1000] integers"
+        )
     return int(value[0]), int(value[1])
 
 
@@ -468,7 +641,9 @@ def _box(value: Any) -> tuple[int, int, int, int] | None:
         isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 1000
         for item in value
     ):
-        raise StageProtocolError("direct box_normalized_1000 must contain four [0,1000] integers")
+        raise StageProtocolError(
+            "direct box_normalized_1000 must contain four [0,1000] integers"
+        )
     x1, y1, x2, y2 = (int(item) for item in value)
     if x1 >= x2 or y1 >= y2:
         raise StageProtocolError("direct box_normalized_1000 must be ordered")
@@ -496,7 +671,7 @@ def _mask_delta_summary(
 def _verdict_action(
     verdict: _DirectVerdict, image_size: tuple[int, int]
 ) -> AgentAction:
-    """Convert Direct public geometry to the same pixel action Environment executes."""
+    """Convert Direct public geometry to Environment pixel action."""
 
     payload: dict[str, Any] = {
         "target_view": verdict.target_view or "t2",
