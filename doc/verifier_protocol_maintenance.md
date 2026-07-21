@@ -62,22 +62,26 @@ The current BaiLian operational path is `proposal_mode=direct`. The hosted model
 can inspect complete T1/T2 RGB, predicted temporal masks, and the final change
 mask without Proposal crops. Proposal and Hybrid remain controlled ablation arms.
 
-Direct schema `direct_change_rubric_v2` forbids model-authored
+Direct schema `direct_change_rubric_v3` forbids model-authored
 `quality_score`, `progress_score`, `comparison`, and `accept`. Qwen returns exact
 binary judgments with a short observable evidence string for each item:
 
 - `evidence_sufficient`: hard gate for visual judgeability;
-- `target_class_only`: hard gate requiring every judgment to concern only the
-  configured query target;
+- `target_class_only`: auditable scope diagnostic. It must be true when Qwen
+  correctly treats roads/vehicles/etc. as non-target false positives; it is not
+  a stop gate, because a false mask can be correctly diagnosed while evidence
+  remains actionable;
 - `change_semantic_precision`: weight 3;
 - `change_semantic_recall`: weight 3;
 - `changed_object_extent`: weight 2;
 - `change_boundary_alignment`: weight 1;
 - `change_artifact_control`: weight 1.
 
-Runtime computes quality as passed weight divided by total weight. Gate items do
-not add score. A failed gate authorizes no action. `error_type=none` is valid only
-when every rubric item passes; every item passing also requires `none`. For the
+Runtime computes quality as passed quality-weight divided by total quality weight.
+Only `evidence_sufficient` is a hard gate and it does not add score. A failed
+evidence gate authorizes no action. `error_type=none` is valid only when every
+quality item and target-scope diagnostic pass; target-scope failure may still
+carry an actionable FP/mixed diagnosis. For the
 LEVIR `building` query, roads, parking areas, vehicles, vegetation, bare ground,
 shadows, illumination, and registration differences are non-target context.
 Predicted T1/T2 masks are fallible evidence rather than GT and are not required

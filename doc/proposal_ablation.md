@@ -28,11 +28,12 @@ small-change recall, invalid/unsafe tool actions, accepted-candidate IoU/F1,
 audited-region coverage, token usage, endpoint failures, and latency. Do not
 rank arms from aggregate IoU alone.
 
-Direct schema `direct_change_rubric_v2` canonicalizes common model aliases such
+Direct schema `direct_change_rubric_v3` canonicalizes common model aliases such
 as `missing_detection` to `false_negative`, while retaining JSON and geometry
 validation. Qwen cannot author quality, progress, comparison, or acceptance.
 Runtime weights change precision/recall/extent/boundary/artifact booleans, applies
-evidence and target-class hard gates, then derives candidate comparison from one
+the evidence-sufficiency hard gate, retains target-scope as an audit diagnostic,
+then derives candidate comparison from one
 benefit and three harm flags. Proposal and Hybrid retain their staged decision
 contract. In every arm, Environment commits only `better, accept=true`
 candidates after its own safety gates.

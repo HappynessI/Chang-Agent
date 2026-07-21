@@ -28,11 +28,14 @@ _ERROR_TYPE_ALIASES = {
 }
 _ACTIONS = {"positive_point", "negative_point", "box", "finish"}
 
-# Evidence and target-scope judgments are hard gates, not score padding.  The
-# remaining weights express the final change-mask objective.  Precision/recall
-# dominate cosmetic boundary and artifact judgments, and every weight is owned
-# by runtime rather than supplied by Qwen.
-_RUBRIC_GATES = ("evidence_sufficient", "target_class_only")
+# Evidence sufficiency is a hard gate; target-scope is retained as an auditable
+# diagnostic rather than a stop gate.  The remaining weights express the final
+# change-mask objective.  Precision/recall dominate cosmetic boundary and
+# artifact judgments, and every weight is owned by runtime rather than Qwen.
+# ``target_class_only`` is an auditable scope diagnostic, not a stop gate.  A
+# model can correctly identify non-target pixels as false positives and still
+# report that evidence.  Only visual judgeability blocks an executable repair.
+_RUBRIC_GATES = ("evidence_sufficient",)
 _RUBRIC_WEIGHTS = {
     "change_semantic_precision": 3,
     "change_semantic_recall": 3,
@@ -81,7 +84,7 @@ class _DirectVerdict:
 class DirectQwenVerifier:
     """Global visual diagnosis/action grounding without Proposal geometry."""
 
-    SCHEMA_VERSION = "direct_change_rubric_v2"
+    SCHEMA_VERSION = "direct_change_rubric_v3"
 
     def __init__(
         self,
@@ -490,9 +493,12 @@ def _parse_direct_verdict(payload: Mapping[str, Any], *, mode: str) -> _DirectVe
         raise StageProtocolError(
             "failed Direct rubric hard gate requires error_type=uncertain_region"
         )
-    if error_type == "none" and not (gates_pass and all_quality_pass):
+    target_scope_pass = _rubric_passes(verdict, "target_class_only")
+    if error_type == "none" and not (
+        gates_pass and target_scope_pass and all_quality_pass
+    ):
         raise StageProtocolError("error_type=none requires every Direct rubric item to pass")
-    if gates_pass and all_quality_pass and error_type != "none":
+    if gates_pass and target_scope_pass and all_quality_pass and error_type != "none":
         raise StageProtocolError("all Direct rubric items pass requires error_type=none")
     if error_type == "none":
         if target is not None or action != "finish" or coordinate is not None or box is not None:

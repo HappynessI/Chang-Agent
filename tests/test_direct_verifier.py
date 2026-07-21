@@ -170,14 +170,14 @@ class DirectVerifierTest(unittest.TestCase):
         self.assertFalse(output.verifier_valid)
         self.assertIsNone(output.suggested_action)
 
-    def test_failed_target_scope_gate_authorizes_no_action(self):
+    def test_target_scope_diagnostic_does_not_block_actionable_diagnosis(self):
         rubric = make_rubric(target_class_only=False)
         backend = DirectBackend(
             make_verdict(
                 rubric=rubric,
-                error_type="uncertain_region",
+                error_type="mixed_error",
                 target_view="t2",
-                action="positive_point",
+                action="negative_point",
                 coordinate=[200, 200],
                 feedback="Judgment included non-building content.",
             )
@@ -187,9 +187,10 @@ class DirectVerifierTest(unittest.TestCase):
         output = verifier.verify(make_state(), None, None)
 
         self.assertTrue(output.verifier_valid)
-        self.assertFalse(output.localization_valid)
-        self.assertIsNone(output.suggested_action)
-        self.assertFalse(
+        self.assertTrue(output.localization_valid)
+        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertEqual(output.error_region, (200, 200, 200, 200))
+        self.assertTrue(
             verifier.last_evidence["rubric_aggregation"]["hard_gates_pass"]
         )
 

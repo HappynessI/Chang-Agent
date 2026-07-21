@@ -109,7 +109,8 @@ separately validated latent/tool-ranking objective.
   with short observable evidence, an error type, and action geometry. It never returns
   `quality_score`, `progress_score`, `comparison`, or `accept`. Runtime computes weighted
   quality from semantic precision/recall, changed-object extent, boundary alignment, and
-  artifact control. Evidence sufficiency and target-class-only reasoning are hard gates.
+  artifact control. Evidence sufficiency is a hard gate; target-class-only reasoning is
+  retained as an auditable diagnostic and does not block an actionable FP/mixed diagnosis.
   For the building query, roads, parking areas, vehicles, vegetation, bare ground, shadows,
   illumination, and registration differences are explicitly non-target context.
 - A Direct candidate additionally reports whether the intended error improved and whether
