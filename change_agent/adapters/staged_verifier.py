@@ -36,6 +36,7 @@ class StagedQwenVerifier:
         accept_threshold: float = 0.82,
         max_regions: int = 6,
         max_retries: int = 2,
+        visual_context: str = "hybrid",
     ):
         if not 0 <= accept_threshold <= 1:
             raise ValueError("accept_threshold must be in [0,1]")
@@ -43,10 +44,13 @@ class StagedQwenVerifier:
             raise ValueError("max_regions must be positive")
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
+        if visual_context not in {"proposal", "hybrid"}:
+            raise ValueError("visual_context must be proposal or hybrid")
         self.backend = backend
         self.accept_threshold = accept_threshold
         self.max_regions = max_regions
         self.max_retries = max_retries
+        self.visual_context = visual_context
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
 
@@ -85,10 +89,10 @@ class StagedQwenVerifier:
                     error_region=previous.error_region if previous else None,
                     suggested_action=previous.suggested_action if previous else None,
                     feedback="Candidate masks are identical to the accepted state.",
-                    accept=False,
+                    accept=bool(previous and previous.accept),
                     verifier_valid=True,
                     localization_valid=bool(previous and previous.localization_valid),
-                    stop=False,
+                    stop=bool(previous and previous.stop),
                 )
                 self.last_evidence = {
                     "type": "staged_qwen_verifier",
@@ -333,7 +337,11 @@ class StagedQwenVerifier:
             judgment = self._run_stage(
                 evidence_stage,
                 state,
-                {"region": record.to_dict(), "schema": "evidence_judgment_v1"},
+                {
+                    "region": record.to_dict(),
+                    "schema": "evidence_judgment_v1",
+                    "visual_context": self.visual_context,
+                },
                 lambda response, region_id=record.region_id: _parse_judgment(
                     response, region_id
                 ),
@@ -359,6 +367,7 @@ class StagedQwenVerifier:
                     "region": record.to_dict(),
                     "visual_judgment": judgment.__dict__,
                     "schema": "diagnosis_v1",
+                    "visual_context": self.visual_context,
                 },
                 parse_diagnosis,
                 previous_state,
@@ -385,27 +394,11 @@ class StagedQwenVerifier:
             and record.change_mask_state != "white"
         ):
             raise StageProtocolError("false_positive_change requires a white change region")
-        if candidate or judgment.evidence_quality == "insufficient":
-            return
-        states = {judgment.t1_state, judgment.t2_state}
-        clear_appearance = states == {"background", "building"}
-        if (
-            clear_appearance
-            and record.change_mask_state == "white"
-            and diagnosis.error_type == "false_positive_change"
-        ):
-            raise StageProtocolError(
-                "a clear T1/T2 building appearance difference already supported by a white "
-                "change region cannot be labeled false_positive_change"
-            )
-        if (
-            clear_appearance
-            and record.change_mask_state == "black"
-            and diagnosis.error_type == "none"
-        ):
-            raise StageProtocolError(
-                "a clear T1/T2 appearance difference missing from the change mask cannot be none"
-            )
+        # White/black proposal polarity is a structural invariant.  It is not a
+        # semantic correctness proof: one component can contain both a real
+        # temporal change and unsupported boundary/interior pixels.  Qwen must
+        # therefore retain authority to emit false_positive_change, mixed_error,
+        # or none after inspecting RGB and mask coverage.
 
     def _select_diagnosis(
         self, diagnoses: tuple[Diagnosis, ...]
@@ -478,9 +471,9 @@ class StagedQwenVerifier:
                 raise StageProtocolError(
                     "candidate decision cannot use comparison=initial"
                 )
-            if not initial and decision.accept != (decision.comparison == "better"):
+            if not initial and decision.accept and decision.comparison != "better":
                 raise StageProtocolError(
-                    "candidate accept must be true exactly when comparison=better"
+                    "candidate accept=true requires comparison=better"
                 )
             return decision
 

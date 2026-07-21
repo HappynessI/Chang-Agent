@@ -89,6 +89,41 @@ class ProposalCaptureVerifier:
         )
 
 
+class ReplanningVerifier:
+    def __init__(self, initial_feedback, replan_feedback):
+        self.initial_feedback = initial_feedback
+        self.replan_feedback = replan_feedback
+        self.replan_calls = []
+
+    def verify(self, state, previous_score, previous_action, previous_state=None):
+        if previous_state is not None:
+            raise AssertionError("hard gate should skip candidate verification")
+        return self.initial_feedback
+
+    def replan_after_rejection(
+        self,
+        accepted_state,
+        rejected_candidate,
+        accepted_feedback,
+        rejected_feedback,
+        rejected_action,
+        rejection_reasons,
+        rejection_history,
+    ):
+        self.replan_calls.append(
+            {
+                "accepted_state": accepted_state.clone(),
+                "rejected_candidate": rejected_candidate.clone(),
+                "accepted_feedback": accepted_feedback,
+                "rejected_feedback": rejected_feedback,
+                "rejected_action": rejected_action,
+                "rejection_reasons": tuple(rejection_reasons),
+                "rejection_history": tuple(rejection_history),
+            }
+        )
+        return self.replan_feedback
+
+
 class EnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.box = Box()
@@ -171,6 +206,44 @@ class EnvironmentTest(unittest.TestCase):
             entry.execution["candidate_rejection_reasons"],
         )
 
+    def test_pairwise_better_but_verifier_rejected_candidate_is_rolled_back(self):
+        initial_feedback = VerifierOutput(
+            comparison="initial",
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="positive_point",
+            feedback="Initial feedback.",
+        )
+        candidate_feedback = VerifierOutput(
+            comparison="better",
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="positive_point",
+            feedback="Relatively better but still insufficient.",
+            accept=False,
+        )
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(Point(), self.box),
+            SequenceVerifier([initial_feedback, candidate_feedback]),
+            max_steps=2,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        accepted_mask = environment.state.change_mask.copy()
+
+        environment.step(AgentAction("t2", "positive_point", coordinate=(0, 0)))
+
+        entry = environment.trajectory.entries[1]
+        self.assertFalse(entry.execution["candidate_accepted"])
+        self.assertEqual(entry.execution["pairwise_comparison"], "better")
+        self.assertIn(
+            "verifier_not_accepted", entry.execution["candidate_rejection_reasons"]
+        )
+        self.assertTrue(np.array_equal(environment.state.change_mask, accepted_mask))
+        self.assertEqual(environment.trajectory.best_entry.step_index, 0)
+
     def test_locality_gate_rejects_global_point_component(self):
         class GlobalPoint:
             def refine(self, image, initial_mask, coordinate, is_positive, click_history=()):
@@ -213,6 +286,67 @@ class EnvironmentTest(unittest.TestCase):
         )
         self.assertTrue(entry.execution["verifier_skipped_by_hard_gate"])
         self.assertEqual(verifier.call_count, 1)
+
+    def test_rollback_replans_from_accepted_state_without_reusing_action(self):
+        class GlobalPoint:
+            def refine(self, image, initial_mask, coordinate, is_positive, click_history=()):
+                return np.ones_like(initial_mask)
+
+        initial_feedback = VerifierOutput(
+            comparison="initial",
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(0, 0, 100, 100),
+            suggested_action="positive_point",
+            feedback="Initial feedback.",
+        )
+        replacement_feedback = VerifierOutput(
+            comparison="uncertain",
+            error_type="false_negative",
+            target_view="t2",
+            error_region=(700, 700, 700, 700),
+            suggested_action="positive_point",
+            feedback="Use a different, local point.",
+        )
+        verifier = ReplanningVerifier(initial_feedback, replacement_feedback)
+        environment = ChangeAgentEnvironment(
+            Backend(),
+            ActionExecutor(GlobalPoint(), self.box),
+            verifier,
+            max_steps=3,
+            max_selection_area_delta=1.0,
+            max_locality_outside_ratio=0.0,
+            max_target_mask_change_ratio=1.0,
+            max_component_count_delta=100,
+        )
+        environment.reset(self.image1, self.image2, "building")
+        accepted_mask = environment.state.change_mask.copy()
+
+        observation, _ = environment.step(
+            AgentAction("t2", "positive_point", coordinate=(0, 0))
+        )
+
+        self.assertTrue(np.array_equal(environment.state.change_mask, accepted_mask))
+        self.assertEqual(observation.feedback.error_region, (700, 700, 700, 700))
+        self.assertEqual(len(verifier.replan_calls), 1)
+        self.assertEqual(
+            verifier.replan_calls[0]["rejection_reasons"],
+            ("locality_outside_roi_exceeded",),
+        )
+        self.assertEqual(
+            verifier.replan_calls[0]["rejected_action"].coordinate, (0, 0)
+        )
+        self.assertEqual(verifier.replan_calls[0]["rejection_history"][0]["step_index"], 1)
+        self.assertEqual(
+            verifier.replan_calls[0]["rejection_history"][0]["rejection_reasons"],
+            ["locality_outside_roi_exceeded"],
+        )
+        entry = environment.trajectory.entries[1]
+        self.assertIn("rollback_replan", entry.execution)
+        self.assertEqual(
+            entry.execution["rollback_replan"]["verifier_output"]["error_region"],
+            [700, 700, 700, 700],
+        )
 
     def test_verifier_feedback_declares_normalized_public_coordinates(self):
         observation = self.environment.reset(self.image1, self.image2, "building")

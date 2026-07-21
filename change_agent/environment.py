@@ -51,6 +51,7 @@ class ChangeAgentEnvironment:
         verifier_max_delta_regions: int = 3,
         verifier_min_region_area: int = 4,
         verifier_region_padding_ratio: float = 0.25,
+        enable_verifier_regions: bool = True,
     ):
         if not inference_only:
             raise ValueError("runtime Environment currently supports inference_only=True only")
@@ -87,6 +88,7 @@ class ChangeAgentEnvironment:
         self.verifier_max_delta_regions = verifier_max_delta_regions
         self.verifier_min_region_area = verifier_min_region_area
         self.verifier_region_padding_ratio = verifier_region_padding_ratio
+        self.enable_verifier_regions = bool(enable_verifier_regions)
         self.trajectory = Trajectory(
             run_metadata,
             selection_policy=selection_policy,
@@ -123,7 +125,8 @@ class ChangeAgentEnvironment:
             initialized.update,
             step_index=0,
         )
-        self._attach_verifier_regions(self.state, None)
+        if self.enable_verifier_regions:
+            self._attach_verifier_regions(self.state, None)
         self.feedback = self.verifier.verify(self.state, None, None, None)
         execution = self._with_verifier_evidence(
             {"event": "reset", "candidate_accepted": True}
@@ -292,7 +295,8 @@ class ChangeAgentEnvironment:
                 "gt_available": False,
             }
         else:
-            self._attach_verifier_regions(candidate, previous_state)
+            if self.enable_verifier_regions:
+                self._attach_verifier_regions(candidate, previous_state)
             verifier_output = self.verifier.verify(
                 candidate, self.feedback.quality_score, action, previous_state
             )
@@ -314,10 +318,17 @@ class ChangeAgentEnvironment:
                 if verifier_output.progress_score is not None
                 else verifier_output.score_delta
             )
-        if action.action != "finish" and not verifier_skipped:
-            if verifier_output.comparison is not None:
+        if not verifier_skipped:
+            if action.action == "finish":
+                if not verifier_output.accept:
+                    rejection_reasons.append("verifier_not_accepted")
+            elif verifier_output.comparison is not None:
                 if verifier_output.comparison != "better":
                     rejection_reasons.append("candidate_effect_not_better")
+                elif not verifier_output.accept:
+                    # A relative ranking may still be an explicit rejection:
+                    # runtime safety gates must not convert it into a commit.
+                    rejection_reasons.append("verifier_not_accepted")
             elif ranking_progress <= self.selection_epsilon:
                 rejection_reasons.append("progress_did_not_improve")
         candidate_accepted = not rejection_reasons
@@ -355,8 +366,9 @@ class ChangeAgentEnvironment:
                 )
                 self._accepted_point_clicks[action.target_view] = []
         else:
-            # Keep the rejected candidate in the trajectory, but continue the
-            # closed loop from the last accepted state and feedback.
+            # Keep the rejected candidate in the trajectory, but continue from
+            # the last accepted masks.  A verifier may optionally author a
+            # replacement action using the rejected candidate as evidence.
             previous_state.step_index = next_index
             self.state = previous_state
             self.feedback = previous_feedback
@@ -365,6 +377,53 @@ class ChangeAgentEnvironment:
                 reject_callback(previous_feedback)
             if action.action != "finish":
                 self._rejected_action_signatures.add(action_signature)
+            replan = getattr(self.verifier, "replan_after_rejection", None)
+            if callable(replan):
+                replan_history = self.trajectory.rejected_action_history(limit=3)
+                replan_history.append(
+                    self._rejection_history_record(
+                        next_index,
+                        action,
+                        verifier_output,
+                        rejection_reasons,
+                        execution,
+                    )
+                )
+                try:
+                    replan_output = replan(
+                        previous_state,
+                        candidate,
+                        previous_feedback,
+                        verifier_output,
+                        action,
+                        tuple(rejection_reasons),
+                        tuple(replan_history[-4:]),
+                    )
+                    if not isinstance(replan_output, VerifierOutput):
+                        raise TypeError(
+                            "replan_after_rejection must return a VerifierOutput"
+                        )
+                except Exception as error:
+                    replan_output = VerifierOutput(
+                        quality_score=previous_feedback.quality_score,
+                        progress_score=0.0,
+                        comparison="uncertain",
+                        error_type=previous_feedback.error_type,
+                        target_view=previous_feedback.target_view,
+                        error_region=None,
+                        suggested_action=None,
+                        feedback="Rollback replan failed; no action is authorized.",
+                        accept=False,
+                        verifier_valid=False,
+                        localization_valid=False,
+                        stop=False,
+                    )
+                    execution["rollback_replan_error"] = type(error).__name__
+                self.feedback = replan_output
+                execution["rollback_replan"] = {
+                    "verifier_output": replan_output.to_dict(),
+                    "verifier_evidence": self._verifier_evidence(),
+                }
         self.done = (
             next_index >= self.max_steps
             or (
@@ -403,10 +462,35 @@ class ChangeAgentEnvironment:
 
     def _with_verifier_evidence(self, execution: dict[str, Any]) -> dict[str, Any]:
         result = dict(execution)
-        evidence = getattr(self.verifier, "last_evidence", None)
+        evidence = self._verifier_evidence()
         if evidence:
             result["verifier_evidence"] = evidence
         return result
+
+    def _verifier_evidence(self) -> dict[str, Any] | None:
+        evidence = getattr(self.verifier, "last_evidence", None)
+        return dict(evidence) if isinstance(evidence, Mapping) else None
+
+    @staticmethod
+    def _rejection_history_record(
+        step_index: int,
+        action: AgentAction,
+        verifier_output: VerifierOutput,
+        rejection_reasons: list[str],
+        execution: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        locality = execution.get("locality", {})
+        return {
+            "step_index": step_index,
+            "action": action.to_dict(),
+            "rejection_reasons": list(rejection_reasons),
+            "candidate_comparison": verifier_output.comparison,
+            "candidate_accept": bool(verifier_output.accept),
+            "candidate_feedback": verifier_output.feedback[:400],
+            "candidate_area_delta": execution.get("candidate_area_delta"),
+            "changed_pixels": locality.get("changed_pixels"),
+            "outside_roi_ratio": locality.get("outside_roi_ratio"),
+        }
 
     @staticmethod
     def _action_signature(state: ChangeState, action: AgentAction) -> str:

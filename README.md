@@ -52,6 +52,12 @@ hosted model while preserving the existing Environment and ActionParser trust bo
 API credentials are read only from `DASHSCOPE_API_KEY` (or the variable named by
 `--bailian-api-key-env`) and are never stored in run artifacts.
 
+`--proposal-mode direct|proposal|hybrid` provides a controlled Proposal ablation.
+Direct sends full state to Qwen and accepts model-authored action geometry; Proposal
+uses local Proposal crops and Environment geometry; Hybrid sends full state plus
+local crops while keeping Environment geometry for execution and candidate checks.
+See [`doc/proposal_ablation.md`](doc/proposal_ablation.md).
+
 The offline training schema deliberately has no `target_view` target. Earlier smoke
 data alternated T1/T2 by sample index, which was not a real label and must not be used
 for training. A future trained target-view policy requires real supervision or a
@@ -110,7 +116,7 @@ separately validated latent/tool-ranking objective.
   with a small repetition penalty; these settings are part of the decision-cache identity.
 - An initial state can finish only when Qwen reports no remaining error and its quality score meets
   the configured threshold. A candidate is semantically accepted only when Qwen calls it
-  better; it may still contain a localized remaining error, in which case the accepted state
+  better **and explicitly accepts it**; it may still contain a localized remaining error, in which case the accepted state
   continues with Qwen's next correction. Invalid output never authorizes an action or stop.
 - The saved-candidate replay challenge in tools/replay_verifier_challenge.py reconstructs the
   accepted-state chain and requires online/replay mask hashes to match before offline GT scoring.
@@ -118,7 +124,8 @@ separately validated latent/tool-ranking objective.
 The runner supports `verifier_best`, `conservative_best`, and `initial` selection
 policies. All attempted candidate masks are retained, and initial, verifier-best,
 last-attempted, and selected prediction masks are exported. A tool candidate is accepted
-only when the Verifier is valid, its categorical comparison is `better`, and its
+only when the Verifier is valid, its categorical comparison is `better`, it sets
+`accept=true`, and its
 absolute mask-area jump stays within the configured limit. Rejected candidates
 remain auditable in the trajectory, while the next Agent step resumes from the previous
 accepted state. If model action retries are exhausted, the episode stops without
@@ -277,9 +284,12 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 PYTHONPATH=. python tools/smoke_loop.py --output outputs/smoke
 ```
 
-The smoke output includes `trajectory.json` and one `.npy` change mask per step. Run
-metadata records the Git commit, Python/platform, seed, and dataset split. Production
-runs should additionally pass config/checkpoint/GPU/software metadata through
+The smoke output includes `trajectory.json` and one `.npy` change mask per step. The
+LEVIR runner also accepts `--visualize`; when enabled it writes each step's binary
+`t1_mask.png`/`t2_mask.png` and every connected-component instance used by matching
+under `visualizations/<sample>/step_<index>/{t1,t2}_instances/`. Run metadata records
+the Git commit, Python/platform, seed, and dataset split. Production runs should
+additionally pass config/checkpoint/GPU/software metadata through
 `ChangeAgentEnvironment(run_metadata=...)`.
 
 ## Adapter contract

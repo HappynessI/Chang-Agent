@@ -1,5 +1,100 @@
 # Development log
 
+## 2026-07-21 — Direct rollback replan
+
+The Direct Proposal-ablation arm previously treated its verifier feedback as
+its action source. After any candidate rollback, Environment correctly restored
+the accepted masks but also restored that same action-bearing feedback, causing
+Direct to retry an action now present in the rejected-action blacklist. Direct
+therefore stopped after one candidate rather than performing the intended
+multi-step loop.
+
+Environment now exposes an optional rollback-replan hook. `DirectQwenVerifier`
+receives the accepted state, rejected candidate masks, rejected action, mask
+delta, candidate verdict, and rejection reason, then makes a new full-context
+Qwen request. It also receives a bounded four-entry, GT-free rejection history
+so a stateless provider call can avoid earlier failed actions. Replans must use
+`comparison="uncertain"` and `accept=false`; they author a different executable
+action or `finish`. Replan failure is fail-safe and authorizes no action.
+Proposal and Hybrid continue using their independent Agent regeneration path.
+Regression tests cover hard-gate rollback, accepted-state preservation, replan
+audit, Direct replan payload, and prompt requirements.
+
+## 2026-07-21 — staged Verifier semantic override removal and Proposal ablation
+
+The original BaiLian run recorded repeated raw `false_positive_change` diagnoses
+that were rejected by a runtime rule equating a white component with a clear
+T1/T2 appearance difference to a wholly correct change region. This is invalid
+for components containing a real change plus unsupported boundary/interior
+pixels, and caused `test_85_16` to receive an erroneous initial `none`/finish
+verdict. The override is removed; only polarity, schema, editability, and
+geometry remain runtime-owned. Diagnosis stages now receive their stated RGB and
+mask images rather than only prior serialized evidence. A valid initial
+Verifier `stop=true` now ends the episode immediately; identical-state finish
+preserves a previously authorized stop.
+
+The runner now supports `--proposal-mode direct|proposal|hybrid`. Direct uses
+full-state Qwen diagnosis and model-authored action geometry without Proposal
+attachment. Proposal uses regional crops and Environment geometry. Hybrid uses
+full state plus regional crops and Environment geometry. The three-arm BaiLian
+experiment is launched into one `experiments/` parent with `direct/`,
+`proposal/`, and `hybrid/` children.
+
+The ablation then exposed two additional protocol/commit defects. Direct Qwen
+used valid plain-language labels such as `missing_detection`, but the newly
+introduced Direct parser rejected them because its error enum was narrower than
+the prompt. The boundary now canonicalizes documented aliases to the shared
+typed vocabulary and requires an explicit `accept` field. Separately, the
+staged decision parser had required `accept=true` whenever
+`comparison=better`; it now permits `better, accept=false`. Environment commit
+now requires all safety gates, `comparison=better`, and `accept=true`, so a
+model's explicit candidate rejection cannot be silently promoted to a commit.
+The focused Slurm regression suite passed 43 tests. Final corrected results are
+recorded in `experiments/CA_0721(8)-bailian-proposal-ablation/ablation_results.md`.
+
+## 2026-07-21 — remove small-model diagnosis bias from staged prompt
+
+The staged diagnosis prompt no longer presents `error_type=none` with
+`confidence=0.0` as its semantic default and no longer says that a white change
+region with a T1/T2 difference is normally correct.  It now asks the MLLM to
+inspect full-region coverage, boundaries, and internal gaps; `mixed_error` is
+explicitly used for proposals containing both supported and unsupported pixels.
+Environment geometry, schema, editability, and polarity validation remain
+unchanged.  Proposal generation remains enabled for this prompt-only ablation.
+
+## 2026-07-21 — Bailian prompt + original Proposal Slurm test
+
+After probing node paths, GPU visibility, proxy fingerprints, and the
+workspace endpoint, job `42156` ran on `gpu43` with one GPU and three fixed
+samples.  The inherited localhost proxy was unavailable on the compute node;
+unsetting proxy variables made the endpoint reachable, so this run used the
+same direct path as the prior successful Bailian case.  The result is
+`outputs/CA_0721(5)-bailian-prompt-original-proposal-direct`.
+
+Aggregate selected metrics were IoU `0.69744116`, precision `0.72136906`,
+recall `0.95459950`, and F1 `0.82175592`.  No selected mask improved over its
+own initial mask: `test_20_15` stayed at IoU `0.84638554`, `test_78_13` at
+`0.75787116`, and `test_85_16` at `0.30658070`.  The run completed all three
+samples successfully; Slurm logs are under the experiment's `logs/` directory.
+
+The prompt cleanup changed the initial diagnosis behavior from the old
+zero-confidence `none` outputs to high-confidence `none` outputs on these
+samples, but did not make the model discover pixel-level false positives in
+the initial proposals.  Candidate-stage diagnosis did identify several
+`false_positive_change` regions, yet the corresponding candidates were not
+accepted.  This is a prompt/model judgment limitation, not an Executor
+failure.
+
+## 2026-07-20 — opt-in temporal and instance-mask visualization
+
+The LEVIR closed-loop runner now exposes `--visualize`. When enabled, trajectory
+serialization exports the predicted T1/T2 binary masks and one binary PNG for every
+connected-component T1/T2 instance used by OmniOVCD-style matching. Artifacts are
+organized per sample and per trajectory step, including rejected candidates, under
+`visualizations/<sample>/step_<index>/`. Each trajectory step records its relative
+visualization directory. The default remains off, so non-visual runs keep their previous
+artifact footprint.
+
 ## 2026-07-20 — first rich-Verifier GPU result and executable long-output protocol
 
 Single-GPU job `41502` evaluated commit `26a79b7` in

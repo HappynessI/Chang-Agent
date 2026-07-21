@@ -358,7 +358,7 @@ def _stage_images(
     previous_state: ChangeState | None,
     payload: Mapping[str, Any],
 ) -> list[tuple[str, Image.Image]]:
-    if stage in {"evidence", "candidate_evidence"}:
+    if stage == "direct":
         images = [
             ("T1 earlier RGB image", _as_image(state.t1_image)),
             ("T2 later RGB image", _as_image(state.t2_image)),
@@ -366,6 +366,34 @@ def _stage_images(
             ("Current predicted T2 object mask", _mask_image(state.t2_mask)),
             ("Current final change mask", _mask_image(state.change_mask)),
         ]
+        if previous_state is not None:
+            rejected = payload.get("mode") == "replan"
+            state_label = "Rejected candidate" if rejected else "Previous accepted"
+            images.extend(
+                [
+                    (f"{state_label} T1 object mask", _mask_image(previous_state.t1_mask)),
+                    (f"{state_label} T2 object mask", _mask_image(previous_state.t2_mask)),
+                    (f"{state_label} final change mask", _mask_image(previous_state.change_mask)),
+                ]
+            )
+        return images
+    if stage in {"evidence", "candidate_evidence", "diagnosis", "candidate_diagnosis"}:
+        visual_context = str(payload.get("visual_context", "hybrid"))
+        if visual_context not in {"proposal", "hybrid"}:
+            raise StageProtocolError(
+                "visual_context must be proposal or hybrid for staged regional calls"
+            )
+        images: list[tuple[str, Image.Image]] = []
+        if visual_context == "hybrid":
+            images.extend(
+                [
+                    ("T1 earlier RGB image", _as_image(state.t1_image)),
+                    ("T2 later RGB image", _as_image(state.t2_image)),
+                    ("Current predicted T1 object mask", _mask_image(state.t1_mask)),
+                    ("Current predicted T2 object mask", _mask_image(state.t2_mask)),
+                    ("Current final change mask", _mask_image(state.change_mask)),
+                ]
+            )
         region = payload.get("region")
         if isinstance(region, Mapping):
             box = region.get("box_normalized_1000")
@@ -375,6 +403,8 @@ def _stage_images(
                     [
                         ("Exact T1 proposal crop", _as_image(state.t1_image).crop(crop_box)),
                         ("Exact T2 proposal crop", _as_image(state.t2_image).crop(crop_box)),
+                        ("Exact proposal T1 object-mask crop", _mask_image(state.t1_mask).crop(crop_box)),
+                        ("Exact proposal T2 object-mask crop", _mask_image(state.t2_mask).crop(crop_box)),
                         ("Exact proposal change-mask crop", _mask_image(state.change_mask).crop(crop_box)),
                     ]
                 )
@@ -417,16 +447,26 @@ def _stage_prompt(
         )
     elif stage in {"diagnosis", "candidate_diagnosis"}:
         schema = (
-            f'{{"region_id":"{region_id}","diagnosis":{{'
-            '"error_type":"none","target_view":null,"confidence":0.0}}}'
+            '{"region_id":"' + region_id + '","diagnosis":{'
+            '"error_type":<ERROR_TYPE>,"target_view":<TARGET_VIEW_OR_NULL>,'
+            '"confidence":<CONFIDENCE_0_TO_1>}}'
         )
         task = (
-            "Classify the current mask error. If T1/T2 visual states differ and the change mask "
-            "is already white, the region is normally correct and error_type is none. If that "
-            "difference is missing from a black change mask, use false_negative and target the "
-            "view that should gain an object-mask correction. error_type must be one of none, "
-            "false_positive_change, false_negative, mixed_error, uncertain_region. target_view "
-            "must be JSON null when error_type is none; otherwise use the JSON string t1 or t2."
+            "Classify the current mask error from supplied RGB evidence, predicted masks, "
+            "proposal crop, and Environment facts. Do not infer correctness from the change-mask "
+            "color or from a temporal difference alone. A proposal may contain both correct and "
+            "incorrect pixels. Use false_positive_change when predicted white change lacks real "
+            "T1/T2 change, false_negative when a black region contains real change, mixed_error "
+            "Use mixed_error when one proposal contains both supported and unsupported predicted "
+            "pixels or a partial omission, and uncertain_region when evidence is insufficient. "
+            "Use none only "
+            "when the whole audited region is supported by the RGB evidence and mask coverage. "
+            "Inspect boundaries and internal gaps, not only the dominant object. error_type must "
+            "be one of none, false_positive_change, false_negative, mixed_error, "
+            "uncertain_region. target_view must be JSON null when error_type is none; otherwise "
+            "use the JSON string t1 or t2 for the object mask that needs correction. confidence "
+            "means confidence in this diagnosis; for none, report confidence that the whole "
+            "region is correct. Replace every schema placeholder with a valid JSON value."
         )
     elif stage == "plan":
         diagnosis = payload.get("diagnosis")
@@ -467,6 +507,41 @@ def _stage_prompt(
             "output contract. Use exactly one of coordinate_normalized_1000 and "
             "box_normalized_1000."
         )
+    elif stage == "direct":
+        mode = str(payload.get("mode", "initial"))
+        candidate_mode = mode == "candidate"
+        replan_mode = mode == "replan"
+        comparison_example = "uncertain" if candidate_mode or replan_mode else "initial"
+        schema = (
+            '{"verdict":{"comparison":"' + comparison_example + '",'
+            '"quality_score":<QUALITY_0_TO_1>,"progress_score":<PROGRESS_NEG1_TO_1>,'
+            '"accept":<BOOLEAN>,'
+            '"error_type":<ERROR_TYPE>,"target_view":<TARGET_VIEW_OR_NULL>,'
+            '"suggested_action":<ACTION>,"coordinate_normalized_1000":<POINT_OR_NULL>,'
+            '"box_normalized_1000":<BOX_OR_NULL>,"feedback":"short explanation"}}'
+        )
+        task = (
+            "Diagnose complete supplied T1/T2 RGB, predicted object masks, and change mask "
+            "without Proposal geometry. Inspect whole-mask coverage, boundaries, and internal "
+            "gaps. error_type must be exactly one of none, false_positive_change, "
+            "false_negative, mixed_error, or uncertain_region. For none, use target_view null, "
+            "suggested_action finish, and null geometry. "
+            "For an error, choose t1 or t2 and one executable positive_point, negative_point, "
+            "or box. A point needs normalized [0,1000] coordinate; a box needs normalized "
+            "[0,1000] XYXY box. Initial comparison must be initial; candidate comparison must "
+            "be better, worse, unchanged, or uncertain. accept may be true for an initial state "
+            "only when no error remains, and for a candidate only when comparison is better."
+        )
+        if replan_mode:
+            task += (
+                " This is a rollback replan: current images and masks are the accepted state; "
+                "the additional rejected-candidate masks and Environment facts explain why the "
+                "previous action failed. Do not repeat the rejected action or geometry. Choose a "
+                "materially different executable correction, or finish only if no error remains. "
+                "Use the bounded rejection_history to avoid all recently failed actions. "
+                "This is not a candidate-quality decision: comparison must be uncertain and "
+                "accept must be false."
+            )
     else:
         candidate_mode = payload.get("mode") == "candidate"
         comparison_example = "uncertain" if candidate_mode else "initial"
@@ -508,6 +583,7 @@ _STAGE_EXPECTED_KEYS: dict[str, frozenset[str]] = {
     "candidate_diagnosis": frozenset({"region_id", "diagnosis"}),
     "plan": frozenset({"region_id", "plan"}),
     "decision": frozenset({"decision"}),
+    "direct": frozenset({"verdict"}),
 }
 
 
@@ -598,10 +674,47 @@ def _mask_image(mask: np.ndarray) -> Image.Image:
 def _normalized_crop_box(
     box: list[int] | tuple[int, ...], image_size: tuple[int, int]
 ) -> tuple[int, int, int, int]:
+    """Convert a normalized inclusive box to a provider-safe PIL crop box.
+
+    BaiLian's vision endpoint rejects images whose height or width is below
+    11 pixels. Region proposals can legitimately be smaller than that after
+    connected-component extraction, so expand only the crop sent to the
+    provider while keeping it inside the original image. The proposal's
+    normalized coordinates and mask facts remain unchanged.
+    """
+
     width, height = image_size
     x1, y1, x2, y2 = (int(value) for value in box)
     left = max(0, min(width - 1, round(x1 * (width - 1) / 1000)))
     top = max(0, min(height - 1, round(y1 * (height - 1) / 1000)))
     right = max(left + 1, min(width, round(x2 * (width - 1) / 1000) + 1))
     bottom = max(top + 1, min(height, round(y2 * (height - 1) / 1000) + 1))
+    return _expand_crop_min_side(
+        (left, top, right, bottom),
+        image_size,
+        min_side=11,
+    )
+
+
+def _expand_crop_min_side(
+    crop_box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    *,
+    min_side: int,
+) -> tuple[int, int, int, int]:
+    """Expand a PIL crop box to a minimum side length without leaving the image."""
+
+    if min_side < 1:
+        raise ValueError("min_side must be positive")
+    width, height = image_size
+    left, top, right, bottom = crop_box
+    target_width = min(width, min_side)
+    target_height = min(height, min_side)
+
+    if right - left < target_width:
+        right = min(width, left + target_width)
+        left = max(0, right - target_width)
+    if bottom - top < target_height:
+        bottom = min(height, top + target_height)
+        top = max(0, bottom - target_height)
     return left, top, right, bottom

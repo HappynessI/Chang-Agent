@@ -118,6 +118,15 @@ class MissingDiagnosisConfidenceBackend(ScriptedBackend):
         return super().generate_stage(stage, state, payload, previous_state)
 
 
+class BetterButNotAcceptedBackend(ScriptedBackend):
+    def generate_stage(self, stage, state, payload, previous_state=None):
+        response = super().generate_stage(stage, state, payload, previous_state)
+        if stage == "decision" and payload["mode"] == "candidate":
+            response["decision"]["accept"] = False
+            response["decision"]["stop"] = False
+        return response
+
+
 class StagedVerifierTest(unittest.TestCase):
     def test_stage_parser_selects_schema_match_instead_of_first_json(self):
         correct = {
@@ -152,6 +161,18 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertIn('"environment_facts"', prompt)
         self.assertIn('"region_id":"r7"', prompt)
         self.assertIn("Do not copy the Environment envelope", prompt)
+
+    def test_diagnosis_prompt_has_no_default_none_bias(self):
+        prompt = _stage_prompt(
+            "diagnosis",
+            {"region": {"region_id": "r7"}, "schema": "diagnosis_v1"},
+        )
+
+        self.assertNotIn("normally correct and error_type is none", prompt)
+        self.assertIn("A proposal may contain both correct and incorrect pixels", prompt)
+        self.assertIn("Use mixed_error", prompt)
+        self.assertIn("Use none only when the whole audited region is supported", prompt)
+        self.assertIn("<ERROR_TYPE>", prompt)
 
     def test_invalid_stage_output_is_repaired_before_verifier_aborts(self):
         backend = RepairingBackend()
@@ -190,7 +211,7 @@ class StagedVerifierTest(unittest.TestCase):
             "white",
         )
 
-    def test_clear_appearance_change_cannot_be_false_positive(self):
+    def test_clear_appearance_change_can_still_be_false_positive(self):
         backend = ScriptedBackend(
             error="false_positive_change", target="t2", action="negative_point"
         )
@@ -198,12 +219,10 @@ class StagedVerifierTest(unittest.TestCase):
 
         output = verifier.verify(make_state(), None, None)
 
-        self.assertFalse(output.verifier_valid)
-        self.assertIn(
-            "cannot be labeled false_positive_change",
-            verifier.last_evidence["validation_errors"][0],
-        )
-        self.assertNotIn("plan", backend.calls)
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_type, "false_positive_change")
+        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertIn("plan", backend.calls)
 
     def test_false_positive_plan_must_target_a_white_editable_seed(self):
         backend = ScriptedBackend(
@@ -266,6 +285,28 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertEqual(
             verifier.last_evidence["stage_trace"]["mode"], "candidate"
         )
+
+    def test_candidate_better_but_not_accepted_is_not_repaired_to_accept(self):
+        candidate = make_state()
+        previous_mask = np.zeros_like(candidate.change_mask)
+        previous = ChangeState(
+            candidate.t1_image,
+            candidate.t2_image,
+            candidate.query,
+            candidate.t1_mask,
+            previous_mask,
+            previous_mask,
+        )
+        attach_verifier_regions(candidate, previous, max_regions=6, min_component_area=1)
+        verifier = StagedQwenVerifier(
+            BetterButNotAcceptedBackend(error="none", target=None)
+        )
+
+        output = verifier.verify(candidate, 0.4, None, previous)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.comparison, "better")
+        self.assertFalse(output.accept)
 
 
 if __name__ == "__main__":

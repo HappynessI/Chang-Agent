@@ -7,6 +7,14 @@ Qwen verifier.  It separates evidence inspection, diagnosis, action planning,
 and candidate comparison while keeping all proposal geometry and editability
 facts under Environment control.
 
+The diagnosis prompt must remain model-capability neutral.  It must not encode
+the old small-model shortcut that a white change region with a visible T1/T2
+difference is normally correct.  Current diagnosis asks the MLLM to inspect
+whole-region mask coverage, boundaries, and internal gaps; `mixed_error` is
+valid when one proposal contains both supported and unsupported pixels.  The
+runtime keeps geometry, schema, editability, and polarity checks, but does not
+replace MLLM semantic judgment with a default `none` decision.
+
 The protocol implementation is split across:
 
 - `change_agent/verifier_protocol.py`: typed records and enums;
@@ -29,8 +37,24 @@ The initial-state path is:
 
 The candidate path uses `candidate_evidence`, `candidate_diagnosis`, and
 `decision` with both previous and candidate change masks.  Candidate `accept`
-must be true exactly when `comparison=better`.  An identical candidate is
+may be true only when `comparison=better`; `better` alone must not override a
+model's explicit rejection. An identical candidate is
 handled programmatically as `unchanged` without a model call.
+
+The Environment commits a non-finish candidate only when all runtime gates
+pass, `comparison=better`, and the verifier also returns `accept=true`.
+`better, accept=false` remains a recorded rejected candidate and the next turn
+continues from the prior accepted masks.
+
+Rollback preserves only the prior accepted masks and accepted point-session
+history. It must not reuse a rejected action instruction. Proposal and Hybrid
+regenerate their Agent action from the retained trajectory history. Direct calls
+its full-context verifier in `replan` mode, with the rejected action, candidate
+mask delta, candidate verdict, rejection reasons, and a bounded four-entry
+rejection history. The current images/masks in that call are the accepted state;
+additional masks are explicitly labelled as the rejected candidate. Its output
+has `comparison="uncertain"` and `accept=false`, and must author a different
+action or `finish`. If this replan is invalid, no action is authorized.
 
 Each model call has a minimal exact JSON schema.  The runtime rejects unknown
 fields, unknown region IDs, non-enum values, string booleans, non-integer public
@@ -38,15 +62,18 @@ coordinates, points outside the proposal, negative clicks on black object-mask
 seeds, and positive clicks on white seeds.  Invalid output never authorizes a
 tool action or finish.
 
-The explicit semantic invariant added after the 2026-07-20 failure is:
+Runtime has no hard semantic mapping from a coarse T1/T2 state pair and a
+white/black Proposal to `none`, `false_positive_change`, or
+`false_negative`. A white component can contain both a real appearance change
+and unsupported boundary/interior pixels. The runtime validates only structural
+polarity (`false_positive_change` needs a white proposal and
+`false_negative` needs a black proposal), then retains Qwen's semantic
+`false_positive_change` or `mixed_error` result for planning.
 
-> A clear T1-background/T2-building or T1-building/T2-background appearance
-> difference already covered by a white change region cannot be labeled
-> `false_positive_change`.
-
-This prevents the prior failure in which correct building appearances were
-systematically treated as false positives and mapped to impossible T1 negative
-clicks.
+`diagnosis` and `candidate_diagnosis` receive actual visual inputs, not only a
+serialized prior evidence judgment. In `hybrid` mode they receive full T1/T2,
+object masks, change mask, and exact regional crops. In `proposal` mode they
+receive the exact regional RGB/object-mask/change-mask crops only.
 
 ## Backends
 
@@ -86,7 +113,8 @@ The following GPU smoke run reached candidate decision, where a static
 `comparison=initial` example caused the local model to repeat an invalid label.
 Decision templates are now mode-aware: initial uses `initial`; candidate uses
 the valid non-initial `uncertain` example, while the parser still requires
-candidate `accept` to agree with `comparison=better`.
+candidate `accept=true` to require `comparison=better`, without converting an
+explicit `accept=false` into acceptance.
 
 The BaiLian path did not exhibit the copied-context parsing failure in the
 smoke run because its request uses server-side `response_format=json_object`,
@@ -94,6 +122,13 @@ which returns one JSON message content. This constrains JSON syntax, not the
 full application schema: the BaiLian run still exposed a semantic
 `target_view` validation error and a later HTTP 400 candidate request, so it
 uses the same stage-aware parser and repair interface.
+
+Hosted vision providers also impose a minimum image side length.  Region
+proposals are derived from connected components and can be smaller than that
+limit even when the source LEVIR-CD images are 256x256.  Before a staged
+BaiLian request, `_normalized_crop_box` expands only the provider-facing PIL
+crop to at least 11x11 pixels, clamped to the source image.  Proposal geometry,
+mask facts, and verifier semantics remain unchanged.
 
 The hosted backend reads credentials only from an environment variable.  The
 default is `DASHSCOPE_API_KEY`; the key is never included in trajectory metadata,
@@ -108,6 +143,15 @@ sets `DASHSCOPE_BASE_URL` from the `openAiCompatible` row.  This is required for
 workspace-scoped keys; the public DashScope endpoint is not a substitute.
 Provider HTTP errors retain only a short, credential-redacted diagnostic.
 
+For Slurm runs, probe the candidate node's workspace, model/tool paths, GPU,
+proxy fingerprints, and workspace endpoint first, then submit with the same
+node pinned via `--nodelist`.  `tools/submit_ca0720_bailian_fix.sh` requires the
+probed node in `NODE` and requires `BAILIAN_NETWORK_MODE=direct|proxy`.  Use
+`direct` only when the probe succeeds after unsetting proxy variables; use
+`proxy` only when the same node has a working proxy listener and matching
+fingerprints.  The helper archives Slurm stdout/stderr under the experiment
+output's `logs/` directory before cleaning temporary `/tmp` copies.
+
 ## Runner modes
 
 The runner exposes independent Agent and Verifier backend selection:
@@ -117,6 +161,7 @@ The runner exposes independent Agent and Verifier backend selection:
 --verifier qwen_zero_shot|qwen_staged|rule
 --staged-verifier-backend local|bailian
 --bailian-model qwen3-vl-plus
+--proposal-mode direct|proposal|hybrid
 ```
 
 This supports the intended 2x2 comparison:
@@ -127,8 +172,13 @@ This supports the intended 2x2 comparison:
 | BaiLian Qwen3-VL-Plus | legacy is not hosted | `bailian + qwen_staged/bailian` |
 
 A mixed test is also supported, such as local Agent actions with a BaiLian
-staged verifier.  All modes retain the same Environment, proposals, tools,
-coordinate protocol, rollback rules, and offline-only GT evaluation.
+staged verifier. `direct` is the designated Proposal ablation: Qwen sees only
+complete state and authors its action geometry; Proposals are not attached.
+`proposal` uses regional crops and Environment-owned Proposal geometry. `hybrid`
+uses complete state plus regional crops for diagnosis while retaining
+Environment-owned Proposal geometry for execution and candidate verification.
+All modes retain coordinate parsing, tool safety gates, rollback, and
+offline-only GT evaluation.
 
 ## Required evaluation
 

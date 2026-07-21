@@ -20,6 +20,7 @@ StageName = Literal[
     "candidate_evidence",
     "candidate_diagnosis",
     "decision",
+    "direct",
 ]
 
 ERROR_TYPES = {

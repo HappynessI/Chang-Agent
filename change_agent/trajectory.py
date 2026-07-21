@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 from .state import AgentAction, ChangeState, VerifierOutput
 
@@ -27,7 +28,11 @@ class TrajectoryEntry:
     state: ChangeState
     execution: dict[str, Any]
 
-    def to_dict(self, mask_file: str | None = None) -> dict[str, Any]:
+    def to_dict(
+        self,
+        mask_file: str | None = None,
+        visualization_dir: str | None = None,
+    ) -> dict[str, Any]:
         parsed = self.parsed_action.to_dict() if self.parsed_action else None
         verifier = self.verifier.to_dict()
         return {
@@ -57,6 +62,7 @@ class TrajectoryEntry:
             "t2_mask_sha256": mask_sha256(self.state.t2_mask),
             "change_mask_sha256": mask_sha256(self.state.change_mask),
             "change_mask_file": mask_file,
+            "visualization_dir": visualization_dir,
         }
 
 
@@ -156,19 +162,66 @@ class Trajectory:
             parts.append(summary)
         return "; ".join(parts)
 
+    def rejected_action_history(self, limit: int = 4) -> list[dict[str, Any]]:
+        """Return bounded GT-free rejection facts for action replanning."""
+
+        if limit < 1:
+            return []
+        history: list[dict[str, Any]] = []
+        for item in self.entries:
+            if item.execution.get("candidate_accepted") is not False:
+                continue
+            action = item.parsed_action.to_dict() if item.parsed_action else None
+            locality = item.execution.get("locality", {})
+            history.append(
+                {
+                    "step_index": item.step_index,
+                    "action": action,
+                    "rejection_reasons": list(
+                        item.execution.get("candidate_rejection_reasons", [])
+                    ),
+                    "candidate_comparison": item.verifier.comparison,
+                    "candidate_accept": bool(item.verifier.accept),
+                    "candidate_feedback": item.verifier.feedback[:400],
+                    "candidate_area_delta": item.execution.get(
+                        "candidate_area_delta"
+                    ),
+                    "changed_pixels": locality.get("changed_pixels"),
+                    "outside_roi_ratio": locality.get("outside_roi_ratio"),
+                }
+            )
+        return history[-limit:]
+
     def save(
-        self, output_dir: str | Path, mask_output_dir: str | Path | None = None
+        self,
+        output_dir: str | Path,
+        mask_output_dir: str | Path | None = None,
+        visualization_output_dir: str | Path | None = None,
     ) -> Path:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         masks_dir = Path(mask_output_dir) if mask_output_dir else output_dir / "masks"
         masks_dir.mkdir(parents=True, exist_ok=True)
+        visualizations_dir = (
+            Path(visualization_output_dir)
+            if visualization_output_dir is not None
+            else None
+        )
         serialized = []
         for entry in self.entries:
             mask_path = masks_dir / f"step_{entry.step_index:03d}.npy"
             relative = Path(os.path.relpath(mask_path, output_dir))
             np.save(mask_path, entry.state.change_mask.astype(np.uint8))
-            serialized.append(entry.to_dict(str(relative)))
+            relative_visualization_dir = None
+            if visualizations_dir is not None:
+                step_dir = visualizations_dir / f"step_{entry.step_index:03d}"
+                _save_state_visualizations(entry.state, step_dir)
+                relative_visualization_dir = str(
+                    Path(os.path.relpath(step_dir, output_dir))
+                )
+            serialized.append(
+                entry.to_dict(str(relative), relative_visualization_dir)
+            )
         payload = {
             "metadata": _json_safe(self.run_metadata),
             "best_step": self.best_entry.step_index if self.entries else None,
@@ -179,6 +232,26 @@ class Trajectory:
         path = output_dir / "trajectory.json"
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return path
+
+
+def _save_state_visualizations(state: ChangeState, output_dir: Path) -> None:
+    """Persist binary temporal masks and the instances used by pair matching."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _save_binary_mask(state.t1_mask, output_dir / "t1_mask.png")
+    _save_binary_mask(state.t2_mask, output_dir / "t2_mask.png")
+    for view, instances in (
+        ("t1", state.t1_instances),
+        ("t2", state.t2_instances),
+    ):
+        instances_dir = output_dir / f"{view}_instances"
+        instances_dir.mkdir(exist_ok=True)
+        for index, instance in enumerate(instances):
+            _save_binary_mask(instance, instances_dir / f"instance_{index:03d}.png")
+
+
+def _save_binary_mask(mask: np.ndarray, path: Path) -> None:
+    Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L").save(path)
 
 
 def default_run_metadata() -> dict[str, Any]:

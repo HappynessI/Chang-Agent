@@ -28,6 +28,7 @@ from change_agent.adapters.stage_backends import (
     LocalQwen3VLStageBackend,
 )
 from change_agent.adapters.bailian_adapter import BailianGroundingModelQwen3VL
+from change_agent.adapters.direct_verifier import DirectQwenVerifier
 from change_agent.adapters.subprocess_adapters import (
     SubprocessBoxBackend,
     SubprocessPointBackend,
@@ -106,6 +107,16 @@ def parse_args() -> argparse.Namespace:
         choices=("local", "bailian"),
         default="local",
     )
+    parser.add_argument(
+        "--proposal-mode",
+        choices=("direct", "proposal", "hybrid"),
+        default="hybrid",
+        help=(
+            "Direct uses full-state Qwen diagnosis/action geometry without Proposals; "
+            "Proposal uses only regional crops; Hybrid supplies full state plus regional "
+            "crops while Environment owns execution geometry."
+        ),
+    )
     parser.add_argument("--bailian-model", default="qwen3-vl-plus")
     parser.add_argument("--bailian-base-url", default=None)
     parser.add_argument("--bailian-api-key-env", default="DASHSCOPE_API_KEY")
@@ -123,6 +134,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-checkpoint", default=str(root / "models/sam3/sam3.pt"))
     parser.add_argument("--sam3-bpe", default=str(root / "OmniOVCD/sam3/assets/bpe_simple_vocab_16e6.txt.gz"))
     parser.add_argument("--sam3-resolution", type=int, default=1008)
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help=(
+            "Save per-step T1/T2 binary masks and each connected-component "
+            "instance mask as PNG files."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -135,6 +154,8 @@ def main() -> None:
         (args.output / name).mkdir()
     for name in ("initial", "verifier_best", "last", "selected"):
         (args.output / "predictions" / name).mkdir()
+    if args.visualize:
+        (args.output / "visualizations").mkdir()
     _validate_inputs(args)
     manifest = _base_manifest(args, seed_runtime)
     (args.output / "run_manifest.md").write_text(_render_manifest(manifest), encoding="utf-8")
@@ -245,6 +266,7 @@ def main() -> None:
             verifier_max_delta_regions=args.verifier_max_delta_regions,
             verifier_min_region_area=args.verifier_min_region_area,
             verifier_region_padding_ratio=args.verifier_region_padding_ratio,
+            enable_verifier_regions=args.proposal_mode != "direct",
             run_metadata={
                 "sample": sample_file,
                 "query": args.query,
@@ -253,12 +275,23 @@ def main() -> None:
                     if args.agent_backend == "local"
                     else args.bailian_model
                 ),
+                "action_generation_policy": (
+                    "direct_verifier_full_context"
+                    if args.proposal_mode == "direct"
+                    else "agent_from_verifier_feedback"
+                ),
                 "verifier": args.verifier,
+                "proposal_mode": args.proposal_mode,
+                "proposal_grounding_enabled": args.proposal_mode != "direct",
                 "verifier_decision_mode": (
-                    "qwen_rich_region_diagnosis_and_global_synthesis"
-                    if args.verifier == "qwen_zero_shot"
-                    else "qwen_staged_evidence_diagnosis_plan_decision"
+                    "qwen_full_context_direct_action"
+                    if args.proposal_mode == "direct"
+                    else "qwen_staged_proposal_local_diagnosis"
+                    if args.proposal_mode == "proposal"
+                    else "qwen_staged_full_context_plus_proposal_grounding"
                     if args.verifier == "qwen_staged"
+                    else "qwen_rich_region_diagnosis_and_global_synthesis"
+                    if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
@@ -286,13 +319,20 @@ def main() -> None:
         loop_index = 0
         while not environment.done and episode_stop_reason is None:
             loop_index += 1
-            observation, attempt_errors, action_executed = _execute_action_with_retries(
-                qwen,
-                environment,
-                observation,
-                args.action_retries,
-                loop_index=loop_index,
-            )
+            if args.proposal_mode == "direct":
+                observation, attempt_errors, action_executed = (
+                    _execute_direct_verifier_action(
+                        environment, observation, loop_index=loop_index
+                    )
+                )
+            else:
+                observation, attempt_errors, action_executed = _execute_action_with_retries(
+                    qwen,
+                    environment,
+                    observation,
+                    args.action_retries,
+                    loop_index=loop_index,
+                )
             invalid_outputs.extend(attempt_errors)
             if not action_executed:
                 episode_stop_reason = "action_retry_exhaustion_without_state_change"
@@ -311,7 +351,13 @@ def main() -> None:
 
         trajectory_dir = args.output / "trajectories" / sample
         trajectory_path = environment.trajectory.save(
-            trajectory_dir, args.output / "masks" / sample
+            trajectory_dir,
+            args.output / "masks" / sample,
+            (
+                args.output / "visualizations" / sample
+                if args.visualize
+                else None
+            ),
         )
         feedback_path = args.output / "verifier_feedback" / f"{sample}.json"
         feedback_path.write_text(
@@ -439,6 +485,11 @@ def _build_verifier(
             accept_threshold=args.verifier_accept_threshold,
             max_regions=args.staged_verifier_max_total_regions,
             max_retries=args.verifier_retries,
+            visual_context=args.proposal_mode,
+        ) if args.proposal_mode != "direct" else DirectQwenVerifier(
+            stage_backend,
+            accept_threshold=args.verifier_accept_threshold,
+            max_retries=args.verifier_retries,
         )
     if local_qwen is None:
         raise RuntimeError("legacy qwen_zero_shot verifier requires local Qwen weights")
@@ -457,6 +508,14 @@ def _initial_verifier_stop_reason(observation: Any) -> str | None:
     feedback = getattr(observation, "feedback", None)
     if feedback is not None and not feedback.verifier_valid:
         return "initial_verifier_invalid"
+    if (
+        feedback is not None
+        and bool(getattr(feedback, "accept", False))
+        and bool(getattr(feedback, "stop", False))
+        and getattr(feedback, "comparison", None) == "initial"
+        and getattr(feedback, "error_type", None) == "none"
+    ):
+        return "initial_verifier_authorized_finish"
     return None
 
 
@@ -498,6 +557,66 @@ def _execute_action_with_retries(
             validation_error = str(error)
             previous_raw = raw
     return observation, errors, False
+
+
+def _execute_direct_verifier_action(
+    environment: ChangeAgentEnvironment,
+    observation: AgentObservation,
+    *,
+    loop_index: int,
+) -> tuple[AgentObservation, list[dict[str, Any]], bool]:
+    """Execute Direct ablation's full-state Qwen action without Proposal grounding."""
+
+    feedback = observation.feedback
+    if (
+        feedback is None
+        or not feedback.verifier_valid
+        or feedback.suggested_action is None
+    ):
+        return observation, [
+            {
+                "loop_index": loop_index,
+                "error": "direct verifier did not authorize an executable action",
+            }
+        ], False
+    payload: dict[str, Any] = {
+        "target_view": feedback.target_view,
+        "action": feedback.suggested_action,
+    }
+    if feedback.suggested_action in {"positive_point", "negative_point"}:
+        if feedback.error_region is None:
+            return observation, [
+                {
+                    "loop_index": loop_index,
+                    "error": "direct verifier point action lacks normalized geometry",
+                }
+            ], False
+        payload["coordinate"] = list(feedback.error_region[:2])
+    elif feedback.suggested_action == "box":
+        if feedback.error_region is None:
+            return observation, [
+                {
+                    "loop_index": loop_index,
+                    "error": "direct verifier box action lacks normalized geometry",
+                }
+            ], False
+        payload["box"] = list(feedback.error_region)
+    raw = json.dumps(payload, separators=(",", ":"))
+    try:
+        next_observation, _ = environment.step(raw)
+    except ActionValidationError as error:
+        return observation, [
+            {
+                "loop_index": loop_index,
+                "raw_direct_verifier_action": raw,
+                "error": str(error),
+            }
+        ], False
+    environment.trajectory.entries[-1].execution["action_generation"] = {
+        "loop_index": loop_index,
+        "source": "direct_verifier_full_context",
+    }
+    return next_observation, [], True
 
 
 def evaluate_after_rollout(
@@ -573,6 +692,8 @@ def _metrics_from_counts(counts: np.ndarray) -> tuple[dict[str, Any], np.ndarray
 
 
 def _validate_inputs(args: argparse.Namespace) -> None:
+    if args.proposal_mode != "hybrid" and args.verifier != "qwen_staged":
+        raise ValueError("proposal ablations require --verifier qwen_staged")
     needs_local_qwen = (
         args.agent_backend == "local"
         or args.verifier == "qwen_zero_shot"
@@ -611,9 +732,20 @@ def _base_manifest(
             args.model_path if args.agent_backend == "local" else args.bailian_model
         ),
         "agent_backend": args.agent_backend,
+        "action_generation_policy": (
+            "direct_verifier_full_context"
+            if args.proposal_mode == "direct"
+            else "agent_from_verifier_feedback"
+        ),
         "point_executor": f"SimpleClick {args.simpleclick_checkpoint}",
         "box_executor": f"SAM3 {args.sam3_checkpoint}",
         "verifier": args.verifier,
+        "proposal_mode": args.proposal_mode,
+        "proposal_semantics": {
+            "direct": "full-state Qwen diagnosis and model-authored action geometry; no Proposal attachment",
+            "proposal": "Proposal-crop-only regional diagnosis and Environment-owned geometry",
+            "hybrid": "full-state plus Proposal-crop diagnosis and Environment-owned geometry",
+        }[args.proposal_mode],
         "verifier_model": (
             "shared local Qwen3-VL weights"
             if args.verifier == "qwen_zero_shot"
@@ -630,8 +762,12 @@ def _base_manifest(
         "verifier_decision_mode": (
             "qwen_rich_region_diagnosis_and_global_synthesis"
             if args.verifier == "qwen_zero_shot"
-            else "qwen_staged_evidence_diagnosis_plan_decision"
-            if args.verifier == "qwen_staged"
+            else "qwen_full_context_direct_action"
+            if args.verifier == "qwen_staged" and args.proposal_mode == "direct"
+            else "qwen_staged_proposal_local_diagnosis"
+            if args.verifier == "qwen_staged" and args.proposal_mode == "proposal"
+            else "qwen_staged_full_context_plus_proposal_grounding"
+            if args.verifier == "qwen_staged" and args.proposal_mode == "hybrid"
             else "legacy_rule_score"
         ),
         "verifier_max_initial_regions_per_batch": args.verifier_max_regions,
@@ -651,6 +787,12 @@ def _base_manifest(
         "overlap_threshold": args.overlap_threshold,
         "t12_min_instance_area": args.t12_min_instance_area,
         "cd_min_instance_area": args.cd_min_instance_area,
+        "visualize": args.visualize,
+        "visualization_artifacts": (
+            str(args.output / "visualizations" / "<sample>" / "step_<index>")
+            if args.visualize
+            else None
+        ),
         "max_steps": args.max_steps,
         "selection_policy": args.selection_policy,
         "selection_epsilon": args.selection_epsilon,
