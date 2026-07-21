@@ -43,7 +43,9 @@ _RUBRIC_WEIGHTS = {
     "change_boundary_alignment": 1,
     "change_artifact_control": 1,
 }
-_RUBRIC_IDS = _RUBRIC_GATES + tuple(_RUBRIC_WEIGHTS)
+# Schema contains both hard-gated evidence and auditable target scope.  Scope
+# remains outside weighted quality, but must still be parsed and persisted.
+_RUBRIC_IDS = _RUBRIC_GATES + ("target_class_only",) + tuple(_RUBRIC_WEIGHTS)
 _CANDIDATE_EFFECT_KEYS = {
     "intended_error_improved",
     "introduced_false_positive",
