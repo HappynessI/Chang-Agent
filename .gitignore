@@ -9,6 +9,7 @@ artifacts/
 checkpoints/
 outputs/
 outputs_archive_*/
+experiments/
 .env
 *.env
 *apiKey*.csv

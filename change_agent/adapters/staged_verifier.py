@@ -8,8 +8,9 @@ editability; the model cannot invent either.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
+from ..coordinates import normalized_point_to_pixel
 from ..state import AgentAction, ChangeState, VerifierOutput
 from ..verifier_regions import build_verifier_regions
 from ..verifier_protocol import (
@@ -57,10 +58,14 @@ class StagedQwenVerifier:
         self.visual_context = visual_context
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
+        self._accepted_records: tuple[EvidenceRecord, ...] = ()
+        self._accepted_diagnoses: tuple[Diagnosis, ...] = ()
 
     def reset(self) -> None:
         self.last_evidence = {}
         self._last_valid_output = None
+        self._accepted_records = ()
+        self._accepted_diagnoses = ()
         reset_audit = getattr(self.backend, "reset_audit", None)
         if callable(reset_audit):
             reset_audit()
@@ -69,6 +74,123 @@ class StagedQwenVerifier:
         self._last_valid_output = (
             previous_feedback if previous_feedback.verifier_valid else None
         )
+
+    def replan_after_rejection(
+        self,
+        accepted_state: ChangeState,
+        rejected_candidate: ChangeState,
+        accepted_feedback: VerifierOutput,
+        rejected_feedback: VerifierOutput,
+        rejected_action: AgentAction,
+        rejection_reasons: Sequence[str],
+        rejection_history: Sequence[Mapping[str, Any]],
+    ) -> VerifierOutput:
+        """Choose a different already-diagnosed region after rollback."""
+
+        rejected = [rejected_action]
+        for item in rejection_history:
+            action = item.get("action")
+            if not isinstance(action, Mapping):
+                continue
+            try:
+                rejected.append(
+                    AgentAction(
+                        str(action["target_view"]),
+                        str(action["action"]),
+                        coordinate=(
+                            tuple(int(value) for value in action["coordinate"])
+                            if action.get("coordinate") is not None
+                            else None
+                        ),
+                        box=(
+                            tuple(int(value) for value in action["box"])
+                            if action.get("box") is not None
+                            else None
+                        ),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        candidates = sorted(
+            (
+                diagnosis
+                for diagnosis in self._accepted_diagnoses
+                if diagnosis.error_type
+                in {"false_positive_change", "false_negative"}
+            ),
+            key=lambda item: item.confidence,
+            reverse=True,
+        )
+        for diagnosis in candidates:
+            plan = self._plan(accepted_state, self._accepted_records, diagnosis)
+            if plan is None or plan.action == "finish":
+                continue
+            action = _plan_agent_action(plan, accepted_state.image_size)
+            if action in rejected:
+                continue
+            output = VerifierOutput(
+                quality_score=accepted_feedback.quality_score,
+                progress_score=0.0,
+                score_delta=0.0,
+                comparison="uncertain",
+                error_type=diagnosis.error_type,
+                target_view=plan.target_view or "t2",
+                error_region=_plan_region(plan),
+                suggested_action=plan.action,
+                feedback=(
+                    f"Rollback excluded failed geometry; try alternate region "
+                    f"{diagnosis.region_id}."
+                ),
+                accept=False,
+                verifier_valid=True,
+                localization_valid=True,
+                stop=False,
+            )
+            self.last_evidence = {
+                "type": "staged_qwen_verifier",
+                "schema_version": self.SCHEMA_VERSION,
+                "decision_mode": "programmatic_alternate_region_after_rollback",
+                "verifier_valid": True,
+                "localization_valid": True,
+                "replan": {
+                    "selected_region_id": diagnosis.region_id,
+                    "rejected_action_count": len(rejected),
+                    "rejection_reasons": list(rejection_reasons),
+                },
+                "validation_errors": [],
+                "backend_calls": [],
+            }
+            return output
+        output = VerifierOutput(
+            quality_score=accepted_feedback.quality_score,
+            progress_score=0.0,
+            score_delta=0.0,
+            comparison="uncertain",
+            error_type=accepted_feedback.error_type,
+            target_view=accepted_feedback.target_view,
+            error_region=None,
+            suggested_action=None,
+            feedback="No untried safe diagnosed region remains after rollback.",
+            accept=False,
+            verifier_valid=True,
+            localization_valid=False,
+            stop=False,
+        )
+        self.last_evidence = {
+            "type": "staged_qwen_verifier",
+            "schema_version": self.SCHEMA_VERSION,
+            "decision_mode": "programmatic_no_alternate_region_after_rollback",
+            "verifier_valid": True,
+            "localization_valid": False,
+            "replan": {
+                "selected_region_id": None,
+                "rejected_action_count": len(rejected),
+                "rejection_reasons": list(rejection_reasons),
+            },
+            "validation_errors": [],
+            "backend_calls": [],
+        }
+        return output
 
     def verify(
         self,
@@ -83,6 +205,12 @@ class StagedQwenVerifier:
                 state, previous_state
             ):
                 previous = self._last_valid_output
+                finish_authorized = bool(
+                    previous
+                    and previous.accept
+                    and previous.error_type == "none"
+                    and previous.suggested_action == "finish"
+                )
                 output = VerifierOutput(
                     quality_score=previous.quality_score if previous else previous_score,
                     progress_score=0.0,
@@ -96,7 +224,7 @@ class StagedQwenVerifier:
                     accept=bool(previous and previous.accept),
                     verifier_valid=True,
                     localization_valid=bool(previous and previous.localization_valid),
-                    stop=bool(previous and previous.stop),
+                    stop=finish_authorized,
                 )
                 self.last_evidence = {
                     "type": "staged_qwen_verifier",
@@ -245,6 +373,8 @@ class StagedQwenVerifier:
         if decision.comparison != "initial":
             raise StageProtocolError("initial decision must use comparison=initial")
         output = self._output(decision, plan, selected, previous_score, initial=True)
+        self._accepted_records = records
+        self._accepted_diagnoses = diagnoses
         return output, StageTrace(
             mode="initial",
             evidence=records,
@@ -733,9 +863,26 @@ def _plan_dict(plan: ActionPlan | None) -> dict[str, Any] | None:
     }
 
 
-def _integer_tuple(value: Any, length: int, name: str) -> tuple[int, ...]:
-    if not isinstance(value, (list, tuple)) or len(value) != length:
-        raise StageProtocolError(f"{name} must contain {length} integers")
-    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
-        raise StageProtocolError(f"{name} must contain only integers")
-    return tuple(value)
+def _plan_region(plan: ActionPlan) -> tuple[int, int, int, int]:
+    if plan.coordinate_normalized_1000 is not None:
+        x, y = plan.coordinate_normalized_1000
+        return x, y, x, y
+    if plan.box_normalized_1000 is None:
+        raise StageProtocolError("executable plan has no geometry")
+    return plan.box_normalized_1000
+
+
+def _plan_agent_action(
+    plan: ActionPlan, image_size: tuple[int, int]
+) -> AgentAction:
+    if plan.target_view not in {"t1", "t2"}:
+        raise StageProtocolError("executable plan has no target view")
+    if plan.coordinate_normalized_1000 is not None:
+        return AgentAction(
+            plan.target_view,
+            plan.action,
+            coordinate=normalized_point_to_pixel(
+                plan.coordinate_normalized_1000, image_size
+            ),
+        )
+    raise StageProtocolError("staged rollback currently supports point plans only")

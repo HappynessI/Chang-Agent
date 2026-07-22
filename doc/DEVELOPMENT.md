@@ -1,5 +1,20 @@
 # Development log
 
+## 2026-07-22 — CA_0721(13) SoM ablation and rollback-state repair
+
+The first three-sample GT-free SoM rollout completed in
+`experiments/CA_0721(13)-bailian-proposal-ablation/` (jobs `44064`–`44066`).
+Hybrid selected aggregate IoU improved from `0.69744116` to `0.70886178`, entirely
+from test85 (`0.30658070` to `0.33716381`). Proposal-only executed three harmful
+candidates, but runtime rollback kept every selected output at the initial mask.
+
+The run exposed two staged runtime bugs. Rollback reused the same deterministic point,
+so `StagedQwenVerifier` now selects a distinct cached diagnosed region while excluding
+failed actions. The identical-state finish path now converts an accepted `none/finish`
+authorization into `stop=true`, preventing repeated finish steps. Slurm job `44073`
+passed 49 focused tests. Full evidence and limitations are in
+[`ca0721_13_som_ablation_analysis.md`](ca0721_13_som_ablation_analysis.md).
+
 ## 2026-07-22 — SoM global selection and programmatic geometry
 
 The staged proposal path now follows the grounding protocol documented in

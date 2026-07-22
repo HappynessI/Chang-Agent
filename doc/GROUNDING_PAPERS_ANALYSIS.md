@@ -448,7 +448,12 @@ Direct rubric 仍保留作对照实验：它有意继续展示全局图并允许
 不能声称已经解决 global-to-pixel gap。其 repair retry 现在锁定原始语义字段，
 只修正结构、目标视图或几何，避免 repair 把第一次的 actionable diagnosis 推翻。
 
-当前 focused Slurm regression：47 tests passed（job `44060`）。这只证明协议和
+当前 focused Slurm regression：49 tests passed（job `44073`）。这只证明协议和
 执行链路，不证明无 GT 下 IoU 必然提升；真实收益仍需在完整验证集统计
 `proposal_recall@K`、`selection_accuracy@K`、`point_hit_rate`、`tool_success_rate`
 和在线 `ΔIoU`。
+
+三样本 CA_0721(13) 首次实跑中，Hybrid aggregate IoU 从 `0.69744116` 提升到
+`0.70886178`，但收益只来自一个样本；Proposal-only 的三个动作均退化并被 rollback。
+这表明坐标 gap 已被缩小，但当前 change connected-component proposal 仍可能混合 TP/FP，
+成为新的主要瓶颈。详见 `ca0721_13_som_ablation_analysis.md`。

@@ -5,7 +5,8 @@ import numpy as np
 
 from change_agent.adapters.staged_verifier import StagedQwenVerifier
 from change_agent.adapters.stage_backends import _extract_stage_json, _stage_prompt
-from change_agent.state import ChangeState
+from change_agent.coordinates import normalized_point_to_pixel
+from change_agent.state import AgentAction, ChangeState, VerifierOutput
 from change_agent.verifier_protocol import StageProtocolError
 from change_agent.verifier_regions import attach_verifier_regions
 
@@ -17,6 +18,18 @@ def make_state():
     t1 = np.zeros((16, 16), dtype=bool)
     t2 = np.zeros_like(t1)
     t2[4:9, 4:9] = True
+    state = ChangeState(image1, image2, "building", t1, t2, t2)
+    attach_verifier_regions(state, max_regions=6, min_component_area=1)
+    return state
+
+
+def make_two_region_state():
+    image1 = np.zeros((32, 32, 3), dtype=np.uint8)
+    image2 = image1.copy()
+    t1 = np.zeros((32, 32), dtype=bool)
+    t2 = np.zeros_like(t1)
+    t2[3:8, 3:8] = True
+    t2[20:26, 20:26] = True
     state = ChangeState(image1, image2, "building", t1, t2, t2)
     attach_verifier_regions(state, max_regions=6, min_component_area=1)
     return state
@@ -134,7 +147,67 @@ class BetterButNotAcceptedBackend(ScriptedBackend):
         return response
 
 
+class SelectAllBackend(ScriptedBackend):
+    def generate_stage(self, stage, state, payload, previous_state=None):
+        if stage == "select":
+            self.calls.append(stage)
+            self.previous_seen.append(previous_state is not None)
+            return {
+                "selection": {
+                    "region_ids": [
+                        item["region_id"] for item in payload["proposal_catalog"]
+                    ],
+                    "reason": "Audit both marked regions.",
+                }
+            }
+        return super().generate_stage(stage, state, payload, previous_state)
+
+
 class StagedVerifierTest(unittest.TestCase):
+    def test_rollback_replan_uses_distinct_cached_region(self):
+        state = make_two_region_state()
+        backend = SelectAllBackend(
+            error="false_positive_change",
+            target="t2",
+        )
+        verifier = StagedQwenVerifier(backend, max_selected_regions=2)
+        accepted_feedback = verifier.verify(state, None, None)
+        first_normalized = accepted_feedback.error_region[:2]
+        first_pixel = normalized_point_to_pixel(first_normalized, state.image_size)
+        rejected_action = AgentAction(
+            "t2", "negative_point", coordinate=first_pixel
+        )
+
+        output = verifier.replan_after_rejection(
+            state,
+            state.clone(),
+            accepted_feedback,
+            VerifierOutput(comparison="worse", accept=False),
+            rejected_action,
+            ["candidate_effect_not_better"],
+            [{"action": rejected_action.to_dict()}],
+        )
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertNotEqual(output.error_region[:2], first_normalized)
+
+    def test_identical_finish_authorization_sets_stop(self):
+        state = make_state()
+        verifier = StagedQwenVerifier(ScriptedBackend())
+        verifier._last_valid_output = VerifierOutput(
+            quality_score=0.9,
+            comparison="better",
+            error_type="none",
+            suggested_action="finish",
+            accept=True,
+            stop=False,
+        )
+
+        output = verifier.verify(state.clone(), 0.9, None, state)
+
+        self.assertTrue(output.stop)
+
     def test_stage_parser_selects_schema_match_instead_of_first_json(self):
         correct = {
             "region_id": "r0",
