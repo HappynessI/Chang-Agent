@@ -25,9 +25,9 @@ from ..verifier_protocol import (
 
 
 class StagedQwenVerifier:
-    """Run evidence, diagnosis, planning, and decision as separate stages."""
+    """Select proposals, inspect local evidence, and resolve geometry in code."""
 
-    SCHEMA_VERSION = "staged_verifier_v1"
+    SCHEMA_VERSION = "staged_verifier_som_geometry_v2"
 
     def __init__(
         self,
@@ -35,6 +35,7 @@ class StagedQwenVerifier:
         *,
         accept_threshold: float = 0.82,
         max_regions: int = 6,
+        max_selected_regions: int = 3,
         max_retries: int = 2,
         visual_context: str = "hybrid",
     ):
@@ -42,6 +43,8 @@ class StagedQwenVerifier:
             raise ValueError("accept_threshold must be in [0,1]")
         if max_regions < 1:
             raise ValueError("max_regions must be positive")
+        if not 1 <= max_selected_regions <= max_regions:
+            raise ValueError("max_selected_regions must be within [1,max_regions]")
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
         if visual_context not in {"proposal", "hybrid"}:
@@ -49,6 +52,7 @@ class StagedQwenVerifier:
         self.backend = backend
         self.accept_threshold = accept_threshold
         self.max_regions = max_regions
+        self.max_selected_regions = max_selected_regions
         self.max_retries = max_retries
         self.visual_context = visual_context
         self.last_evidence: dict[str, Any] = {}
@@ -216,8 +220,13 @@ class StagedQwenVerifier:
         records: tuple[EvidenceRecord, ...],
         previous_score: float | None,
     ) -> tuple[VerifierOutput, StageTrace]:
+        selected_records = self._select_global_regions(state, records)
         judgments, diagnoses = self._inspect_and_diagnose(
-            state, records, candidate=False, previous_state=None
+            state,
+            selected_records,
+            candidate=False,
+            previous_state=None,
+            proposal_catalog=records,
         )
         selected = self._select_diagnosis(diagnoses)
         plan = self._plan(state, records, selected)
@@ -239,6 +248,7 @@ class StagedQwenVerifier:
         return output, StageTrace(
             mode="initial",
             evidence=records,
+            selected_region_ids=tuple(item.region_id for item in selected_records),
             judgments=judgments,
             diagnoses=diagnoses,
             plan=plan,
@@ -253,7 +263,11 @@ class StagedQwenVerifier:
         previous_score: float | None,
     ) -> tuple[VerifierOutput, StageTrace]:
         judgments, diagnoses = self._inspect_and_diagnose(
-            state, records, candidate=True, previous_state=previous_state
+            state,
+            records,
+            candidate=True,
+            previous_state=previous_state,
+            proposal_catalog=records,
         )
         decision = self._decision(
             state,
@@ -271,6 +285,7 @@ class StagedQwenVerifier:
         selected = self._select_diagnosis(diagnoses)
         plan: ActionPlan | None = None
         replan_records: tuple[EvidenceRecord, ...] = ()
+        replan_selected_records: tuple[EvidenceRecord, ...] = ()
         replan_judgments: tuple[EvidenceJudgment, ...] = ()
         replan_diagnoses: tuple[Diagnosis, ...] = ()
         output_diagnosis = selected
@@ -295,11 +310,15 @@ class StagedQwenVerifier:
                 EvidenceRecord.from_proposal(item) for item in full_proposals
             )
             if replan_records:
+                replan_selected_records = self._select_global_regions(
+                    state, replan_records
+                )
                 replan_judgments, replan_diagnoses = self._inspect_and_diagnose(
                     state,
-                    replan_records,
+                    replan_selected_records,
                     candidate=False,
                     previous_state=None,
+                    proposal_catalog=replan_records,
                 )
                 remaining = self._select_diagnosis(replan_diagnoses)
                 plan = self._plan(state, replan_records, remaining)
@@ -312,11 +331,15 @@ class StagedQwenVerifier:
         return output, StageTrace(
             mode="candidate",
             evidence=records,
+            selected_region_ids=tuple(item.region_id for item in records),
             judgments=judgments,
             diagnoses=diagnoses,
             plan=plan,
             decision=decision,
             replan_evidence=replan_records,
+            replan_selected_region_ids=tuple(
+                item.region_id for item in replan_selected_records
+            ),
             replan_judgments=replan_judgments,
             replan_diagnoses=replan_diagnoses,
         )
@@ -328,6 +351,7 @@ class StagedQwenVerifier:
         *,
         candidate: bool,
         previous_state: ChangeState | None,
+        proposal_catalog: tuple[EvidenceRecord, ...],
     ) -> tuple[tuple[EvidenceJudgment, ...], tuple[Diagnosis, ...]]:
         judgments: list[EvidenceJudgment] = []
         diagnoses: list[Diagnosis] = []
@@ -339,6 +363,9 @@ class StagedQwenVerifier:
                 state,
                 {
                     "region": record.to_dict(),
+                    "proposal_catalog": [
+                        item.to_dict() for item in proposal_catalog
+                    ],
                     "schema": "evidence_judgment_v1",
                     "visual_context": self.visual_context,
                 },
@@ -365,6 +392,9 @@ class StagedQwenVerifier:
                 state,
                 {
                     "region": record.to_dict(),
+                    "proposal_catalog": [
+                        item.to_dict() for item in proposal_catalog
+                    ],
                     "visual_judgment": judgment.__dict__,
                     "schema": "diagnosis_v1",
                     "visual_context": self.visual_context,
@@ -373,11 +403,62 @@ class StagedQwenVerifier:
                 previous_state,
             )
             diagnoses.append(parsed_diagnosis)
+        return tuple(judgments), tuple(diagnoses)
+
+    def _select_global_regions(
+        self,
+        state: ChangeState,
+        records: tuple[EvidenceRecord, ...],
+    ) -> tuple[EvidenceRecord, ...]:
+        """Ask the model to reference marked regions, never coordinates."""
+
         if len(records) > self.max_regions:
             raise StageProtocolError(
                 f"proposal count {len(records)} exceeds staged verifier max_regions={self.max_regions}"
             )
-        return tuple(judgments), tuple(diagnoses)
+        catalog = [item.to_dict() for item in records]
+        allowed_ids = {item.region_id for item in records}
+
+        def parse_selection(response: Mapping[str, Any]) -> tuple[str, ...]:
+            if set(response) != {"selection"} or not isinstance(
+                response["selection"], Mapping
+            ):
+                raise StageProtocolError("selection response must contain only selection")
+            body = response["selection"]
+            if set(body) != {"region_ids", "reason"}:
+                raise StageProtocolError(
+                    "selection must contain exactly region_ids and reason"
+                )
+            region_ids = body["region_ids"]
+            if not isinstance(region_ids, list) or not region_ids:
+                raise StageProtocolError("selection region_ids must be a non-empty list")
+            if len(region_ids) > self.max_selected_regions:
+                raise StageProtocolError(
+                    f"selection exceeds max_selected_regions={self.max_selected_regions}"
+                )
+            if any(not isinstance(item, str) for item in region_ids):
+                raise StageProtocolError("selection region_ids must contain strings")
+            if len(set(region_ids)) != len(region_ids):
+                raise StageProtocolError("selection region_ids must be unique")
+            unknown = set(region_ids) - allowed_ids
+            if unknown:
+                raise StageProtocolError(
+                    f"selection contains unknown region ids: {sorted(unknown)}"
+                )
+            return tuple(region_ids)
+
+        selected_ids = self._run_stage(
+            "select",
+            state,
+            {
+                "proposal_catalog": catalog,
+                "max_selected_regions": self.max_selected_regions,
+                "schema": "region_selection_v1",
+            },
+            parse_selection,
+        )
+        by_id = {item.region_id: item for item in records}
+        return tuple(by_id[region_id] for region_id in selected_ids)
 
     @staticmethod
     def _validate_diagnosis(
@@ -406,53 +487,49 @@ class StagedQwenVerifier:
         actionable = [item for item in diagnoses if item.error_type != "none"]
         if not actionable:
             return None
-        return max(actionable, key=lambda item: item.confidence)
+        safe_priority = {
+            "false_positive_change": 2,
+            "false_negative": 2,
+            "mixed_error": 1,
+            "uncertain_region": 0,
+        }
+        return max(
+            actionable,
+            key=lambda item: (safe_priority[item.error_type], item.confidence),
+        )
 
     def _plan(
         self,
         state: ChangeState,
         records: tuple[EvidenceRecord, ...],
         diagnosis: Diagnosis | None,
-    ) -> ActionPlan:
+    ) -> ActionPlan | None:
         if diagnosis is None or diagnosis.error_type == "none":
             return ActionPlan(None, "finish", None)
         record = next(item for item in records if item.region_id == diagnosis.region_id)
-        def parse_plan(response: Mapping[str, Any]) -> ActionPlan:
-            plan = _parse_plan(response, record.region_id)
-            if plan.target_view != diagnosis.target_view:
-                raise StageProtocolError("plan target_view must match diagnosis target_view")
-            if plan.action not in record.allowed_actions and plan.action != "box":
-                raise StageProtocolError(
-                    f"{record.region_id}: action {plan.action!r} is not editable in target view"
-                )
-            if plan.action in {"positive_point", "negative_point"}:
-                point = plan.coordinate_normalized_1000
-                assert point is not None
-                x1, y1, x2, y2 = record.box_normalized_1000
-                if not (x1 <= point[0] <= x2 and y1 <= point[1] <= y2):
-                    raise StageProtocolError("planned point is outside the Environment proposal")
-                seed_white = bool(
-                    record.editable_seed_white.get(plan.target_view or "", False)
-                )
-                if plan.action == "negative_point" and not seed_white:
-                    raise StageProtocolError(
-                        "negative_point requires a white editable seed"
-                    )
-                if plan.action == "positive_point" and seed_white:
-                    raise StageProtocolError(
-                        "positive_point requires a black editable seed"
-                    )
-            return plan
-
-        return self._run_stage(
-            "plan",
-            state,
-            {
-                "region": record.to_dict(),
-                "diagnosis": diagnosis.__dict__,
-                "schema": "action_plan_v1",
-            },
-            parse_plan,
+        if diagnosis.error_type not in {
+            "false_positive_change",
+            "false_negative",
+        }:
+            return None
+        target_view = diagnosis.target_view
+        if target_view not in {"t1", "t2"}:
+            return None
+        seed_white = bool(record.editable_seed_white.get(target_view, False))
+        action = (
+            "negative_point"
+            if diagnosis.error_type == "false_positive_change"
+            else "positive_point"
+        )
+        if action == "negative_point" and not seed_white:
+            return None
+        if action == "positive_point" and seed_white:
+            return None
+        return ActionPlan(
+            record.region_id,
+            action,
+            target_view,
+            coordinate_normalized_1000=record.component_seed_normalized_1000,
         )
 
     def _decision(
@@ -591,25 +668,6 @@ def _parse_diagnosis(payload: Mapping[str, Any], region_id: str) -> Diagnosis:
     )
 
 
-def _parse_plan(payload: Mapping[str, Any], region_id: str) -> ActionPlan:
-    _exact_keys(payload, {"region_id", "plan"}, "plan")
-    if payload["region_id"] != region_id or not isinstance(payload["plan"], Mapping):
-        raise StageProtocolError("plan response has the wrong region_id or shape")
-    body = payload["plan"]
-    _exact_keys(body, {"action", "target_view", "coordinate_normalized_1000", "box_normalized_1000"}, "plan body")
-    coordinate = body["coordinate_normalized_1000"]
-    box = body["box_normalized_1000"]
-    return ActionPlan(
-        region_id,
-        str(body["action"]),
-        body["target_view"],
-        _integer_tuple(coordinate, 2, "coordinate_normalized_1000")
-        if coordinate is not None
-        else None,
-        _integer_tuple(box, 4, "box_normalized_1000") if box is not None else None,
-    )
-
-
 def _parse_decision(payload: Mapping[str, Any]) -> Decision:
     _exact_keys(
         payload,
@@ -659,7 +717,9 @@ def _required_keys(
         )
 
 
-def _plan_dict(plan: ActionPlan) -> dict[str, Any]:
+def _plan_dict(plan: ActionPlan | None) -> dict[str, Any] | None:
+    if plan is None:
+        return None
     return {
         "region_id": plan.region_id,
         "action": plan.action,

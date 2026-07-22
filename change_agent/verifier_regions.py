@@ -189,7 +189,7 @@ def build_candidate_delta_regions(
     height, width = change.shape
     result: list[dict[str, Any]] = []
     for index, (effect_kind, component) in enumerate(raw):
-        seed_y, seed_x = np.argwhere(component)[0]
+        seed_x, seed_y = _distance_transform_seed(component)
         crop_box = _padded_box(_mask_box(component), (height, width), padding_ratio)
         x1, y1, x2, y2 = crop_box
         crop = np.zeros_like(change)
@@ -318,7 +318,7 @@ def build_verifier_regions(
     result: list[dict[str, Any]] = []
     candidate_delta = np.logical_or(candidate_added, candidate_removed)
     for index, item in enumerate(selected):
-        seed_y, seed_x = np.argwhere(item["component"])[0]
+        seed_x, seed_y = _distance_transform_seed(item["component"])
         crop_box = _padded_box(item["box"], (height, width), padding_ratio)
         x1, y1, x2, y2 = crop_box
         crop = np.zeros_like(change)
@@ -377,6 +377,35 @@ def _mask_box(mask: np.ndarray) -> tuple[int, int, int, int]:
     if not len(xs):
         raise ValueError("cannot build a box for an empty component")
     return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+
+def _distance_transform_seed(mask: np.ndarray) -> tuple[int, int]:
+    """Return stable XY argmax of an 8-neighbour interior distance transform.
+
+    Repeated binary erosion is equivalent to a discrete distance transform for
+    this purpose: pixels surviving the most erosion rounds are farthest from
+    the component boundary.  The implementation keeps proposal generation
+    dependency-free and ``np.argmax`` gives deterministic row-major tie-breaks.
+    """
+
+    source = np.asarray(mask, dtype=bool)
+    if not source.any():
+        raise ValueError("cannot choose a seed for an empty component")
+    remaining = np.array(source, copy=True)
+    distance = np.zeros(source.shape, dtype=np.int32)
+    while remaining.any():
+        distance[remaining] += 1
+        padded = np.pad(remaining, 1, mode="constant", constant_values=False)
+        eroded = np.ones_like(remaining)
+        for offset_y in range(3):
+            for offset_x in range(3):
+                eroded &= padded[
+                    offset_y : offset_y + remaining.shape[0],
+                    offset_x : offset_x + remaining.shape[1],
+                ]
+        remaining = eroded
+    seed_y, seed_x = np.unravel_index(int(np.argmax(distance)), distance.shape)
+    return int(seed_x), int(seed_y)
 
 
 def _component_containing_seed(

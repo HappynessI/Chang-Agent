@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from change_agent.state import ChangeState
+from change_agent.coordinates import normalized_point_to_pixel
 from change_agent.verifier_regions import (
     attach_verifier_regions,
     build_candidate_delta_regions,
@@ -11,6 +12,23 @@ from change_agent.verifier_regions import (
 
 
 class VerifierRegionTest(unittest.TestCase):
+    def test_component_seed_is_distance_transform_interior_point(self):
+        image = np.zeros((21, 21, 3), dtype=np.uint8)
+        mask = np.zeros((21, 21), dtype=bool)
+        mask[3:18, 4:17] = True
+        mask[3:10, 10:17] = False
+        state = ChangeState(image, image, "building", np.zeros_like(mask), mask, mask)
+
+        proposal = build_verifier_regions(state)[0]
+        seed = normalized_point_to_pixel(
+            proposal["component_seed_normalized"], state.image_size
+        )
+
+        self.assertTrue(mask[seed[1], seed[0]])
+        self.assertNotEqual(seed, tuple(np.argwhere(mask)[0][::-1]))
+        self.assertGreater(seed[0], 4)
+        self.assertGreater(seed[1], 3)
+
     def test_proposals_merge_change_and_temporal_difference_sources(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
         t1 = np.zeros((32, 32), dtype=bool)

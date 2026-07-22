@@ -9,7 +9,7 @@ items; runtime aggregates them and retains ownership of every decision gate.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..action_parser import ActionParser, ActionValidationError
 from ..state import AgentAction, ChangeState, VerifierOutput
@@ -145,21 +145,29 @@ class DirectQwenVerifier:
             ),
         }
         try:
+            def validate_replan(verdict: _DirectVerdict) -> None:
+                """Keep retryable Direct replans executable and non-duplicate."""
+
+                _validate_executable_direct_action(accepted_state, verdict)
+                if not _rubric_gates_pass(verdict):
+                    raise StageProtocolError(
+                        "direct rollback replan rubric hard gates failed"
+                    )
+                if (
+                    _verdict_action(verdict, accepted_state.image_size)
+                    == rejected_action
+                ):
+                    raise StageProtocolError(
+                        "direct rollback replan repeated the rejected action"
+                    )
+
             verdict = self._run_stage(
                 accepted_state,
                 payload,
                 mode="replan",
                 previous_state=rejected_candidate,
+                validate=validate_replan,
             )
-            if not _rubric_gates_pass(verdict):
-                raise StageProtocolError(
-                    "direct rollback replan rubric hard gates failed"
-                )
-            replanned_action = _verdict_action(verdict, accepted_state.image_size)
-            if replanned_action == rejected_action:
-                raise StageProtocolError(
-                    "direct rollback replan repeated the rejected action"
-                )
             output, aggregate = self._output(
                 verdict, accepted_feedback.quality_score, mode="replan"
             )
@@ -277,6 +285,9 @@ class DirectQwenVerifier:
                 },
                 mode=mode,
                 previous_state=previous_state,
+                validate=lambda candidate: _validate_executable_direct_action(
+                    state, candidate
+                ),
             )
             output, aggregate = self._output(verdict, previous_score, mode=mode)
             self.last_evidence = {
@@ -330,21 +341,60 @@ class DirectQwenVerifier:
         *,
         mode: str,
         previous_state: ChangeState | None,
+        validate: Callable[[_DirectVerdict], None] | None = None,
     ) -> _DirectVerdict:
         errors: list[str] = []
         repair = getattr(self.backend, "repair_stage", None)
+        semantic_anchor: tuple[Any, ...] | None = None
+        previous_raw: Mapping[str, Any] | None = None
         for attempt in range(self.max_retries):
             try:
+                attempt_payload = dict(payload)
+                if attempt > 0 and previous_raw is not None:
+                    attempt_payload["repair_context"] = {
+                        "previous_invalid_response": dict(previous_raw),
+                        "preserve_semantic_fields": [
+                            "rubric.pass",
+                            "error_type",
+                            "candidate_effect",
+                        ],
+                    }
                 raw = (
-                    self.backend.generate_stage("direct", state, payload, previous_state)
+                    self.backend.generate_stage(
+                        "direct", state, attempt_payload, previous_state
+                    )
                     if attempt == 0
-                    else repair("direct", state, payload, errors[-1], previous_state)
+                    else repair(
+                        "direct",
+                        state,
+                        attempt_payload,
+                        errors[-1],
+                        previous_state,
+                    )
                     if callable(repair)
                     else None
                 )
                 if raw is None:
                     break
-                return _parse_direct_verdict(raw, mode=mode)
+                if isinstance(raw, Mapping):
+                    previous_raw = dict(raw)
+                try:
+                    verdict = _parse_direct_verdict(raw, mode=mode)
+                except (KeyError, TypeError, ValueError, StageProtocolError):
+                    raw_anchor = _raw_semantic_anchor(raw)
+                    if raw_anchor is not None and semantic_anchor is None:
+                        semantic_anchor = raw_anchor
+                    raise
+                current_anchor = _semantic_anchor(verdict)
+                if semantic_anchor is None:
+                    semantic_anchor = current_anchor
+                elif attempt > 0 and current_anchor != semantic_anchor:
+                    raise StageProtocolError(
+                        "direct repair changed rubric pass values or semantic error_type"
+                    )
+                if validate is not None:
+                    validate(verdict)
+                return verdict
             except (KeyError, TypeError, ValueError, StageProtocolError) as error:
                 errors.append(str(error))
         if not errors:
@@ -620,8 +670,96 @@ def _derived_comparison(verdict: _DirectVerdict, mode: str) -> str:
     return "uncertain"
 
 
+def _validate_executable_direct_action(
+    state: ChangeState, verdict: _DirectVerdict
+) -> None:
+    """Reject deterministic no-op point plans before a segmentation worker runs.
+
+    This is a geometry/tool-contract check, not a semantic decision: a negative
+    click removes the connected component of the current editable mask, so its
+    seed must be white.  A positive click is deliberately not constrained by
+    current seed occupancy because SimpleClick can expand a component from an
+    already-white point.  Direct mode has no Environment Proposal, but it still
+    owns the same current T1/T2 masks and can reject the deterministic negative
+    no-op before launching an expensive worker.
+    """
+
+    if verdict.error_type == "none" or verdict.suggested_action == "finish":
+        return
+    action = _verdict_action(verdict, state.image_size)
+    if action.action not in {"positive_point", "negative_point"}:
+        return
+    if action.coordinate is None:
+        raise StageProtocolError("direct point action has no pixel coordinate")
+    target_mask = state.t1_mask if action.target_view == "t1" else state.t2_mask
+    x, y = action.coordinate
+    seed_is_white = bool(target_mask[y, x])
+    if action.action == "negative_point" and not seed_is_white:
+        raise StageProtocolError(
+            "direct negative_point requires a white seed in the editable target mask"
+        )
+
+
 def _verdict_to_dict(verdict: _DirectVerdict) -> dict[str, Any]:
     return asdict(verdict)
+
+
+def _semantic_anchor(verdict: _DirectVerdict) -> tuple[Any, ...]:
+    """Fields a structural repair must not reinterpret."""
+
+    rubric_pass = tuple(
+        (item.rubric_id, item.passed) for item in verdict.rubric
+    )
+    effect = verdict.candidate_effect
+    effect_flags = (
+        None
+        if effect is None
+        else (
+            effect.intended_error_improved,
+            effect.introduced_false_positive,
+            effect.introduced_false_negative,
+            effect.boundary_or_artifact_worsened,
+        )
+    )
+    return verdict.error_type, rubric_pass, effect_flags
+
+
+def _raw_semantic_anchor(raw: Any) -> tuple[Any, ...] | None:
+    """Recover semantic fields from a response that failed geometry parsing."""
+
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("verdict"), Mapping):
+        return None
+    body = raw["verdict"]
+    rubric_value = body.get("rubric")
+    error_type = body.get("error_type")
+    if not isinstance(rubric_value, Mapping) or error_type is None:
+        return None
+    try:
+        rubric = _parse_rubric(rubric_value)
+    except (KeyError, TypeError, ValueError, StageProtocolError):
+        return None
+    effect_flags: tuple[bool, bool, bool, bool] | None = None
+    effect = body.get("candidate_effect")
+    if isinstance(effect, Mapping) and all(
+        isinstance(effect.get(key), bool)
+        for key in (
+            "intended_error_improved",
+            "introduced_false_positive",
+            "introduced_false_negative",
+            "boundary_or_artifact_worsened",
+        )
+    ):
+        effect_flags = (
+            bool(effect["intended_error_improved"]),
+            bool(effect["introduced_false_positive"]),
+            bool(effect["introduced_false_negative"]),
+            bool(effect["boundary_or_artifact_worsened"]),
+        )
+    return (
+        _canonical_error_type(error_type),
+        tuple((item.rubric_id, item.passed) for item in rubric),
+        effect_flags,
+    )
 
 
 def _canonical_error_type(value: Any) -> str:

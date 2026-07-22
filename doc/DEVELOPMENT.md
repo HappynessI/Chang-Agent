@@ -1,5 +1,57 @@
 # Development log
 
+## 2026-07-22 — SoM global selection and programmatic geometry
+
+The staged proposal path now follows the grounding protocol documented in
+`GROUNDING_PAPERS_ANALYSIS.md`: Environment proposals are rendered as a
+deterministic numbered T1/T2/change overview, and Qwen returns only a bounded
+list of existing `region_id` values. Selected regions receive the existing
+local crop evidence/diagnosis call with the overview attached for alignment.
+
+The old model-authored `plan` stage is removed from the active protocol. For a
+safe `false_positive_change` or `false_negative` diagnosis, the runtime creates
+one point action at the proposal's distance-transform seed. `mixed_error` and
+`uncertain_region` fail closed until a finer proposal/grid resolver exists;
+they never fall back to a large guessed box. Proposal/hybrid rollout actions
+now go directly from verifier output to Environment, eliminating the second
+Qwen coordinate-generation step. Candidate audits still inspect every delta
+proposal; only the initial/replan audits use global region selection.
+
+The Direct path keeps its full-image limitation, but repair retries now carry
+the previous invalid response and lock rubric pass values, `error_type`, and
+candidate-effect flags. Repair may change only the invalid target/action/
+geometry fields. This prevents a geometry repair from silently replacing an
+actionable mixed/false-positive diagnosis with `none/finish`.
+
+Regression coverage includes deterministic interior seeds, strict region-ID
+selection, overview/crop image composition, fail-closed mixed plans, direct
+repair semantic locking, and direct verifier action execution. Slurm job
+`44060` passed all 47 focused tests.
+
+## 2026-07-21 — Direct rubric actionability/replan repair
+
+The final three-sample Direct-rubric run `CA_0721(12)-bailian-direct-rubric-v3`
+showed that valid rubric JSON alone is insufficient: one negative click was
+grounded on a black editable-mask seed and therefore made no change, while both
+rollback replans repeated the rejected pixel action.  A repeated replan was
+detected only after parsing, outside the retry loop, so the episode stopped
+without a second model repair request.
+
+`DirectQwenVerifier` now validates the deterministic point no-op before a
+segmentation worker starts: negative points require a white current-mask seed.
+Positive points remain legal on either current-mask state because SimpleClick
+can expand a component from a white seed.  The same negative-point validator is
+part of the Direct replan retry loop, along with the non-duplicate action invariant.
+Schema-valid but non-executable or repeated replans now receive the backend's
+existing repair prompt rather than immediately invalidating the episode.  These
+are tool-contract checks only; semantic diagnosis, rubric judgments, and action
+geometry remain authored by Qwen.  Regression coverage includes a repeated
+replan followed by a repaired, distinct action.
+
+The detailed evidence, observable verifier trace, Codex operational trace,
+offline metrics, and remaining model-quality limitation are recorded in
+[`ca0721_12_direct_rubric_trajectory_analysis.md`](ca0721_12_direct_rubric_trajectory_analysis.md).
+
 ## 2026-07-21 — Direct rollback replan
 
 The Direct Proposal-ablation arm previously treated its verifier feedback as

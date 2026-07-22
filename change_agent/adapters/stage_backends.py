@@ -13,8 +13,10 @@ import urllib.request
 from typing import Any, Mapping
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
+from ..coordinates import normalized_point_to_pixel
+from .omniovcd_adapter import connected_components
 from ..state import ChangeState
 from ..verifier_protocol import StageName, StageProtocolError
 
@@ -377,6 +379,16 @@ def _stage_images(
                 ]
             )
         return images
+    if stage == "select":
+        catalog = payload.get("proposal_catalog", [])
+        if not isinstance(catalog, list):
+            raise StageProtocolError("proposal_catalog must be a list")
+        return [
+            (
+                "Numbered global proposal overview: T1 | T2 | current change mask",
+                _proposal_overview(state, previous_state, catalog),
+            )
+        ]
     if stage in {"evidence", "candidate_evidence", "diagnosis", "candidate_diagnosis"}:
         visual_context = str(payload.get("visual_context", "hybrid"))
         if visual_context not in {"proposal", "hybrid"}:
@@ -384,15 +396,24 @@ def _stage_images(
                 "visual_context must be proposal or hybrid for staged regional calls"
             )
         images: list[tuple[str, Image.Image]] = []
-        if visual_context == "hybrid":
-            images.extend(
-                [
-                    ("T1 earlier RGB image", _as_image(state.t1_image)),
-                    ("T2 later RGB image", _as_image(state.t2_image)),
-                    ("Current predicted T1 object mask", _mask_image(state.t1_mask)),
-                    ("Current predicted T2 object mask", _mask_image(state.t2_mask)),
-                    ("Current final change mask", _mask_image(state.change_mask)),
-                ]
+        catalog = payload.get("proposal_catalog", [])
+        if isinstance(catalog, list) and catalog:
+            active = payload.get("region", {})
+            active_id = (
+                str(active.get("region_id"))
+                if isinstance(active, Mapping) and active.get("region_id")
+                else None
+            )
+            images.append(
+                (
+                    "Global numbered overview; yellow marks the active local region",
+                    _proposal_overview(
+                        state,
+                        previous_state,
+                        catalog,
+                        active_region_id=active_id,
+                    ),
+                )
             )
         region = payload.get("region")
         if isinstance(region, Mapping):
@@ -417,6 +438,128 @@ def _stage_images(
     return []
 
 
+_MARK_COLORS = (
+    (255, 70, 70),
+    (40, 220, 90),
+    (60, 150, 255),
+    (255, 80, 220),
+    (30, 220, 220),
+    (255, 150, 30),
+)
+
+
+def _proposal_overview(
+    state: ChangeState,
+    previous_state: ChangeState | None,
+    catalog: list[Any],
+    *,
+    active_region_id: str | None = None,
+) -> Image.Image:
+    """Render deterministic Set-of-Mark contours from Environment proposals."""
+
+    panels = [
+        _as_image(state.t1_image).convert("RGB"),
+        _as_image(state.t2_image).convert("RGB"),
+        _mask_image(state.change_mask).convert("RGB"),
+    ]
+    width, height = state.image_size
+    for index, proposal in enumerate(catalog):
+        if not isinstance(proposal, Mapping):
+            continue
+        region_id = str(proposal.get("region_id", ""))
+        if not region_id:
+            continue
+        color = (
+            (255, 255, 0)
+            if region_id == active_region_id
+            else _MARK_COLORS[index % len(_MARK_COLORS)]
+        )
+        component = _proposal_component(state, previous_state, proposal)
+        seed = proposal.get("component_seed_normalized_1000", [0, 0])
+        try:
+            seed_x, seed_y = normalized_point_to_pixel(seed, state.image_size)
+        except (TypeError, ValueError):
+            continue
+        boundary = _mask_boundary(component) if component is not None else None
+        for panel in panels:
+            array = np.asarray(panel).copy()
+            if boundary is not None and boundary.any():
+                array[boundary] = color
+                panel.paste(Image.fromarray(array))
+            else:
+                box = proposal.get("box_normalized_1000")
+                if isinstance(box, (list, tuple)) and len(box) == 4:
+                    left, top, right, bottom = _normalized_crop_box(
+                        tuple(int(value) for value in box), state.image_size
+                    )
+                    ImageDraw.Draw(panel).rectangle(
+                        (left, top, max(left, right - 1), max(top, bottom - 1)),
+                        outline=color,
+                        width=2,
+                    )
+            draw = ImageDraw.Draw(panel)
+            radius = 3
+            draw.ellipse(
+                (
+                    seed_x - radius,
+                    seed_y - radius,
+                    seed_x + radius,
+                    seed_y + radius,
+                ),
+                fill=color,
+                outline=(0, 0, 0),
+            )
+            label_x = min(max(0, seed_x + 5), max(0, width - 24))
+            label_y = min(max(0, seed_y - 8), max(0, height - 12))
+            label_box = draw.textbbox((label_x, label_y), region_id)
+            draw.rectangle(label_box, fill=(0, 0, 0))
+            draw.text((label_x, label_y), region_id, fill=color)
+    canvas = Image.new("RGB", (width * len(panels), height), (0, 0, 0))
+    for index, panel in enumerate(panels):
+        canvas.paste(panel, (index * width, 0))
+    return canvas
+
+
+def _proposal_component(
+    state: ChangeState,
+    previous_state: ChangeState | None,
+    proposal: Mapping[str, Any],
+) -> np.ndarray | None:
+    kind = str(proposal.get("audit_kind", "mixed"))
+    temporal_xor = np.logical_xor(state.t1_mask, state.t2_mask)
+    if kind == "present":
+        source = state.change_mask
+    elif kind == "missing":
+        source = np.logical_and(temporal_xor, ~state.change_mask)
+    elif kind == "delta_added" and previous_state is not None:
+        source = np.logical_and(state.change_mask, ~previous_state.change_mask)
+    elif kind == "delta_removed" and previous_state is not None:
+        source = np.logical_and(previous_state.change_mask, ~state.change_mask)
+    else:
+        source = np.logical_or(state.change_mask, temporal_xor)
+    seed = proposal.get("component_seed_normalized_1000", [0, 0])
+    try:
+        seed_x, seed_y = normalized_point_to_pixel(seed, state.image_size)
+    except (TypeError, ValueError):
+        return None
+    for component in connected_components(source, min_area=1):
+        if component[seed_y, seed_x]:
+            return component
+    return None
+
+
+def _mask_boundary(mask: np.ndarray) -> np.ndarray:
+    padded = np.pad(np.asarray(mask, dtype=bool), 1, constant_values=False)
+    eroded = np.ones_like(mask, dtype=bool)
+    for offset_y in range(3):
+        for offset_x in range(3):
+            eroded &= padded[
+                offset_y : offset_y + mask.shape[0],
+                offset_x : offset_x + mask.shape[1],
+            ]
+    return np.logical_and(mask, ~eroded)
+
+
 def _stage_prompt(
     stage: StageName,
     payload: Mapping[str, Any],
@@ -433,7 +576,19 @@ def _stage_prompt(
         if isinstance(region, Mapping) and region.get("region_id") is not None
         else "r0"
     )
-    if stage in {"evidence", "candidate_evidence"}:
+    if stage == "select":
+        max_selected = int(payload.get("max_selected_regions", 1))
+        schema = (
+            '{"selection":{"region_ids":["r0"],'
+            '"reason":"short observable reason"}}'
+        )
+        task = (
+            "Inspect the numbered global overview and choose the regions most likely to contain "
+            "a material target-class change-mask error. Return one or more supplied region IDs, "
+            f"at most {max_selected}; never output coordinates. Selection only prioritizes local "
+            "inspection and does not assert that unselected regions are correct."
+        )
+    elif stage in {"evidence", "candidate_evidence"}:
         schema = (
             f'{{"region_id":"{region_id}","visual_judgment":{{'
             '"t1_state":"background",'
@@ -467,45 +622,6 @@ def _stage_prompt(
             "use the JSON string t1 or t2 for the object mask that needs correction. confidence "
             "means confidence in this diagnosis; for none, report confidence that the whole "
             "region is correct. Replace every schema placeholder with a valid JSON value."
-        )
-    elif stage == "plan":
-        diagnosis = payload.get("diagnosis")
-        target_view = (
-            str(diagnosis.get("target_view"))
-            if isinstance(diagnosis, Mapping)
-            and diagnosis.get("target_view") in {"t1", "t2"}
-            else "t2"
-        )
-        editable = (
-            region.get("editable_seed_white", {})
-            if isinstance(region, Mapping)
-            else {}
-        )
-        seed_white = (
-            bool(editable.get(target_view, False))
-            if isinstance(editable, Mapping)
-            else False
-        )
-        point_action = "negative_point" if seed_white else "positive_point"
-        seed = (
-            region.get("component_seed_normalized_1000", [0, 0])
-            if isinstance(region, Mapping)
-            else [0, 0]
-        )
-        if not isinstance(seed, (list, tuple)) or len(seed) != 2:
-            seed = [0, 0]
-        schema = (
-            f'{{"region_id":"{region_id}","plan":{{'
-            f'"action":"{point_action}","target_view":"{target_view}",'
-            f'"coordinate_normalized_1000":[{int(seed[0])},{int(seed[1])}],'
-            '"box_normalized_1000":null}}}'
-        )
-        task = (
-            "Choose only an allowed executable action. negative_point requires a white seed in "
-            "the selected object mask; positive_point requires a black seed. Use supplied region "
-            "geometry. For a point action, copy the exact supplied component seed shown in the "
-            "output contract. Use exactly one of coordinate_normalized_1000 and "
-            "box_normalized_1000."
         )
     elif stage == "direct":
         mode = str(payload.get("mode", "initial"))
@@ -564,7 +680,10 @@ def _stage_prompt(
             "For an error, choose t1 or t2 and one executable positive_point, negative_point, "
             "or box; suggested_action must be exactly one of positive_point, negative_point, "
             "box, or finish (never use revise/correct/edit). A point needs normalized [0,1000] coordinate; a box needs normalized "
-            "[0,1000] XYXY box. For a candidate, compare actual candidate versus previous "
+            "[0,1000] XYXY box. For a negative_point, the selected coordinate must be white "
+            "in the selected current object mask. A positive_point may be on either mask state "
+            "because its predicted component can still expand the current mask. "
+            "For a candidate, compare actual candidate versus previous "
             "accepted masks: intended_error_improved means the attempted target-class error was "
             "materially reduced; the three harm flags report newly introduced semantic or "
             "shape damage."
@@ -577,7 +696,9 @@ def _stage_prompt(
                 "materially different executable correction, or finish only if no error remains. "
                 "Use the bounded rejection_history to avoid all recently failed actions. "
                 "This is action replanning, not candidate evaluation; candidate_effect must be "
-                "JSON null."
+                "JSON null. Runtime comparison is uncertain until the replacement action is "
+                "executed; comparison must be uncertain in this replan response. "
+                ""
             )
     else:
         candidate_mode = payload.get("mode") == "candidate"
@@ -599,6 +720,13 @@ def _stage_prompt(
             "\nREPAIR: The previous response was rejected for this exact reason: "
             f"{validation_error[:500]} Do not repeat the rejected structure."
         )
+        if stage == "direct" and isinstance(payload.get("repair_context"), Mapping):
+            repair += (
+                " Preserve the previous response's rubric pass booleans, error_type, "
+                "and candidate_effect flags. Change only the invalid target/action/geometry "
+                "fields needed to satisfy the tool contract; do not turn an actionable error "
+                "into none/finish merely because the first geometry was invalid."
+            )
     return (
         "OUTPUT CONTRACT: Return exactly one JSON object, no markdown and no explanation. "
         "The top-level keys must exactly match this template:\n"
@@ -614,11 +742,11 @@ def _stage_prompt(
 
 
 _STAGE_EXPECTED_KEYS: dict[str, frozenset[str]] = {
+    "select": frozenset({"selection"}),
     "evidence": frozenset({"region_id", "visual_judgment"}),
     "candidate_evidence": frozenset({"region_id", "visual_judgment"}),
     "diagnosis": frozenset({"region_id", "diagnosis"}),
     "candidate_diagnosis": frozenset({"region_id", "diagnosis"}),
-    "plan": frozenset({"region_id", "plan"}),
     "decision": frozenset({"decision"}),
     "direct": frozenset({"verdict"}),
 }

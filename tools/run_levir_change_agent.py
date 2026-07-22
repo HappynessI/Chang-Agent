@@ -88,6 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verifier-min-region-area", type=int, default=4)
     parser.add_argument("--verifier-region-padding-ratio", type=float, default=0.25)
     parser.add_argument("--staged-verifier-max-total-regions", type=int, default=128)
+    parser.add_argument(
+        "--verifier-max-selected-regions",
+        type=int,
+        default=3,
+        help="Maximum existing region IDs selected for each global/local audit.",
+    )
     parser.add_argument("--matching-mode", choices=sorted(MaskPairProcessor.MODES), default="overlap_presence")
     parser.add_argument("--overlap-threshold", type=float, default=0.25)
     parser.add_argument("--t12-min-instance-area", type=int, default=0)
@@ -113,8 +119,8 @@ def parse_args() -> argparse.Namespace:
         default="hybrid",
         help=(
             "Direct uses full-state Qwen diagnosis/action geometry without Proposals; "
-            "Proposal uses only regional crops; Hybrid supplies full state plus regional "
-            "crops while Environment owns execution geometry."
+            "Proposal and Hybrid use numbered global region selection plus local crops; "
+            "Environment owns execution geometry."
         ),
     )
     parser.add_argument("--bailian-model", default="qwen3-vl-plus")
@@ -278,7 +284,7 @@ def main() -> None:
                 "action_generation_policy": (
                     "direct_verifier_full_context"
                     if args.proposal_mode == "direct"
-                    else "agent_from_verifier_feedback"
+                    else "verifier_region_id_programmatic_geometry"
                 ),
                 "verifier": args.verifier,
                 "proposal_mode": args.proposal_mode,
@@ -286,15 +292,16 @@ def main() -> None:
                 "verifier_decision_mode": (
                     "qwen_full_context_direct_binary_rubric"
                     if args.proposal_mode == "direct"
-                    else "qwen_staged_proposal_local_diagnosis"
+                    else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
                     if args.proposal_mode == "proposal"
-                    else "qwen_staged_full_context_plus_proposal_grounding"
+                    else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
                     if args.verifier == "qwen_staged"
                     else "qwen_rich_region_diagnosis_and_global_synthesis"
                     if args.verifier == "qwen_zero_shot"
                     else "legacy_rule_score"
                 ),
                 "verifier_max_regions": args.verifier_max_regions,
+                "verifier_max_selected_regions": args.verifier_max_selected_regions,
                 "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
                 "verifier_do_sample": False,
                 "verifier_repetition_penalty": args.verifier_repetition_penalty,
@@ -319,20 +326,16 @@ def main() -> None:
         loop_index = 0
         while not environment.done and episode_stop_reason is None:
             loop_index += 1
-            if args.proposal_mode == "direct":
-                observation, attempt_errors, action_executed = (
-                    _execute_direct_verifier_action(
-                        environment, observation, loop_index=loop_index
-                    )
-                )
-            else:
-                observation, attempt_errors, action_executed = _execute_action_with_retries(
-                    qwen,
-                    environment,
-                    observation,
-                    args.action_retries,
-                    loop_index=loop_index,
-                )
+            observation, attempt_errors, action_executed = _execute_verifier_action(
+                environment,
+                observation,
+                loop_index=loop_index,
+                source=(
+                    "direct_verifier_full_context"
+                    if args.proposal_mode == "direct"
+                    else "verifier_region_id_programmatic_geometry"
+                ),
+            )
             invalid_outputs.extend(attempt_errors)
             if not action_executed:
                 episode_stop_reason = "action_retry_exhaustion_without_state_change"
@@ -484,6 +487,7 @@ def _build_verifier(
             stage_backend,
             accept_threshold=args.verifier_accept_threshold,
             max_regions=args.staged_verifier_max_total_regions,
+            max_selected_regions=args.verifier_max_selected_regions,
             max_retries=args.verifier_retries,
             visual_context=args.proposal_mode,
         ) if args.proposal_mode != "direct" else DirectQwenVerifier(
@@ -559,13 +563,14 @@ def _execute_action_with_retries(
     return observation, errors, False
 
 
-def _execute_direct_verifier_action(
+def _execute_verifier_action(
     environment: ChangeAgentEnvironment,
     observation: AgentObservation,
     *,
     loop_index: int,
+    source: str = "verifier_region_id_programmatic_geometry",
 ) -> tuple[AgentObservation, list[dict[str, Any]], bool]:
-    """Execute Direct ablation's full-state Qwen action without Proposal grounding."""
+    """Execute geometry already authorized by the verifier/runtime contract."""
 
     feedback = observation.feedback
     if (
@@ -576,7 +581,7 @@ def _execute_direct_verifier_action(
         return observation, [
             {
                 "loop_index": loop_index,
-                "error": "direct verifier did not authorize an executable action",
+                "error": "verifier did not authorize an executable action",
             }
         ], False
     payload: dict[str, Any] = {
@@ -588,7 +593,7 @@ def _execute_direct_verifier_action(
             return observation, [
                 {
                     "loop_index": loop_index,
-                    "error": "direct verifier point action lacks normalized geometry",
+                    "error": "verifier point action lacks normalized geometry",
                 }
             ], False
         payload["coordinate"] = list(feedback.error_region[:2])
@@ -597,7 +602,7 @@ def _execute_direct_verifier_action(
             return observation, [
                 {
                     "loop_index": loop_index,
-                    "error": "direct verifier box action lacks normalized geometry",
+                    "error": "verifier box action lacks normalized geometry",
                 }
             ], False
         payload["box"] = list(feedback.error_region)
@@ -608,15 +613,31 @@ def _execute_direct_verifier_action(
         return observation, [
             {
                 "loop_index": loop_index,
-                "raw_direct_verifier_action": raw,
+                "raw_verifier_action": raw,
                 "error": str(error),
             }
         ], False
     environment.trajectory.entries[-1].execution["action_generation"] = {
         "loop_index": loop_index,
-        "source": "direct_verifier_full_context",
+        "source": source,
     }
     return next_observation, [], True
+
+
+def _execute_direct_verifier_action(
+    environment: ChangeAgentEnvironment,
+    observation: AgentObservation,
+    *,
+    loop_index: int,
+) -> tuple[AgentObservation, list[dict[str, Any]], bool]:
+    """Backward-compatible wrapper for the Direct ablation."""
+
+    return _execute_verifier_action(
+        environment,
+        observation,
+        loop_index=loop_index,
+        source="direct_verifier_full_context",
+    )
 
 
 def evaluate_after_rollout(
@@ -735,7 +756,7 @@ def _base_manifest(
         "action_generation_policy": (
             "direct_verifier_full_context"
             if args.proposal_mode == "direct"
-            else "agent_from_verifier_feedback"
+            else "verifier_region_id_programmatic_geometry"
         ),
         "point_executor": f"SimpleClick {args.simpleclick_checkpoint}",
         "box_executor": f"SAM3 {args.sam3_checkpoint}",
@@ -743,8 +764,8 @@ def _base_manifest(
         "proposal_mode": args.proposal_mode,
         "proposal_semantics": {
             "direct": "full-state Qwen diagnosis and model-authored action geometry; no Proposal attachment",
-            "proposal": "Proposal-crop-only regional diagnosis and Environment-owned geometry",
-            "hybrid": "full-state plus Proposal-crop diagnosis and Environment-owned geometry",
+            "proposal": "SoM global region selection, local crop diagnosis, and programmatic Environment geometry",
+            "hybrid": "SoM global region selection, local crop diagnosis, and programmatic Environment geometry",
         }[args.proposal_mode],
         "verifier_model": (
             "shared local Qwen3-VL weights"
@@ -764,13 +785,14 @@ def _base_manifest(
             if args.verifier == "qwen_zero_shot"
             else "qwen_full_context_direct_binary_rubric"
             if args.verifier == "qwen_staged" and args.proposal_mode == "direct"
-            else "qwen_staged_proposal_local_diagnosis"
+            else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
             if args.verifier == "qwen_staged" and args.proposal_mode == "proposal"
-            else "qwen_staged_full_context_plus_proposal_grounding"
+            else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
             if args.verifier == "qwen_staged" and args.proposal_mode == "hybrid"
             else "legacy_rule_score"
         ),
         "verifier_max_initial_regions_per_batch": args.verifier_max_regions,
+        "verifier_max_selected_regions": args.verifier_max_selected_regions,
         "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
         "verifier_do_sample": False,
         "verifier_repetition_penalty": args.verifier_repetition_penalty,

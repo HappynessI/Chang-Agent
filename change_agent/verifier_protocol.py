@@ -1,9 +1,9 @@
 """Typed, stage-oriented protocol for GT-free change verification.
 
-The Environment owns geometry and editability.  A model is only asked to make
-one semantic decision at a time.  Keeping these records typed prevents a model
-from silently changing a region id, coordinate frame, or mask fact between
-diagnosis and action planning.
+The Environment owns geometry and editability.  A model is only asked to select
+existing region IDs and make local semantic decisions. Keeping these records
+typed prevents a model from silently changing a region id, coordinate frame,
+or mask fact between diagnosis and programmatic action resolution.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from typing import Any, Literal, Mapping, Protocol, Sequence
 from .state import ChangeState
 
 StageName = Literal[
+    "select",
     "evidence",
     "diagnosis",
-    "plan",
     "candidate_evidence",
     "candidate_diagnosis",
     "decision",
@@ -232,11 +232,13 @@ class StageTrace:
 
     mode: Literal["initial", "candidate"]
     evidence: tuple[EvidenceRecord, ...]
+    selected_region_ids: tuple[str, ...] = ()
     judgments: tuple[EvidenceJudgment, ...] = ()
     diagnoses: tuple[Diagnosis, ...] = ()
     plan: ActionPlan | None = None
     decision: Decision | None = None
     replan_evidence: tuple[EvidenceRecord, ...] = ()
+    replan_selected_region_ids: tuple[str, ...] = ()
     replan_judgments: tuple[EvidenceJudgment, ...] = ()
     replan_diagnoses: tuple[Diagnosis, ...] = ()
 
@@ -244,11 +246,13 @@ class StageTrace:
         return {
             "mode": self.mode,
             "evidence": [item.to_dict() for item in self.evidence],
+            "selected_region_ids": list(self.selected_region_ids),
             "judgments": [item.__dict__ for item in self.judgments],
             "diagnoses": [item.__dict__ for item in self.diagnoses],
             "plan": self.plan.__dict__ if self.plan else None,
             "decision": self.decision.__dict__ if self.decision else None,
             "replan_evidence": [item.to_dict() for item in self.replan_evidence],
+            "replan_selected_region_ids": list(self.replan_selected_region_ids),
             "replan_judgments": [item.__dict__ for item in self.replan_judgments],
             "replan_diagnoses": [item.__dict__ for item in self.replan_diagnoses],
         }

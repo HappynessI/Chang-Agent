@@ -64,8 +64,64 @@ class NormalizedCropBoxTests(unittest.TestCase):
 
         images = _stage_images("diagnosis", state, None, payload)
 
-        self.assertEqual(len(images), 10)
-        self.assertEqual(images[0][0], "T1 earlier RGB image")
+        self.assertEqual(len(images), 5)
+        self.assertEqual(images[0][0], "Exact T1 proposal crop")
+        self.assertEqual(images[-1][0], "Exact proposal change-mask crop")
+
+    def test_select_stage_renders_one_numbered_global_overview(self):
+        state = ChangeState(
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            "building",
+            np.zeros((32, 32), dtype=bool),
+            np.pad(np.ones((6, 6), dtype=bool), 13),
+            np.pad(np.ones((6, 6), dtype=bool), 13),
+        )
+        payload = {
+            "proposal_catalog": [
+                {
+                    "region_id": "r0",
+                    "audit_kind": "present",
+                    "component_seed_normalized_1000": [500, 500],
+                    "box_normalized_1000": [400, 400, 600, 600],
+                }
+            ]
+        }
+
+        images = _stage_images("select", state, None, payload)
+
+        self.assertEqual(len(images), 1)
+        self.assertIn("Numbered global proposal overview", images[0][0])
+        self.assertEqual(images[0][1].size, (96, 32))
+
+    def test_local_stage_keeps_overview_then_zoomed_crops(self):
+        state = ChangeState(
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            np.zeros((32, 32, 3), dtype=np.uint8),
+            "building",
+            np.zeros((32, 32), dtype=bool),
+            np.zeros((32, 32), dtype=bool),
+            np.zeros((32, 32), dtype=bool),
+        )
+        region = {
+            "region_id": "r0",
+            "audit_kind": "present",
+            "component_seed_normalized_1000": [500, 500],
+            "box_normalized_1000": [250, 250, 750, 750],
+        }
+        images = _stage_images(
+            "diagnosis",
+            state,
+            None,
+            {
+                "visual_context": "proposal",
+                "region": region,
+                "proposal_catalog": [region],
+            },
+        )
+
+        self.assertEqual(len(images), 6)
+        self.assertIn("Global numbered overview", images[0][0])
         self.assertEqual(images[-1][0], "Exact proposal change-mask crop")
 
     def test_direct_replan_prompt_forbids_repeating_rejected_action(self):

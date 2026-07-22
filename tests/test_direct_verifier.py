@@ -83,6 +83,15 @@ class DirectBackend:
         return {"verdict": next(self.verdicts)}
 
 
+class RepairingDirectBackend(DirectBackend):
+    def repair_stage(
+        self, stage, state, payload, validation_error, previous_state=None
+    ):
+        self.calls.append((stage, payload["mode"], previous_state is not None, "repair"))
+        self.payloads.append(dict(payload))
+        return {"verdict": next(self.verdicts)}
+
+
 class DirectVerifierTest(unittest.TestCase):
     def test_direct_prompt_locks_target_class_and_forbids_model_scores(self):
         prompt = _stage_prompt(
@@ -107,6 +116,7 @@ class DirectVerifierTest(unittest.TestCase):
 
         self.assertIn('"intended_error_improved":<BOOLEAN>', prompt)
         self.assertIn('"introduced_false_positive":<BOOLEAN>', prompt)
+        self.assertIn("negative_point, the selected coordinate must be white", prompt)
 
     def test_runtime_computes_quality_from_binary_rubric(self):
         rubric = make_rubric(change_semantic_precision=False)
@@ -178,7 +188,7 @@ class DirectVerifierTest(unittest.TestCase):
                 error_type="mixed_error",
                 target_view="t2",
                 action="negative_point",
-                coordinate=[200, 200],
+                coordinate=[500, 500],
                 feedback="Judgment included non-building content.",
             )
         )
@@ -189,10 +199,77 @@ class DirectVerifierTest(unittest.TestCase):
         self.assertTrue(output.verifier_valid)
         self.assertTrue(output.localization_valid)
         self.assertEqual(output.suggested_action, "negative_point")
-        self.assertEqual(output.error_region, (200, 200, 200, 200))
+        self.assertEqual(output.error_region, (500, 500, 500, 500))
         self.assertTrue(
             verifier.last_evidence["rubric_aggregation"]["hard_gates_pass"]
         )
+
+    def test_direct_repair_replaces_black_seed_negative_point(self):
+        rubric = make_rubric(change_semantic_precision=False)
+        invalid_verdict = make_verdict(
+            rubric=rubric,
+            error_type="false_positive_change",
+            target_view="t2",
+            action="negative_point",
+            coordinate=[0, 0],
+        )
+        repaired_verdict = make_verdict(
+            rubric=rubric,
+            error_type="false_positive_change",
+            target_view="t2",
+            action="negative_point",
+            coordinate=[500, 500],
+        )
+        backend = RepairingDirectBackend([invalid_verdict, repaired_verdict])
+
+        output = DirectQwenVerifier(backend).verify(make_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_region, (500, 500, 500, 500))
+        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(backend.calls[-1][-1], "repair")
+        self.assertIn(
+            "previous_invalid_response",
+            backend.payloads[-1]["repair_context"],
+        )
+
+    def test_direct_repair_cannot_flip_actionable_diagnosis_to_finish(self):
+        rubric = make_rubric(change_semantic_precision=False)
+        invalid_geometry = make_verdict(
+            rubric=rubric,
+            error_type="false_positive_change",
+            target_view=None,
+            action="negative_point",
+            coordinate=[500, 500],
+        )
+        semantic_flip = make_verdict()
+        backend = RepairingDirectBackend([invalid_geometry, semantic_flip])
+        verifier = DirectQwenVerifier(backend)
+
+        output = verifier.verify(make_state(), None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "changed rubric pass values or semantic error_type",
+            verifier.last_evidence["validation_errors"][0],
+        )
+
+    def test_direct_positive_point_allows_white_seed(self):
+        rubric = make_rubric(change_semantic_recall=False)
+        backend = DirectBackend(
+            make_verdict(
+                rubric=rubric,
+                error_type="false_negative",
+                target_view="t2",
+                action="positive_point",
+                coordinate=[500, 500],
+            )
+        )
+
+        output = DirectQwenVerifier(backend).verify(make_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.suggested_action, "positive_point")
 
     def test_candidate_comparison_is_derived_from_binary_effect(self):
         rubric = make_rubric(change_artifact_control=False)
@@ -313,6 +390,50 @@ class DirectVerifierTest(unittest.TestCase):
             ],
             1,
         )
+
+    def test_direct_replan_repairs_repeated_action(self):
+        rubric = make_rubric(change_semantic_recall=False)
+        initial_verdict = make_verdict(
+            rubric=rubric,
+            error_type="false_negative",
+            target_view="t2",
+            action="positive_point",
+            coordinate=[650, 340],
+        )
+        repaired_verdict = make_verdict(
+            rubric=rubric,
+            error_type="false_negative",
+            target_view="t2",
+            action="positive_point",
+            coordinate=[300, 700],
+        )
+        backend = RepairingDirectBackend(
+            [initial_verdict, initial_verdict, repaired_verdict]
+        )
+        verifier = DirectQwenVerifier(backend)
+        accepted_state = make_state()
+        accepted_feedback = verifier.verify(accepted_state, None, None)
+
+        output = verifier.replan_after_rejection(
+            accepted_state,
+            accepted_state.clone(),
+            accepted_feedback,
+            VerifierOutput(
+                comparison="unchanged",
+                error_type="false_negative",
+                target_view="t2",
+                suggested_action="positive_point",
+                feedback="Candidate made no progress.",
+            ),
+            AgentAction("t2", "positive_point", coordinate=(10, 5)),
+            ["candidate_effect_not_better"],
+            [],
+        )
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.error_region, (300, 700, 300, 700))
+        self.assertEqual(len(backend.calls), 3)
+        self.assertEqual(backend.calls[-1][-1], "repair")
 
     def test_direct_replan_rejects_same_pixel_action(self):
         rubric = make_rubric(change_semantic_recall=False)

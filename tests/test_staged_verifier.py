@@ -35,6 +35,13 @@ class ScriptedBackend:
     def generate_stage(self, stage, state, payload, previous_state=None):
         self.calls.append(stage)
         self.previous_seen.append(previous_state is not None)
+        if stage == "select":
+            return {
+                "selection": {
+                    "region_ids": [payload["proposal_catalog"][0]["region_id"]],
+                    "reason": "Most material marked proposal.",
+                }
+            }
         region = payload.get("region", {})
         region_id = region.get("region_id")
         if stage in {"evidence", "candidate_evidence"}:
@@ -205,7 +212,9 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertTrue(output.accept)
         self.assertTrue(output.stop)
         self.assertEqual(output.suggested_action, "finish")
-        self.assertEqual(backend.calls, ["evidence", "diagnosis", "decision"])
+        self.assertEqual(
+            backend.calls, ["select", "evidence", "diagnosis", "decision"]
+        )
         self.assertEqual(
             verifier.last_evidence["stage_trace"]["evidence"][0]["change_mask_state"],
             "white",
@@ -222,9 +231,9 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertTrue(output.verifier_valid)
         self.assertEqual(output.error_type, "false_positive_change")
         self.assertEqual(output.suggested_action, "negative_point")
-        self.assertIn("plan", backend.calls)
+        self.assertNotIn("plan", backend.calls)
 
-    def test_false_positive_plan_must_target_a_white_editable_seed(self):
+    def test_false_positive_without_white_target_seed_fails_closed(self):
         backend = ScriptedBackend(
             t1="background",
             t2="background",
@@ -236,11 +245,10 @@ class StagedVerifierTest(unittest.TestCase):
 
         output = verifier.verify(make_state(), None, None)
 
-        self.assertFalse(output.verifier_valid)
-        self.assertIn(
-            "negative_point requires a white editable seed",
-            verifier.last_evidence["validation_errors"][0],
-        )
+        self.assertTrue(output.verifier_valid)
+        self.assertFalse(output.localization_valid)
+        self.assertIsNone(output.suggested_action)
+        self.assertNotIn("plan", backend.calls)
 
     def test_valid_false_positive_plan_reuses_environment_seed(self):
         backend = ScriptedBackend(
@@ -260,6 +268,31 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertEqual(output.suggested_action, "negative_point")
         self.assertEqual(output.error_region[0], output.error_region[2])
         self.assertEqual(output.error_region[1], output.error_region[3])
+        proposal_seed = verifier.last_evidence["stage_trace"]["evidence"][0][
+            "component_seed_normalized_1000"
+        ]
+        self.assertEqual(list(output.error_region[:2]), proposal_seed)
+        self.assertNotIn("plan", backend.calls)
+
+    def test_global_selection_rejects_unknown_region_id(self):
+        class UnknownRegionBackend(ScriptedBackend):
+            def generate_stage(self, stage, state, payload, previous_state=None):
+                if stage == "select":
+                    self.calls.append(stage)
+                    return {
+                        "selection": {
+                            "region_ids": ["invented"],
+                            "reason": "invalid",
+                        }
+                    }
+                return super().generate_stage(stage, state, payload, previous_state)
+
+        verifier = StagedQwenVerifier(UnknownRegionBackend(), max_retries=1)
+
+        output = verifier.verify(make_state(), None, None)
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn("unknown region ids", verifier.last_evidence["validation_errors"][0])
 
     def test_candidate_comparison_receives_previous_state_and_accepts_better(self):
         candidate = make_state()
