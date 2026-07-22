@@ -29,7 +29,7 @@ from ..verifier_protocol import (
 class StagedQwenVerifier:
     """Select proposals, inspect local evidence, and resolve geometry in code."""
 
-    SCHEMA_VERSION = "staged_verifier_executable_diagnosis_fallback_v7"
+    SCHEMA_VERSION = "staged_verifier_deterministic_target_resolution_v8"
 
     def __init__(
         self,
@@ -899,19 +899,28 @@ class StagedQwenVerifier:
             "false_negative",
         }:
             return None
-        target_view = diagnosis.target_view
-        if target_view not in {"t1", "t2"}:
-            return None
-        seed_white = bool(record.editable_seed_white.get(target_view, False))
         action = (
             "negative_point"
             if diagnosis.error_type == "false_positive_change"
             else "positive_point"
         )
-        if action == "negative_point" and not seed_white:
-            return None
-        if action == "positive_point" and seed_white:
-            return None
+        required_seed_white = action == "negative_point"
+        target_view = diagnosis.target_view
+        target_is_editable = bool(
+            target_view in {"t1", "t2"}
+            and bool(record.editable_seed_white.get(target_view, False))
+            == required_seed_white
+        )
+        if not target_is_editable:
+            editable_views = [
+                view
+                for view in ("t1", "t2")
+                if bool(record.editable_seed_white.get(view, False))
+                == required_seed_white
+            ]
+            if len(editable_views) != 1:
+                return None
+            target_view = editable_views[0]
         return ActionPlan(
             record.region_id,
             action,

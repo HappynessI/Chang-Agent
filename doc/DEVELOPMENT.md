@@ -50,6 +50,24 @@ independently diagnosed region. Candidate evidence and acceptance thresholds are
 unchanged. Slurm job `44477` passed all 71 focused tests, including the new
 invalid-top-diagnosis fallback regression.
 
+Proposal-only job `44487` completed successfully on `gpu46` in 2m26s with empty
+stderr, but v7 again selected no candidate and aggregate IoU remained
+`0.69744116`. The v6/v7 test85 records were value-equivalent, while prompt hashes
+differed because `EvidenceRecord.from_proposal()` iterated the `TARGET_VIEWS`
+set: v6 serialized editable seed facts as T2/T1 and v7 as T1/T2. This process
+hash-seed dependency also changed r1 from actionable T2 to `none`.
+
+Schema v8 makes T1/T2 protocol order explicit. When a diagnosis names a target
+whose seed cannot execute the required positive/negative point, runtime may
+canonicalize it only if exactly one Environment target view satisfies that seed
+precondition; otherwise it remains unauthorized. This lets the persistent
+test85 r0/T1 diagnosis execute as the uniquely valid r0/T2 candidate without
+weakening candidate acceptance. Slurm job `44514` passed all 73 focused tests;
+separate processes with `PYTHONHASHSEED=1` and `98765` both serialized the target
+view order as T1/T2. Job `44513` was an implementation-independent fixture
+failure caused by clearing the smaller region while Proposal IDs are area-sorted;
+the corrected region mapping passed.
+
 ## 2026-07-22 — runtime candidate evidence and local negative edits
 
 The CA_0722(4) audit separated state-cache stability from semantic candidate

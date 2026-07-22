@@ -301,9 +301,9 @@ def main() -> None:
                 "verifier_decision_mode": (
                     "qwen_full_context_direct_binary_rubric"
                     if args.proposal_mode == "direct"
-                    else "qwen_staged_executable_diagnosis_fallback_v7"
+                    else "qwen_staged_deterministic_target_resolution_v8"
                     if args.proposal_mode == "proposal"
-                    else "qwen_staged_executable_diagnosis_fallback_v7_full_context"
+                    else "qwen_staged_deterministic_target_resolution_v8_full_context"
                     if args.verifier == "qwen_staged"
                     else "qwen_rich_region_diagnosis_and_global_synthesis"
                     if args.verifier == "qwen_zero_shot"
@@ -796,9 +796,9 @@ def _base_manifest(
             if args.verifier == "qwen_zero_shot"
             else "qwen_full_context_direct_binary_rubric"
             if args.verifier == "qwen_staged" and args.proposal_mode == "direct"
-            else "qwen_staged_executable_diagnosis_fallback_v7"
+            else "qwen_staged_deterministic_target_resolution_v8"
             if args.verifier == "qwen_staged" and args.proposal_mode == "proposal"
-            else "qwen_staged_executable_diagnosis_fallback_v7_full_context"
+            else "qwen_staged_deterministic_target_resolution_v8_full_context"
             if args.verifier == "qwen_staged" and args.proposal_mode == "hybrid"
             else "legacy_rule_score"
         ),

@@ -29,7 +29,7 @@ ERROR_TYPES = {
     "mixed_error",
     "uncertain_region",
 }
-TARGET_VIEWS = {"t1", "t2"}
+TARGET_VIEWS = ("t1", "t2")
 ACTIONS = {"positive_point", "negative_point", "box", "finish"}
 COMPARISONS = {"initial", "better", "worse", "unchanged", "uncertain"}
 RGB_STATES = {"building", "background", "mixed", "uncertain"}

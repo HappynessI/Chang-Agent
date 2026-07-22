@@ -52,6 +52,16 @@ fall through to the valid r1/T2 diagnosis. Schema v7 preserves every v6 safety
 gate but ranks diagnosed errors until it finds the first Environment-executable
 action. Submit it with `tools/submit_ca0722_proposal_executable_v7.sh`.
 
+CA_0722(7) also selected no candidate and retained aggregate IoU `0.69744116`.
+The fallback was not exercised because r1 changed from the v6 actionable T2
+diagnosis to `none`. The semantic evidence and proposal order were identical,
+but prompt hashes differed: `editable_seed_white` was built by iterating the
+unordered `TARGET_VIEWS` set and serialized as T2/T1 in v6 versus T1/T2 in v7.
+Schema v8 fixes the order to T1/T2 and resolves an invalid target view only when
+Environment facts identify exactly one view with the required editable seed.
+Ambiguous or impossible targets still fail closed. Submit it with
+`tools/submit_ca0722_proposal_deterministic_v8.sh`.
+
 Each child contains its own `logs/`, trajectories, feedback, masks,
 predictions, and `per_sample_metrics.json`. Compare initial-error localization,
 small-change recall, invalid/unsafe tool actions, accepted-candidate IoU/F1,

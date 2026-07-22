@@ -7,7 +7,7 @@ from change_agent.adapters.staged_verifier import StagedQwenVerifier
 from change_agent.adapters.stage_backends import _extract_stage_json, _stage_prompt
 from change_agent.coordinates import normalized_point_to_pixel
 from change_agent.state import AgentAction, ChangeState, VerifierOutput
-from change_agent.verifier_protocol import StageProtocolError
+from change_agent.verifier_protocol import EvidenceRecord, StageProtocolError
 from change_agent.verifier_regions import attach_verifier_regions
 
 
@@ -170,6 +170,13 @@ class SelectAllBackend(ScriptedBackend):
 
 
 class StagedVerifierTest(unittest.TestCase):
+    def test_environment_target_view_facts_have_stable_t1_t2_order(self):
+        proposal = make_state().evidence["verifier_region_proposals"][0]
+
+        record = EvidenceRecord.from_proposal(proposal)
+
+        self.assertEqual(list(record.editable_seed_white), ["t1", "t2"])
+
     def test_rollback_replan_uses_distinct_cached_region(self):
         state = make_two_region_state()
         backend = SelectAllBackend(
@@ -339,7 +346,7 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertEqual(output.suggested_action, "negative_point")
         self.assertNotIn("plan", backend.calls)
 
-    def test_false_positive_without_white_target_seed_fails_closed(self):
+    def test_false_positive_target_is_canonicalized_to_unique_white_view(self):
         backend = ScriptedBackend(
             t1="background",
             t2="background",
@@ -352,9 +359,37 @@ class StagedVerifierTest(unittest.TestCase):
         output = verifier.verify(make_state(), None, None)
 
         self.assertTrue(output.verifier_valid)
+        self.assertTrue(output.localization_valid)
+        self.assertEqual(output.target_view, "t2")
+        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertNotIn("plan", backend.calls)
+
+    def test_false_positive_without_any_white_target_seed_fails_closed(self):
+        source = make_state()
+        empty = np.zeros_like(source.t2_mask)
+        state = ChangeState(
+            source.t1_image,
+            source.t2_image,
+            source.query,
+            empty,
+            empty,
+            source.change_mask.copy(),
+        )
+        attach_verifier_regions(state, max_regions=6, min_component_area=1)
+        verifier = StagedQwenVerifier(
+            ScriptedBackend(
+                t1="background",
+                t2="background",
+                error="false_positive_change",
+                target="t1",
+            )
+        )
+
+        output = verifier.verify(state, None, None)
+
+        self.assertTrue(output.verifier_valid)
         self.assertFalse(output.localization_valid)
         self.assertIsNone(output.suggested_action)
-        self.assertNotIn("plan", backend.calls)
 
     def test_invalid_top_diagnosis_falls_back_to_executable_region(self):
         class MixedTargetBackend(SelectAllBackend):
@@ -372,11 +407,23 @@ class StagedVerifierTest(unittest.TestCase):
                     }
                 return super().generate_stage(stage, state, payload, previous_state)
 
+        source = make_two_region_state()
+        t2 = source.t2_mask.copy()
+        t2[20:26, 20:26] = False
+        state = ChangeState(
+            source.t1_image,
+            source.t2_image,
+            source.query,
+            source.t1_mask.copy(),
+            t2,
+            source.change_mask.copy(),
+        )
+        attach_verifier_regions(state, max_regions=6, min_component_area=1)
         verifier = StagedQwenVerifier(
             MixedTargetBackend(), max_selected_regions=2
         )
 
-        output = verifier.verify(make_two_region_state(), None, None)
+        output = verifier.verify(state, None, None)
 
         self.assertTrue(output.verifier_valid)
         self.assertTrue(output.localization_valid)
