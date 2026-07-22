@@ -29,7 +29,7 @@ from ..verifier_protocol import (
 class StagedQwenVerifier:
     """Select proposals, inspect local evidence, and resolve geometry in code."""
 
-    SCHEMA_VERSION = "staged_verifier_action_scoped_transition_v6"
+    SCHEMA_VERSION = "staged_verifier_executable_diagnosis_fallback_v7"
 
     def __init__(
         self,
@@ -363,8 +363,7 @@ class StagedQwenVerifier:
             selected_records,
             proposal_catalog=records,
         )
-        selected = self._select_diagnosis(diagnoses)
-        plan = self._plan(state, records, selected)
+        selected, plan = self._select_action_plan(state, records, diagnoses)
         completion_passed, completion_reason = self._state_completion_gate(
             state, records, selected_records, judgments, diagnoses
         )
@@ -470,8 +469,9 @@ class StagedQwenVerifier:
                     replan_selected_records,
                     proposal_catalog=replan_records,
                 )
-                remaining = self._select_diagnosis(replan_diagnoses)
-                plan = self._plan(state, replan_records, remaining)
+                remaining, plan = self._select_action_plan(
+                    state, replan_records, replan_diagnoses
+                )
                 completion_passed, completion_reason = self._state_completion_gate(
                     state,
                     replan_records,
@@ -851,6 +851,39 @@ class StagedQwenVerifier:
             actionable,
             key=lambda item: (safe_priority[item.error_type], item.confidence),
         )
+
+    def _select_action_plan(
+        self,
+        state: ChangeState,
+        records: tuple[EvidenceRecord, ...],
+        diagnoses: tuple[Diagnosis, ...],
+    ) -> tuple[Diagnosis | None, ActionPlan | None]:
+        """Prefer the highest-priority diagnosis that maps to a safe action.
+
+        A model diagnosis can be semantically plausible yet name a target view
+        whose Environment seed is not editable.  Do not let that single invalid
+        target suppress another independently diagnosed, executable region.
+        """
+
+        selected = self._select_diagnosis(diagnoses)
+        if selected is None:
+            return None, ActionPlan(None, "finish", None)
+        safe_priority = {
+            "false_positive_change": 2,
+            "false_negative": 2,
+            "mixed_error": 1,
+            "uncertain_region": 0,
+        }
+        ranked = sorted(
+            (item for item in diagnoses if item.error_type != "none"),
+            key=lambda item: (safe_priority[item.error_type], item.confidence),
+            reverse=True,
+        )
+        for diagnosis in ranked:
+            plan = self._plan(state, records, diagnosis)
+            if plan is not None:
+                return diagnosis, plan
+        return selected, None
 
     def _plan(
         self,

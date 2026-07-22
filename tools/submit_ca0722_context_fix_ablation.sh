@@ -71,7 +71,7 @@ printf '%s\n' \
   "- arms: \`${MODES[*]}\`" \
   '- regional evidence: `active-region-marked global overview plus exact local crops`' \
   '- candidate evidence: `action-scoped delta masks plus delta-highlighted T1/T2 RGB and previous/candidate masks`' \
-  '- transition policy: `v6 runtime action x scoped delta polarity x RGB evidence; low-confidence fail-closed`' \
+  '- transition policy: `v7 executable-diagnosis fallback plus action-scoped delta RGB evidence; low-confidence fail-closed`' \
   '- finish policy: `all Environment audit regions require sufficient evidence and diagnosis=none`' \
   '- negative point: `SimpleClick-supported subtraction inside deterministic point ROI`' \
   '- GT policy: `loaded only after each arm rollout completes`' \

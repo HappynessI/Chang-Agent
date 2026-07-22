@@ -43,6 +43,15 @@ the full point-action delta inside the authoritative ROI, shows exact delta mask
 and highlighted RGB, and requires complete region coverage before `finish`.
 Submit it with `tools/submit_ca0722_proposal_scoped_v6.sh`.
 
+CA_0722(6) confirmed that action-scoped aggregation works: every candidate edit
+became one complete evidence unit and all five candidate assessments had
+`evidence_sufficient=true`. No candidate committed and aggregate IoU remained
+`0.69744116`. The useful test85 path was never attempted because the highest
+confidence diagnosis named an uneditable T1 seed and the initial planner did not
+fall through to the valid r1/T2 diagnosis. Schema v7 preserves every v6 safety
+gate but ranks diagnosed errors until it finds the first Environment-executable
+action. Submit it with `tools/submit_ca0722_proposal_executable_v7.sh`.
+
 Each child contains its own `logs/`, trajectories, feedback, masks,
 predictions, and `per_sample_metrics.json`. Compare initial-error localization,
 small-change recall, invalid/unsafe tool actions, accepted-candidate IoU/F1,

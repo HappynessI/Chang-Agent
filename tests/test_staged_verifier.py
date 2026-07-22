@@ -356,6 +356,36 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertIsNone(output.suggested_action)
         self.assertNotIn("plan", backend.calls)
 
+    def test_invalid_top_diagnosis_falls_back_to_executable_region(self):
+        class MixedTargetBackend(SelectAllBackend):
+            def generate_stage(self, stage, state, payload, previous_state=None):
+                if stage == "diagnosis":
+                    self.calls.append(stage)
+                    region_id = payload["region"]["region_id"]
+                    return {
+                        "region_id": region_id,
+                        "diagnosis": {
+                            "error_type": "false_positive_change",
+                            "target_view": "t1" if region_id == "r0" else "t2",
+                            "confidence": 0.99 if region_id == "r0" else 0.8,
+                        },
+                    }
+                return super().generate_stage(stage, state, payload, previous_state)
+
+        verifier = StagedQwenVerifier(
+            MixedTargetBackend(), max_selected_regions=2
+        )
+
+        output = verifier.verify(make_two_region_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertTrue(output.localization_valid)
+        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertEqual(output.target_view, "t2")
+        self.assertEqual(
+            verifier.last_evidence["stage_trace"]["plan"]["region_id"], "r1"
+        )
+
     def test_valid_false_positive_plan_reuses_environment_seed(self):
         backend = ScriptedBackend(
             t1="background",

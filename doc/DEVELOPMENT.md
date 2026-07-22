@@ -34,6 +34,22 @@ The Proposal-only launcher now escapes Markdown backticks around its dynamic
 substitution while writing `experiment_manifest.md`; the issue affected only
 manifest text, not the submitted arm command.
 
+Proposal-only job `44461` completed successfully on `gpu46` in 2m31s. Schema v6
+reduced each candidate transition from 4--18 disconnected records to one
+action-scoped record, retained all delta pixels, and produced sufficient visual
+evidence for all five candidates. All attempted deletions were judged to remove
+real buildings and were rejected, so selected aggregate IoU stayed at the
+initial `0.69744116`. The test85 rollout produced no candidate: its highest
+confidence diagnosis selected an uneditable T1 seed even though another selected
+region had an executable T2 diagnosis.
+
+Schema v7 adds a programmatic executable-diagnosis fallback. Diagnoses remain
+ranked by the existing safety priority and confidence, but the planner now skips
+an item that cannot map to an Environment-authorized point and tries the next
+independently diagnosed region. Candidate evidence and acceptance thresholds are
+unchanged. Slurm job `44477` passed all 71 focused tests, including the new
+invalid-top-diagnosis fallback regression.
+
 ## 2026-07-22 — runtime candidate evidence and local negative edits
 
 The CA_0722(4) audit separated state-cache stability from semantic candidate
