@@ -1,5 +1,90 @@
 # Development log
 
+## 2026-07-22 — runtime candidate evidence and local negative edits
+
+The CA_0722(4) audit separated state-cache stability from semantic candidate
+quality. Proposal rejected the only material improvement because a removed
+false-positive region was black and therefore failed the initial-state invariant
+that `false_positive_change` requires white pixels. Hybrid avoided that parser
+failure but accepted three removals described as fixing false negatives, including
+large offline regressions. The staged evidence template also used a literal
+`visual_confidence=0.0`, which every hosted regional call copied while downstream
+diagnosis ignored that contradiction.
+
+Staged schema v5 removes `candidate_diagnosis` and model-authored candidate
+decisions from the active path. Qwen now reports only physical T1/T2 target-class
+presence for each exact delta region. Runtime combines that evidence with the
+attempted point action and authoritative `delta_added|delta_removed` polarity to
+derive intended improvement and introduced FP/FN harm. Low-confidence, mixed,
+uncertain, missing-action, unsupported-box, and unexpected-polarity transitions
+are `uncertain` and cannot commit. Candidate records preserve separate previous
+and candidate T1/T2 crop/component/seed mask facts. Direct candidates receive
+explicit added/removed masks and exact delta RGB/change-mask crops so small edits
+are no longer judged only at full-frame scale.
+
+Negative SimpleClick execution no longer discards the worker prediction and
+deletes the clicked initial connected component. It applies only subtraction
+pixels supported by the SimpleClick output inside the deterministic point ROI;
+outside-ROI pixels and additions are preserved. Trajectories retain raw-output
+and composed-removal pixel counts. This makes the executable edit local enough
+for the transition verifier to distinguish a useful correction from destructive
+component deletion.
+
+Slurm job `44403` passed all 81 focused staged-verifier, visual-backend,
+executor-locality, region-fact, Direct-verifier, Environment, and runner-action
+tests with exit code `0:0`.
+
+## 2026-07-22 — separate candidate transition from accepted-state planning
+
+The CA_0722(3) audit found that identical BaiLian candidate-decision prompts could
+flip only `accept=true|false`, while `comparison=better` and the candidate masks
+were unchanged. The staged verifier also combined candidate comparison feedback
+with a post-commit remaining-error plan in one unlabelled decision, so `accept`,
+`error_type`, and `suggested_action` could describe different states.
+
+Staged Qwen decisions no longer author `comparison`, `accept`, or `stop`. Candidate
+calls return one intended-improvement flag and three introduced-harm flags; runtime
+derives `better` only for benefit without harm and commits only that result. After
+commit, current-state proposals are rebuilt, remaining errors are diagnosed, the
+accepted diagnosis cache is refreshed, and `stop` is derived only from an executable
+`finish` plan. Initial calls provide quality text only; runtime owns readiness.
+
+Regional visual input again starts with a global overview whose active proposal is
+marked yellow. Proposal uses marked T1/T2/change context plus exact crops; Hybrid adds
+T1/T2 object-mask panels to the marked overview. Candidate calls also include the
+previous accepted change mask globally and in the exact crop. This retains global
+grounding without the ten independent, unmarked images used by the first context fix.
+
+The CA_0722 marked-transition submission entry now writes Slurm stdout/stderr to a
+shared staging directory before archiving each arm under its own `logs/` directory;
+it no longer depends on compute-local `/tmp` for management-node diagnosis. The
+default request is 16 GiB per arm (over six times the 2.7 GiB peak observed in the
+preceding three-arm rollout) and remains configurable through `MEMORY`, allowing the
+three arms to run concurrently under the per-user memory QOS.
+
+## 2026-07-22 — make Proposal and Hybrid visual context a real ablation
+
+The staged regional backend previously validated `visual_context=proposal|hybrid` but
+constructed the same image list for both values: a global SoM overview plus five local
+crops. The tests also used payloads without a proposal catalog and therefore asserted
+five crops for both modes while incorrectly naming the Hybrid case “full context”.
+
+The selection stage remains shared and receives one global numbered SoM overview.
+After selection, Proposal now receives exactly five local RGB/object-mask/change-mask
+crops. Hybrid receives five independent full-frame T1/T2 RGB, T1/T2 object-mask, and
+change-mask images followed by the same five crops. The staged schema is bumped to v3,
+and run manifests record distinct decision-mode and proposal-semantics strings. The
+first validation after this repair is a three-sample Direct/Proposal/Hybrid smoke
+ablation; a larger rollout is deferred until this contract is verified end to end.
+
+The first submission of this smoke run completed Direct but Proposal and Hybrid failed
+inside the shared SimpleClick subprocess before producing trajectories. The compute
+node's `segagent-env` was importing user-site NumPy 2.2.6 instead of its pinned NumPy
+1.26.4; legacy `imgaug` then crashed on the removed `np.sctypes` attribute. The tool
+adapter now sets `PYTHONNOUSERSITE=1` for both SimpleClick and SAM3 subprocesses. The
+failed arms are invalid experiment artifacts and must be rerun with the same code
+snapshot before comparing metrics.
+
 ## 2026-07-22 — CA_0721(13) SoM ablation and rollback-state repair
 
 The first three-sample GT-free SoM rollout completed in

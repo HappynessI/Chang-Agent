@@ -46,6 +46,9 @@ rule Verifier remains an explicit `--verifier rule` ablation.
 An opt-in `--verifier qwen_staged` path now separates visual evidence,
 error/target diagnosis, executable action planning, and previous/candidate comparison.
 Its typed intermediate records reject cross-stage semantic and geometry contradictions.
+Candidate comparison uses only clear local RGB presence evidence plus runtime-owned
+action/delta polarity; low-confidence or contradictory evidence fails closed rather
+than reusing initial-state black/white diagnosis rules.
 The same staged interface supports local Transformers weights and BaiLian
 `qwen3-vl-plus`; `--agent-backend bailian` also moves Agent action generation to the
 hosted model while preserving the existing Environment and ActionParser trust boundary.
@@ -53,9 +56,11 @@ API credentials are read only from `DASHSCOPE_API_KEY` (or the variable named by
 `--bailian-api-key-env`) and are never stored in run artifacts.
 
 `--proposal-mode direct|proposal|hybrid` provides a controlled Proposal ablation.
-Direct sends full state to Qwen and accepts model-authored action geometry; Proposal
-uses local Proposal crops and Environment geometry; Hybrid sends full state plus
-local crops while keeping Environment geometry for execution and candidate checks.
+Direct sends full state to Qwen and accepts model-authored action geometry. Proposal
+uses one global SoM selection image followed by local-only Proposal crops and
+Environment geometry. Hybrid uses the same selection image, then sends five independent
+full-frame state images plus the five local crops while keeping Environment geometry
+for execution and candidate checks.
 The current BaiLian production path uses Direct because the hosted model handles the
 complete visual context; Proposal and Hybrid remain comparison arms rather than
 requirements for hosted inference. Direct uses a target-class-locked binary
@@ -168,8 +173,9 @@ for a missing or malformed `coordinate`/`box` field.
 ## Local editing and safety gates
 
 - A positive point merges only the tool-predicted connected component containing the
-  click. A negative point removes only the current-mask component containing the click.
-  Unrelated components from a global SimpleClick prediction are discarded.
+  click. A negative point applies only SimpleClick-supported subtraction pixels inside
+  the deterministic point ROI; it does not delete the whole connected initial component,
+  add pixels, or modify pixels outside the ROI.
 - A SAM3 box result replaces pixels only inside the requested pixel XYXY box; pixels
   outside that ROI are copied from the previous target-view mask.
 - Every tool result records target-mask XOR statistics: action ROI, changed and

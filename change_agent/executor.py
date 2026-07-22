@@ -97,9 +97,18 @@ class ActionExecutor:
                 mask = np.logical_or(initial_mask, component)
                 composition_mode = "merge_clicked_prediction_component"
             else:
-                component = _component_containing(initial_mask, action.coordinate)
-                mask = np.logical_and(initial_mask, ~component)
-                composition_mode = "remove_clicked_initial_component"
+                # SimpleClick returns a refined full mask.  A negative click must
+                # use that prediction instead of deleting the entire connected
+                # initial component, which may join real and false-positive
+                # regions.  Keep the operation subtraction-only and clip it to
+                # the deterministic point ROI so one click cannot add pixels or
+                # silently rewrite distant parts of the accepted state.
+                inside_roi = _roi_mask(initial_mask.shape, roi)
+                removable = np.logical_and(
+                    np.logical_and(initial_mask, ~raw_mask), inside_roi
+                )
+                mask = np.logical_and(initial_mask, ~removable)
+                composition_mode = "remove_simpleclick_delta_within_roi"
             tool = "simpleclick"
             tool_input: dict[str, Any] = {
                 "coordinate": list(action.coordinate),
@@ -112,7 +121,10 @@ class ActionExecutor:
                     for history_coordinate, history_is_positive in point_click_history
                 ],
                 "session_initial_mask_pixels": int(session_mask.sum()),
+                "raw_output_mask_pixels": int(raw_mask.sum()),
             }
+            if action.action == "negative_point":
+                tool_input["composed_removed_pixels"] = int(removable.sum())
         elif action.action == "box":
             if action.box is None:
                 raise ValueError("validated box action has no box")
@@ -186,6 +198,15 @@ def _point_roi(
         min(width - 1, x + radius),
         min(height - 1, y + radius),
     )
+
+
+def _roi_mask(
+    shape: tuple[int, int], roi: tuple[int, int, int, int]
+) -> np.ndarray:
+    result = np.zeros(shape, dtype=bool)
+    x1, y1, x2, y2 = roi
+    result[y1 : y2 + 1, x1 : x2 + 1] = True
+    return result
 
 
 def _validated_tool_mask(mask: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray:

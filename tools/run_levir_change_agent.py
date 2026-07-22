@@ -128,6 +128,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bailian-api-key-env", default="DASHSCOPE_API_KEY")
     parser.add_argument("--verifier-max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
+    parser.add_argument(
+        "--verifier-min-visual-confidence",
+        type=float,
+        default=0.6,
+        help=(
+            "Fail-closed threshold for staged regional RGB evidence; candidate "
+            "transitions below it are uncertain and cannot be committed."
+        ),
+    )
     parser.add_argument("--verifier-retries", type=int, default=2)
     parser.add_argument("--verifier-repetition-penalty", type=float, default=1.05)
     parser.add_argument("--device-map", default="auto")
@@ -292,9 +301,9 @@ def main() -> None:
                 "verifier_decision_mode": (
                     "qwen_full_context_direct_binary_rubric"
                     if args.proposal_mode == "direct"
-                    else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
+                    else "qwen_staged_runtime_action_delta_rgb_transition_v5"
                     if args.proposal_mode == "proposal"
-                    else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
+                    else "qwen_staged_runtime_action_delta_rgb_transition_v5_full_context"
                     if args.verifier == "qwen_staged"
                     else "qwen_rich_region_diagnosis_and_global_synthesis"
                     if args.verifier == "qwen_zero_shot"
@@ -305,6 +314,7 @@ def main() -> None:
                 "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
                 "verifier_do_sample": False,
                 "verifier_repetition_penalty": args.verifier_repetition_penalty,
+                "verifier_min_visual_confidence": args.verifier_min_visual_confidence,
                 "verifier_candidate_evidence_modes": list(
                     Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
                 )
@@ -490,6 +500,7 @@ def _build_verifier(
             max_selected_regions=args.verifier_max_selected_regions,
             max_retries=args.verifier_retries,
             visual_context=args.proposal_mode,
+            min_visual_confidence=args.verifier_min_visual_confidence,
         ) if args.proposal_mode != "direct" else DirectQwenVerifier(
             stage_backend,
             accept_threshold=args.verifier_accept_threshold,
@@ -764,8 +775,8 @@ def _base_manifest(
         "proposal_mode": args.proposal_mode,
         "proposal_semantics": {
             "direct": "full-state Qwen diagnosis and model-authored action geometry; no Proposal attachment",
-            "proposal": "SoM global region selection, local crop diagnosis, and programmatic Environment geometry",
-            "hybrid": "SoM global region selection, local crop diagnosis, and programmatic Environment geometry",
+            "proposal": "SoM global selection, active-region-marked RGB/change overview plus local crops, runtime transition rubric, and programmatic geometry",
+            "hybrid": "SoM global selection, active-region-marked full mask state plus local crops, runtime transition rubric, and programmatic geometry",
         }[args.proposal_mode],
         "verifier_model": (
             "shared local Qwen3-VL weights"
@@ -785,9 +796,9 @@ def _base_manifest(
             if args.verifier == "qwen_zero_shot"
             else "qwen_full_context_direct_binary_rubric"
             if args.verifier == "qwen_staged" and args.proposal_mode == "direct"
-            else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
+            else "qwen_staged_runtime_action_delta_rgb_transition_v5"
             if args.verifier == "qwen_staged" and args.proposal_mode == "proposal"
-            else "qwen_staged_global_region_select_local_diagnosis_programmatic_geometry"
+            else "qwen_staged_runtime_action_delta_rgb_transition_v5_full_context"
             if args.verifier == "qwen_staged" and args.proposal_mode == "hybrid"
             else "legacy_rule_score"
         ),
@@ -796,6 +807,7 @@ def _base_manifest(
         "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
         "verifier_do_sample": False,
         "verifier_repetition_penalty": args.verifier_repetition_penalty,
+        "verifier_min_visual_confidence": args.verifier_min_visual_confidence,
         "verifier_candidate_evidence_modes": list(
             Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
         )

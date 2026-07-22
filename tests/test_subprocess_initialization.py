@@ -30,6 +30,7 @@ class SubprocessInitializationTest(unittest.TestCase):
             )
 
             def fake_run(command, **kwargs):
+                self.assertEqual(kwargs["env"]["PYTHONNOUSERSITE"], "1")
                 def value(flag):
                     return Path(command[command.index(flag) + 1])
 

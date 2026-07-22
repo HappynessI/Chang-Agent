@@ -69,6 +69,9 @@ class _SubprocessTool:
             command.extend(["--initial-mask", str(mask_path)])
         command.extend(extra_args)
         env = os.environ.copy()
+        # Tool environments are intentionally isolated. User-site NumPy can
+        # override the pinned SimpleClick stack and break legacy imgaug.
+        env["PYTHONNOUSERSITE"] = "1"
         if self.seed is not None:
             env["PYTHONHASHSEED"] = str(self.seed)
             env["CHANGE_AGENT_SEED"] = str(self.seed)
@@ -239,6 +242,8 @@ class SubprocessSAM3Initializer(_SubprocessTool):
             query,
         ]
         env = os.environ.copy()
+        # Keep SAM3 on the same isolated interpreter contract as SimpleClick.
+        env["PYTHONNOUSERSITE"] = "1"
         if self.seed is not None:
             env["PYTHONHASHSEED"] = str(self.seed)
             env["CHANGE_AGENT_SEED"] = str(self.seed)

@@ -36,12 +36,24 @@ def make_two_region_state():
 
 
 class ScriptedBackend:
-    def __init__(self, *, t1="background", t2="building", error="none", target=None, action="negative_point"):
+    def __init__(
+        self,
+        *,
+        t1="background",
+        t2="building",
+        error="none",
+        target=None,
+        action="negative_point",
+        visual_confidence=0.9,
+        evidence_quality="clear",
+    ):
         self.t1 = t1
         self.t2 = t2
         self.error = error
         self.target = target
         self.action = action
+        self.visual_confidence = visual_confidence
+        self.evidence_quality = evidence_quality
         self.calls = []
         self.previous_seen = []
 
@@ -63,11 +75,11 @@ class ScriptedBackend:
                 "visual_judgment": {
                     "t1_state": self.t1,
                     "t2_state": self.t2,
-                    "visual_confidence": 0.9,
-                    "evidence_quality": "clear",
+                    "visual_confidence": self.visual_confidence,
+                    "evidence_quality": self.evidence_quality,
                 },
             }
-        if stage in {"diagnosis", "candidate_diagnosis"}:
+        if stage == "diagnosis":
             return {
                 "region_id": region_id,
                 "diagnosis": {
@@ -86,14 +98,9 @@ class ScriptedBackend:
                     "box_normalized_1000": None,
                 },
             }
-        mode = payload["mode"]
         return {
             "decision": {
-                "comparison": "initial" if mode == "initial" else "better",
                 "quality_score": 0.91,
-                "progress_score": 0.0 if mode == "initial" else 0.2,
-                "accept": self.error == "none" or mode == "candidate",
-                "stop": self.error == "none",
                 "feedback": "Structured staged decision.",
             }
         }
@@ -138,12 +145,11 @@ class MissingDiagnosisConfidenceBackend(ScriptedBackend):
         return super().generate_stage(stage, state, payload, previous_state)
 
 
-class BetterButNotAcceptedBackend(ScriptedBackend):
+class LowQualityInitialBackend(ScriptedBackend):
     def generate_stage(self, stage, state, payload, previous_state=None):
         response = super().generate_stage(stage, state, payload, previous_state)
-        if stage == "decision" and payload["mode"] == "candidate":
-            response["decision"]["accept"] = False
-            response["decision"]["stop"] = False
+        if stage == "decision" and payload["mode"] == "initial":
+            response["decision"]["quality_score"] = 0.0
         return response
 
 
@@ -293,6 +299,17 @@ class StagedVerifierTest(unittest.TestCase):
             "white",
         )
 
+    def test_initial_finish_is_derived_from_state_not_model_quality(self):
+        verifier = StagedQwenVerifier(
+            LowQualityInitialBackend(error="none", target=None)
+        )
+
+        output = verifier.verify(make_state(), None, None)
+
+        self.assertEqual(output.quality_score, 0.0)
+        self.assertTrue(output.accept)
+        self.assertTrue(output.stop)
+
     def test_clear_appearance_change_can_still_be_false_positive(self):
         backend = ScriptedBackend(
             error="false_positive_change", target="t2", action="negative_point"
@@ -382,37 +399,124 @@ class StagedVerifierTest(unittest.TestCase):
         backend = ScriptedBackend(error="none", target=None)
         verifier = StagedQwenVerifier(backend)
 
-        output = verifier.verify(candidate, 0.4, None, previous)
+        action = AgentAction("t2", "positive_point", coordinate=(4, 4))
+        output = verifier.verify(candidate, 0.4, action, previous)
 
         self.assertTrue(output.verifier_valid)
         self.assertEqual(output.comparison, "better")
         self.assertTrue(output.accept)
-        self.assertTrue(all(backend.previous_seen))
+        self.assertTrue(output.stop)
+        transition = verifier.last_evidence["stage_trace"]["transition_assessment"]
+        self.assertTrue(transition["intended_error_improved"])
+        self.assertFalse(transition["introduced_false_negative"])
+        self.assertTrue(transition["evidence_sufficient"])
+        self.assertEqual(transition["source"], "runtime_candidate_evidence")
+        transition_previous_seen = [
+            previous_seen
+            for stage, previous_seen in zip(backend.calls, backend.previous_seen)
+            if stage == "candidate_evidence"
+        ]
+        self.assertTrue(transition_previous_seen)
+        self.assertTrue(all(transition_previous_seen))
         self.assertEqual(
             verifier.last_evidence["stage_trace"]["mode"], "candidate"
         )
 
-    def test_candidate_better_but_not_accepted_is_not_repaired_to_accept(self):
-        candidate = make_state()
-        previous_mask = np.zeros_like(candidate.change_mask)
+    def test_runtime_rejects_removed_real_change_without_candidate_diagnosis(self):
+        previous = make_state()
+        empty = np.zeros_like(previous.change_mask)
+        candidate = ChangeState(
+            previous.t1_image,
+            previous.t2_image,
+            previous.query,
+            previous.t1_mask,
+            empty,
+            empty,
+        )
+        attach_verifier_regions(candidate, previous, max_regions=6, min_component_area=1)
+        backend = ScriptedBackend(t1="background", t2="building")
+        verifier = StagedQwenVerifier(backend)
+
+        action = AgentAction("t2", "negative_point", coordinate=(4, 4))
+        output = verifier.verify(candidate, 0.4, action, previous)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.comparison, "worse")
+        self.assertFalse(output.accept)
+        self.assertFalse(output.stop)
+        transition = verifier.last_evidence["stage_trace"]["transition_assessment"]
+        self.assertTrue(transition["introduced_false_negative"])
+        self.assertNotIn("candidate_diagnosis", backend.calls)
+        self.assertNotIn("decision", backend.calls)
+
+    def test_runtime_accepts_removed_unsupported_change(self):
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        previous_mask = np.zeros((16, 16), dtype=bool)
+        previous_mask[4:9, 4:9] = True
+        empty = np.zeros_like(previous_mask)
         previous = ChangeState(
-            candidate.t1_image,
-            candidate.t2_image,
-            candidate.query,
-            candidate.t1_mask,
-            previous_mask,
-            previous_mask,
+            image, image, "building", empty, previous_mask, previous_mask
+        )
+        candidate = ChangeState(image, image, "building", empty, empty, empty)
+        attach_verifier_regions(candidate, previous, max_regions=6, min_component_area=1)
+        backend = ScriptedBackend(t1="background", t2="background")
+        verifier = StagedQwenVerifier(backend)
+
+        output = verifier.verify(
+            candidate,
+            0.4,
+            AgentAction("t2", "negative_point", coordinate=(4, 4)),
+            previous,
+        )
+
+        self.assertEqual(output.comparison, "better")
+        self.assertTrue(output.accept)
+        self.assertTrue(output.stop)
+
+    def test_low_confidence_candidate_evidence_fails_closed(self):
+        previous = make_state()
+        empty = np.zeros_like(previous.change_mask)
+        candidate = ChangeState(
+            previous.t1_image,
+            previous.t2_image,
+            previous.query,
+            previous.t1_mask,
+            empty,
+            empty,
         )
         attach_verifier_regions(candidate, previous, max_regions=6, min_component_area=1)
         verifier = StagedQwenVerifier(
-            BetterButNotAcceptedBackend(error="none", target=None)
+            ScriptedBackend(visual_confidence=0.0), min_visual_confidence=0.6
         )
 
-        output = verifier.verify(candidate, 0.4, None, previous)
+        output = verifier.verify(
+            candidate,
+            0.4,
+            AgentAction("t2", "negative_point", coordinate=(4, 4)),
+            previous,
+        )
 
-        self.assertTrue(output.verifier_valid)
-        self.assertEqual(output.comparison, "better")
+        self.assertEqual(output.comparison, "uncertain")
         self.assertFalse(output.accept)
+        transition = verifier.last_evidence["stage_trace"]["transition_assessment"]
+        self.assertFalse(transition["evidence_sufficient"])
+
+    def test_candidate_evidence_prompt_has_no_mask_error_reclassification(self):
+        prompt = _stage_prompt(
+            "candidate_evidence", {"visual_context": "proposal"}
+        )
+
+        self.assertIn("judge only real target-class presence", prompt)
+        self.assertIn("Do not diagnose false_positive_change", prompt)
+        self.assertIn("Runtime combines this observation", prompt)
+        self.assertNotIn('"visual_confidence":0.0', prompt)
+
+    def test_initial_prompt_leaves_final_readiness_to_runtime(self):
+        prompt = _stage_prompt("decision", {"mode": "initial"})
+
+        self.assertIn('"quality_score"', prompt)
+        self.assertIn("runtime derives final readiness", prompt)
+        self.assertNotIn('"stop":', prompt)
 
 
 if __name__ == "__main__":

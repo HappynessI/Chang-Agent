@@ -33,18 +33,35 @@ The initial-state path is:
 2. `evidence` classifies only T1/T2 visual state and evidence quality.
 3. `diagnosis` emits one supported error type and target view.
 4. `plan` selects an executable action using supplied geometry.
-5. `decision` emits the initial quality/accept/stop judgment.
+5. `decision` emits only an initial quality assessment. Runtime derives final
+   readiness from the independently diagnosed state and executable `finish` plan.
 
-The candidate path uses `candidate_evidence`, `candidate_diagnosis`, and
-`decision` with both previous and candidate change masks.  Candidate `accept`
-may be true only when `comparison=better`; `better` alone must not override a
-model's explicit rejection. An identical candidate is
-handled programmatically as `unchanged` without a model call.
+The candidate path uses only `candidate_evidence` with marked delta regions,
+previous/candidate object masks, and previous/candidate change masks. Qwen labels
+physical target-class presence in T1/T2 RGB; it does not reclassify a removed
+black region as a current-state false positive/negative and does not author
+transition flags. Runtime combines the local RGB judgment with the attempted
+`positive_point|negative_point` and authoritative `delta_added|delta_removed`
+polarity to derive intended improvement and introduced FP/FN harm. Evidence below
+`--verifier-min-visual-confidence`, non-clear evidence, mixed/uncertain RGB states,
+missing actions, box transitions, and unexpected polarity fail closed as
+`comparison=uncertain`. Runtime derives `better` and commit only from sufficient
+benefit without harm. After a
+commit, the verifier independently rebuilds current-state proposals, diagnoses
+remaining errors, and derives `stop` only from an executable `finish` plan. An
+identical candidate is handled programmatically as `unchanged` without a model
+call.
 
-The Environment commits a non-finish candidate only when all runtime gates
-pass, `comparison=better`, and the verifier also returns `accept=true`.
-`better, accept=false` remains a recorded rejected candidate and the next turn
-continues from the prior accepted masks.
+The Environment commits a non-finish candidate only when all runtime gates pass
+and the runtime-derived transition is `better`. Model-authored acceptance is not
+part of the staged protocol.
+
+`VerifierOutput` remains the compatibility envelope consumed by Environment,
+but its roles are explicit: `comparison/accept` describe the transition, while
+`error_type/error_region/suggested_action/stop` come from the independent
+post-commit state assessment. `StageTrace.transition_assessment` retains the
+runtime-derived effect flags, evidence-sufficiency gate, evidence summary, and
+decision source for audit.
 
 Rollback preserves only the prior accepted masks and accepted point-session
 history. It must not reuse a rejected action instruction. Proposal and Hybrid
@@ -87,20 +104,16 @@ shadows, illumination, and registration differences are non-target context.
 Predicted T1/T2 masks are fallible evidence rather than GT and are not required
 to segment non-target or unchanged content merely to raise a score.
 
-Candidate calls add four binary paired-state judgments:
-
-- intended error materially improved;
-- new semantic false positive introduced;
-- new semantic false negative introduced;
-- boundary or artifact damage introduced.
-
-Runtime derives `better` from benefit without harm, `worse` from harm without
-benefit, `unchanged` from neither, and `uncertain` from simultaneous benefit and
-harm. Candidate `accept` is true only for runtime-derived `better`, after normal
-Environment hard gates. `progress_score` and `score_delta` are the difference
-between runtime-computed current and accepted quality. Replan calls set
-`candidate_effect=null` because they choose a replacement action rather than
-judge candidate quality.
+Candidate regional calls output the same typed physical RGB states as initial
+evidence plus visual confidence and evidence quality. For a negative point, a
+`delta_removed` region with clear unchanged target presence is a potential benefit,
+while a real building/background transition is introduced false-negative harm.
+For a positive point, clear real target transition supports benefit and unchanged
+physical content is introduced false-positive harm. Runtime derives `better` from
+benefit without harm, `worse` from harm without benefit, and otherwise fails closed.
+Candidate `accept` is true only for runtime-derived `better`, after normal
+Environment hard gates. Staged candidate transitions do not make a model
+`decision` call.
 
 Each model call has a minimal exact JSON schema.  The runtime rejects unknown
 fields, unknown region IDs, non-enum values, string booleans, non-integer public
@@ -116,10 +129,34 @@ polarity (`false_positive_change` needs a white proposal and
 `false_negative` needs a black proposal), then retains Qwen's semantic
 `false_positive_change` or `mixed_error` result for planning.
 
-`diagnosis` and `candidate_diagnosis` receive actual visual inputs, not only a
-serialized prior evidence judgment. In `hybrid` mode they receive full T1/T2,
-object masks, change mask, and exact regional crops. In `proposal` mode they
-receive the exact regional RGB/object-mask/change-mask crops only.
+`diagnosis` receives actual visual inputs, not only a serialized prior evidence
+judgment. Candidate deltas deliberately do not run `candidate_diagnosis`. Every regional call starts with a global
+overview whose active proposal is marked yellow, followed by exact regional
+RGB/object-mask/change-mask crops. Hybrid includes T1/T2 object masks as marked
+full-frame panels; Proposal keeps the smaller marked RGB/change overview.
+Candidate calls additionally show previous accepted T1/T2 object-mask crops and
+the previous accepted change-mask crop. Candidate records serialize separate
+previous/candidate crop, delta-component, and seed occupancy facts.
+
+The visual judgment output template uses placeholders rather than a literal
+`visual_confidence=0.0`. Confidence is a runtime gate, not a ranking decoration:
+zero/low confidence or non-clear evidence skips initial diagnosis and prevents
+candidate commit.
+
+### Point composition
+
+A positive point merges only the clicked component from the SimpleClick prediction.
+A negative point uses the SimpleClick prediction as a local subtraction proposal:
+runtime removes `initial_mask & ~raw_mask` only inside the deterministic point ROI.
+It never deletes an entire connected initial component merely because the click is
+inside it, never adds pixels for a negative click, and never applies negative-click
+changes outside the ROI. Tool audit records both raw-output mask pixels and the
+composed removal count.
+
+Direct candidate calls retain their binary candidate-effect contract, but now receive
+full added/removed delta masks and exact delta T1/T2 RGB plus previous/candidate mask
+crops. This prevents small valid edits from being presented only as nearly identical
+full-frame masks.
 
 ## Backends
 

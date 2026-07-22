@@ -109,6 +109,12 @@ class VerifierRegionTest(unittest.TestCase):
                 for item in proposals
             )
         )
+        removed = next(item for item in proposals if item["effect_kind"] == "removed")
+        facts = removed["transition_mask_facts"]
+        self.assertGreater(facts["previous_t2_delta_pixels"], 0)
+        self.assertEqual(facts["candidate_t2_delta_pixels"], 0)
+        self.assertTrue(facts["previous_seed_t2_white"])
+        self.assertFalse(facts["candidate_seed_t2_white"])
 
     def test_initial_batching_covers_exact_components_not_padded_boxes(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)

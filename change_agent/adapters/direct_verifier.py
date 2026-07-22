@@ -676,12 +676,12 @@ def _validate_executable_direct_action(
     """Reject deterministic no-op point plans before a segmentation worker runs.
 
     This is a geometry/tool-contract check, not a semantic decision: a negative
-    click removes the connected component of the current editable mask, so its
-    seed must be white.  A positive click is deliberately not constrained by
-    current seed occupancy because SimpleClick can expand a component from an
-    already-white point.  Direct mode has no Environment Proposal, but it still
-    owns the same current T1/T2 masks and can reject the deterministic negative
-    no-op before launching an expensive worker.
+    click can only subtract SimpleClick-refined pixels from a currently white
+    local mask region, so its seed must be white. A positive click is deliberately
+    not constrained by current seed occupancy because SimpleClick can expand a
+    component from an already-white point. Direct mode has no Environment
+    Proposal, but it still owns the same current T1/T2 masks and can reject the
+    deterministic negative no-op before launching an expensive worker.
     """
 
     if verdict.error_type == "none" or verdict.suggested_action == "finish":

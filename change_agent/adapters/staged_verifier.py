@@ -22,13 +22,14 @@ from ..verifier_protocol import (
     StageBackend,
     StageProtocolError,
     StageTrace,
+    TransitionAssessment,
 )
 
 
 class StagedQwenVerifier:
     """Select proposals, inspect local evidence, and resolve geometry in code."""
 
-    SCHEMA_VERSION = "staged_verifier_som_geometry_v2"
+    SCHEMA_VERSION = "staged_verifier_runtime_transition_v5"
 
     def __init__(
         self,
@@ -39,6 +40,7 @@ class StagedQwenVerifier:
         max_selected_regions: int = 3,
         max_retries: int = 2,
         visual_context: str = "hybrid",
+        min_visual_confidence: float = 0.6,
     ):
         if not 0 <= accept_threshold <= 1:
             raise ValueError("accept_threshold must be in [0,1]")
@@ -50,12 +52,15 @@ class StagedQwenVerifier:
             raise ValueError("max_retries must be positive")
         if visual_context not in {"proposal", "hybrid"}:
             raise ValueError("visual_context must be proposal or hybrid")
+        if not 0 <= min_visual_confidence <= 1:
+            raise ValueError("min_visual_confidence must be in [0,1]")
         self.backend = backend
         self.accept_threshold = accept_threshold
         self.max_regions = max_regions
         self.max_selected_regions = max_selected_regions
         self.max_retries = max_retries
         self.visual_context = visual_context
+        self.min_visual_confidence = min_visual_confidence
         self.last_evidence: dict[str, Any] = {}
         self._last_valid_output: VerifierOutput | None = None
         self._accepted_records: tuple[EvidenceRecord, ...] = ()
@@ -244,7 +249,11 @@ class StagedQwenVerifier:
                 output, trace = self._verify_initial(state, records, previous_score)
             else:
                 output, trace = self._verify_candidate(
-                    state, previous_state, records, previous_score
+                    state,
+                    previous_state,
+                    records,
+                    previous_score,
+                    previous_action,
                 )
             self.last_evidence = {
                 "type": "staged_qwen_verifier",
@@ -352,13 +361,11 @@ class StagedQwenVerifier:
         judgments, diagnoses = self._inspect_and_diagnose(
             state,
             selected_records,
-            candidate=False,
-            previous_state=None,
             proposal_catalog=records,
         )
         selected = self._select_diagnosis(diagnoses)
         plan = self._plan(state, records, selected)
-        decision = self._decision(
+        decision = self._initial_decision(
             state,
             {
                 "mode": "initial",
@@ -367,7 +374,6 @@ class StagedQwenVerifier:
                 "plan": _plan_dict(plan),
                 "previous_score": previous_score,
             },
-            initial=True,
             previous_state=None,
         )
         if decision.comparison != "initial":
@@ -383,6 +389,7 @@ class StagedQwenVerifier:
             diagnoses=diagnoses,
             plan=plan,
             decision=decision,
+            transition_assessment=None,
         )
 
     def _verify_candidate(
@@ -391,41 +398,25 @@ class StagedQwenVerifier:
         previous_state: ChangeState,
         records: tuple[EvidenceRecord, ...],
         previous_score: float | None,
+        previous_action: AgentAction | None,
     ) -> tuple[VerifierOutput, StageTrace]:
-        judgments, diagnoses = self._inspect_and_diagnose(
+        judgments = self._inspect_candidate_evidence(
             state,
             records,
-            candidate=True,
             previous_state=previous_state,
             proposal_catalog=records,
         )
-        decision = self._decision(
-            state,
-            {
-                "mode": "candidate",
-                "previous_change_pixels": int(previous_state.change_mask.sum()),
-                "candidate_change_pixels": int(state.change_mask.sum()),
-                "evidence": [item.to_dict() for item in records],
-                "diagnoses": [item.__dict__ for item in diagnoses],
-                "previous_score": previous_score,
-            },
-            initial=False,
-            previous_state=previous_state,
+        transition_assessment = self._assess_candidate_transition(
+            records, judgments, previous_action
         )
-        selected = self._select_diagnosis(diagnoses)
+        decision = self._candidate_decision(transition_assessment, previous_score)
         plan: ActionPlan | None = None
         replan_records: tuple[EvidenceRecord, ...] = ()
         replan_selected_records: tuple[EvidenceRecord, ...] = ()
         replan_judgments: tuple[EvidenceJudgment, ...] = ()
         replan_diagnoses: tuple[Diagnosis, ...] = ()
-        output_diagnosis = selected
-        if decision.accept and decision.comparison == "better" and decision.stop:
-            if selected is not None:
-                raise StageProtocolError(
-                    "candidate decision cannot stop while a diagnosed error remains"
-                )
-            plan = ActionPlan(None, "finish", None)
-        elif decision.accept and decision.comparison == "better":
+        output_diagnosis = self._select_diagnosis(self._accepted_diagnoses)
+        if decision.accept and decision.comparison == "better":
             proposal_config = state.evidence.get("verifier_mask_facts", {}).get(
                 "proposal_config", {}
             )
@@ -446,8 +437,6 @@ class StagedQwenVerifier:
                 replan_judgments, replan_diagnoses = self._inspect_and_diagnose(
                     state,
                     replan_selected_records,
-                    candidate=False,
-                    previous_state=None,
                     proposal_catalog=replan_records,
                 )
                 remaining = self._select_diagnosis(replan_diagnoses)
@@ -455,6 +444,8 @@ class StagedQwenVerifier:
                 output_diagnosis = remaining
             else:
                 plan = ActionPlan(None, "finish", None)
+            self._accepted_records = replan_records
+            self._accepted_diagnoses = replan_diagnoses
         output = self._output(
             decision, plan, output_diagnosis, previous_score, initial=False
         )
@@ -463,9 +454,10 @@ class StagedQwenVerifier:
             evidence=records,
             selected_region_ids=tuple(item.region_id for item in records),
             judgments=judgments,
-            diagnoses=diagnoses,
+            diagnoses=(),
             plan=plan,
             decision=decision,
+            transition_assessment=transition_assessment,
             replan_evidence=replan_records,
             replan_selected_region_ids=tuple(
                 item.region_id for item in replan_selected_records
@@ -479,17 +471,13 @@ class StagedQwenVerifier:
         state: ChangeState,
         records: tuple[EvidenceRecord, ...],
         *,
-        candidate: bool,
-        previous_state: ChangeState | None,
         proposal_catalog: tuple[EvidenceRecord, ...],
     ) -> tuple[tuple[EvidenceJudgment, ...], tuple[Diagnosis, ...]]:
         judgments: list[EvidenceJudgment] = []
         diagnoses: list[Diagnosis] = []
-        evidence_stage = "candidate_evidence" if candidate else "evidence"
-        diagnosis_stage = "candidate_diagnosis" if candidate else "diagnosis"
         for record in records[: self.max_regions]:
             judgment = self._run_stage(
-                evidence_stage,
+                "evidence",
                 state,
                 {
                     "region": record.to_dict(),
@@ -502,9 +490,19 @@ class StagedQwenVerifier:
                 lambda response, region_id=record.region_id: _parse_judgment(
                     response, region_id
                 ),
-                previous_state,
+                None,
             )
             judgments.append(judgment)
+            if not self._judgment_is_sufficient(judgment):
+                diagnoses.append(
+                    Diagnosis(
+                        record.region_id,
+                        "uncertain_region",
+                        None,
+                        judgment.confidence,
+                    )
+                )
+                continue
 
             def parse_diagnosis(
                 response: Mapping[str, Any],
@@ -512,13 +510,11 @@ class StagedQwenVerifier:
                 current_judgment: EvidenceJudgment = judgment,
             ) -> Diagnosis:
                 parsed = _parse_diagnosis(response, current_record.region_id)
-                self._validate_diagnosis(
-                    current_record, current_judgment, parsed, candidate=candidate
-                )
+                self._validate_diagnosis(current_record, parsed)
                 return parsed
 
             parsed_diagnosis = self._run_stage(
-                diagnosis_stage,
+                "diagnosis",
                 state,
                 {
                     "region": record.to_dict(),
@@ -530,10 +526,41 @@ class StagedQwenVerifier:
                     "visual_context": self.visual_context,
                 },
                 parse_diagnosis,
-                previous_state,
+                None,
             )
             diagnoses.append(parsed_diagnosis)
         return tuple(judgments), tuple(diagnoses)
+
+    def _inspect_candidate_evidence(
+        self,
+        state: ChangeState,
+        records: tuple[EvidenceRecord, ...],
+        *,
+        previous_state: ChangeState,
+        proposal_catalog: tuple[EvidenceRecord, ...],
+    ) -> tuple[EvidenceJudgment, ...]:
+        """Inspect candidate deltas without reclassifying black/white state errors."""
+
+        judgments: list[EvidenceJudgment] = []
+        for record in records[: self.max_regions]:
+            judgment = self._run_stage(
+                "candidate_evidence",
+                state,
+                {
+                    "region": record.to_dict(),
+                    "proposal_catalog": [
+                        item.to_dict() for item in proposal_catalog
+                    ],
+                    "schema": "candidate_transition_evidence_v1",
+                    "visual_context": self.visual_context,
+                },
+                lambda response, region_id=record.region_id: _parse_judgment(
+                    response, region_id
+                ),
+                previous_state,
+            )
+            judgments.append(judgment)
+        return tuple(judgments)
 
     def _select_global_regions(
         self,
@@ -593,10 +620,7 @@ class StagedQwenVerifier:
     @staticmethod
     def _validate_diagnosis(
         record: EvidenceRecord,
-        judgment: EvidenceJudgment,
         diagnosis: Diagnosis,
-        *,
-        candidate: bool,
     ) -> None:
         if diagnosis.error_type == "false_negative" and record.change_mask_state != "black":
             raise StageProtocolError("false_negative requires a black/missing change region")
@@ -610,6 +634,81 @@ class StagedQwenVerifier:
         # temporal change and unsupported boundary/interior pixels.  Qwen must
         # therefore retain authority to emit false_positive_change, mixed_error,
         # or none after inspecting RGB and mask coverage.
+
+    def _judgment_is_sufficient(self, judgment: EvidenceJudgment) -> bool:
+        return bool(
+            judgment.evidence_quality == "clear"
+            and judgment.confidence >= self.min_visual_confidence
+            and judgment.t1_state in {"building", "background"}
+            and judgment.t2_state in {"building", "background"}
+        )
+
+    def _assess_candidate_transition(
+        self,
+        records: tuple[EvidenceRecord, ...],
+        judgments: tuple[EvidenceJudgment, ...],
+        previous_action: AgentAction | None,
+    ) -> TransitionAssessment:
+        """Derive benefit/harm from action direction plus local RGB judgments."""
+
+        expected_kind = {
+            "negative_point": "delta_removed",
+            "positive_point": "delta_added",
+        }.get(previous_action.action if previous_action else None)
+        by_id = {item.region_id: item for item in judgments}
+        sufficient = bool(records) and expected_kind is not None
+        intended_improved = False
+        introduced_false_positive = False
+        introduced_false_negative = False
+        boundary_or_artifact_worsened = False
+        evidence_parts: list[str] = []
+        for record in records:
+            judgment = by_id.get(record.region_id)
+            if judgment is None or not self._judgment_is_sufficient(judgment):
+                sufficient = False
+                evidence_parts.append(
+                    f"{record.region_id}:{record.audit_kind}:insufficient_visual_evidence"
+                )
+                continue
+            real_target_change = judgment.t1_state != judgment.t2_state
+            evidence_parts.append(
+                f"{record.region_id}:{record.audit_kind}:"
+                f"{judgment.t1_state}->{judgment.t2_state}:"
+                f"confidence={judgment.confidence:.3f}"
+            )
+            if record.audit_kind == "delta_removed":
+                if real_target_change:
+                    introduced_false_negative = True
+                elif expected_kind == "delta_removed":
+                    intended_improved = True
+                else:
+                    boundary_or_artifact_worsened = True
+            elif record.audit_kind == "delta_added":
+                if not real_target_change:
+                    introduced_false_positive = True
+                elif expected_kind == "delta_added":
+                    intended_improved = True
+                else:
+                    boundary_or_artifact_worsened = True
+            else:
+                sufficient = False
+                evidence_parts.append(f"{record.region_id}:unsupported_delta_polarity")
+            if record.audit_kind != expected_kind:
+                sufficient = False
+                boundary_or_artifact_worsened = True
+                evidence_parts.append(
+                    f"{record.region_id}:unexpected_for_{previous_action.action if previous_action else 'none'}"
+                )
+        if expected_kind is None:
+            evidence_parts.append("unsupported_or_missing_attempted_action")
+        return TransitionAssessment(
+            intended_error_improved=intended_improved,
+            introduced_false_positive=introduced_false_positive,
+            introduced_false_negative=introduced_false_negative,
+            boundary_or_artifact_worsened=boundary_or_artifact_worsened,
+            evidence_sufficient=sufficient,
+            evidence="; ".join(evidence_parts),
+        )
 
     def _select_diagnosis(
         self, diagnoses: tuple[Diagnosis, ...]
@@ -662,30 +761,41 @@ class StagedQwenVerifier:
             coordinate_normalized_1000=record.component_seed_normalized_1000,
         )
 
-    def _decision(
+    def _initial_decision(
         self,
         state: ChangeState,
         payload: Mapping[str, Any],
         *,
-        initial: bool,
         previous_state: ChangeState | None,
     ) -> Decision:
-        def parse_decision(response: Mapping[str, Any]) -> Decision:
-            decision = _parse_decision(response)
-            if initial and decision.comparison != "initial":
-                raise StageProtocolError("initial decision must use comparison=initial")
-            if not initial and decision.comparison == "initial":
-                raise StageProtocolError(
-                    "candidate decision cannot use comparison=initial"
-                )
-            if not initial and decision.accept and decision.comparison != "better":
-                raise StageProtocolError(
-                    "candidate accept=true requires comparison=better"
-                )
-            return decision
+        quality_score, feedback = self._run_stage(
+            "decision",
+            state,
+            payload,
+            _parse_initial_assessment,
+            previous_state,
+        )
+        return Decision("initial", quality_score, 0.0, False, False, feedback)
 
-        return self._run_stage(
-            "decision", state, payload, parse_decision, previous_state
+    @staticmethod
+    def _candidate_decision(
+        assessment: TransitionAssessment,
+        previous_score: float | None,
+    ) -> Decision:
+        comparison = assessment.comparison
+        progress = {
+            "better": 1.0,
+            "worse": -1.0,
+            "unchanged": 0.0,
+            "uncertain": 0.0,
+        }[comparison]
+        return Decision(
+            comparison,
+            float(previous_score) if previous_score is not None else 0.0,
+            progress,
+            comparison == "better",
+            False,
+            assessment.evidence,
         )
 
     def _output(
@@ -717,14 +827,21 @@ class StagedQwenVerifier:
                 assert plan.box_normalized_1000 is not None
                 region = plan.box_normalized_1000
             suggested_action = plan.action
+        state_ready = bool(plan is not None and plan.action == "finish")
         accept = bool(
-            decision.accept
-            and (
-                decision.quality_score >= self.accept_threshold
-                and error_type == "none"
-                if initial
-                else decision.comparison == "better"
-            )
+            state_ready and error_type == "none"
+            if initial
+            else decision.comparison == "better" and decision.accept
+        )
+        state_feedback = (
+            "current accepted state has no diagnosed remaining error"
+            if state_ready
+            else f"next state action: {suggested_action or 'none'} ({error_type})"
+        )
+        feedback = (
+            f"transition: {decision.feedback}; state: {state_feedback}"
+            if not initial
+            else decision.feedback
         )
         return VerifierOutput(
             quality_score=decision.quality_score,
@@ -739,18 +856,13 @@ class StagedQwenVerifier:
             target_view=target_view,
             error_region=region,
             suggested_action=suggested_action,
-            feedback=decision.feedback,
+            feedback=feedback,
             accept=accept,
             verifier_valid=True,
             localization_valid=(
                 plan is not None and (plan.action == "finish" or region is not None)
             ),
-            stop=bool(
-                accept
-                and decision.stop
-                and plan is not None
-                and plan.action == "finish"
-            ),
+            stop=bool(accept and state_ready),
         )
 
 
@@ -798,7 +910,7 @@ def _parse_diagnosis(payload: Mapping[str, Any], region_id: str) -> Diagnosis:
     )
 
 
-def _parse_decision(payload: Mapping[str, Any]) -> Decision:
+def _parse_initial_assessment(payload: Mapping[str, Any]) -> tuple[float, str]:
     _exact_keys(
         payload,
         {"decision"},
@@ -807,20 +919,13 @@ def _parse_decision(payload: Mapping[str, Any]) -> Decision:
     body = payload["decision"]
     if not isinstance(body, Mapping):
         raise StageProtocolError("decision must be an object")
-    _exact_keys(body, {"comparison", "quality_score", "progress_score", "accept", "stop", "feedback"}, "decision body")
-    if any(not isinstance(body[key], bool) for key in ("accept", "stop")):
-        raise StageProtocolError("decision accept/stop must be JSON booleans")
-    for key in ("quality_score", "progress_score"):
-        if isinstance(body[key], bool) or not isinstance(body[key], (int, float)):
-            raise StageProtocolError(f"decision {key} must be numeric")
-    return Decision(
-        str(body["comparison"]),
-        float(body["quality_score"]),
-        float(body["progress_score"]),
-        bool(body["accept"]),
-        bool(body["stop"]),
-        str(body.get("feedback", "")),
-    )
+    _exact_keys(body, {"quality_score", "feedback"}, "initial assessment body")
+    quality = body["quality_score"]
+    if isinstance(quality, bool) or not isinstance(quality, (int, float)):
+        raise StageProtocolError("initial assessment quality_score must be numeric")
+    if not 0 <= float(quality) <= 1:
+        raise StageProtocolError("initial assessment quality_score must be in [0,1]")
+    return float(quality), str(body["feedback"])
 
 
 def _exact_keys(payload: Mapping[str, Any], expected: set[str], name: str) -> None:

@@ -194,6 +194,36 @@ def build_candidate_delta_regions(
         x1, y1, x2, y2 = crop_box
         crop = np.zeros_like(change)
         crop[y1 : y2 + 1, x1 : x2 + 1] = True
+        transition_mask_facts = {
+            "previous_t1_crop_pixels": int(
+                np.logical_and(previous_state.t1_mask, crop).sum()
+            ),
+            "previous_t2_crop_pixels": int(
+                np.logical_and(previous_state.t2_mask, crop).sum()
+            ),
+            "candidate_t1_crop_pixels": int(
+                np.logical_and(state.t1_mask, crop).sum()
+            ),
+            "candidate_t2_crop_pixels": int(
+                np.logical_and(state.t2_mask, crop).sum()
+            ),
+            "previous_t1_delta_pixels": int(
+                np.logical_and(previous_state.t1_mask, component).sum()
+            ),
+            "previous_t2_delta_pixels": int(
+                np.logical_and(previous_state.t2_mask, component).sum()
+            ),
+            "candidate_t1_delta_pixels": int(
+                np.logical_and(state.t1_mask, component).sum()
+            ),
+            "candidate_t2_delta_pixels": int(
+                np.logical_and(state.t2_mask, component).sum()
+            ),
+            "previous_seed_t1_white": bool(previous_state.t1_mask[seed_y, seed_x]),
+            "previous_seed_t2_white": bool(previous_state.t2_mask[seed_y, seed_x]),
+            "candidate_seed_t1_white": bool(state.t1_mask[seed_y, seed_x]),
+            "candidate_seed_t2_white": bool(state.t2_mask[seed_y, seed_x]),
+        }
         result.append(
             {
                 "region_id": f"d{index}",
@@ -231,6 +261,7 @@ def build_candidate_delta_regions(
                 ),
                 "component_seed_t1_mask_white": bool(state.t1_mask[seed_y, seed_x]),
                 "component_seed_t2_mask_white": bool(state.t2_mask[seed_y, seed_x]),
+                "transition_mask_facts": transition_mask_facts,
             }
         )
     return result

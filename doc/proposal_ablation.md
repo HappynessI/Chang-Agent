@@ -7,10 +7,19 @@ until every rollout finishes.
 - `direct`: current BaiLian operational mode. Full T1/T2/object-mask/change-mask
   context; Qwen emits binary rubric judgments, short evidence, diagnosis, action,
   and normalized geometry. No Proposal is attached to Environment state.
-- `proposal`: per-region RGB, T1/T2 object-mask, and change-mask crops only.
-  Environment Proposal seed/box grounds every executable action.
-- `hybrid`: full context plus same regional crops. Environment Proposal seed/box
-  still grounds execution and delta verification.
+- `proposal`: selection receives one numbered global SoM overview. Regional calls
+  receive an RGB/change overview with the active region marked yellow plus exact
+  RGB, T1/T2 object-mask, and change-mask crops.
+- `hybrid`: regional calls use the same active mark, with full T1/T2 object masks
+  included in the marked overview, plus the same exact crops. Environment Proposal
+  seed/box grounds execution and delta verification in both modes.
+
+Staged candidate verification asks Qwen only for physical T1/T2 target presence in
+each exact delta region. It does not reuse initial-state error diagnosis and never
+asks Qwen for comparison, benefit/harm flags, `accept`, or `stop`. Runtime combines
+clear, sufficiently confident RGB evidence with point-action direction and delta
+polarity, derives comparison/commit, then performs an independent accepted-state
+assessment for remaining error, next action, and termination.
 
 `tools/submit_ca0721_proposal_ablation.sh` creates one parent directory outside
 `outputs/`:
@@ -21,6 +30,11 @@ experiments/CA_0721(<run>)-bailian-proposal-ablation/
   proposal/
   hybrid/
 ```
+
+For the repaired visual-context contract, submit the three-arm smoke run with
+`tools/submit_ca0722_context_fix_ablation.sh`. It writes a self-contained parent under
+`outputs/`, pins all arms to the already-probed node, archives Slurm logs below each
+arm, and sends one completion notification per arm.
 
 Each child contains its own `logs/`, trajectories, feedback, masks,
 predictions, and `per_sample_metrics.json`. Compare initial-error localization,
@@ -37,6 +51,11 @@ then derives candidate comparison from one
 benefit and three harm flags. Proposal and Hybrid retain their staged decision
 contract. In every arm, Environment commits only `better, accept=true`
 candidates after its own safety gates.
+
+Negative points use the SimpleClick output as an ROI-clipped subtraction and no
+longer delete the entire clicked initial connected component. Direct candidates
+receive explicit full and local delta views; Proposal/Hybrid candidate records retain
+separate previous/candidate object-mask and change-mask facts.
 
 After any rollback, the accepted masks and accepted point-session history remain
 authoritative; the rejected candidate is retained only for audit and replan

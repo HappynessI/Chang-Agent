@@ -47,11 +47,14 @@ class ExecutorLocalityTest(unittest.TestCase):
             "merge_clicked_prediction_component",
         )
 
-    def test_negative_point_removes_only_clicked_initial_component(self):
+    def test_negative_point_uses_only_simpleclick_removal_inside_roi(self):
         initial = np.zeros((16, 16), dtype=bool)
-        initial[3:5, 3:5] = True
+        initial[2:10, 2:10] = True
         initial[10:12, 10:12] = True
-        executor = ActionExecutor(PointBackend(initial), BoxBackend(initial))
+        prediction = initial.copy()
+        prediction[3:5, 3:5] = False
+        prediction[8:10, 8:10] = False
+        executor = ActionExecutor(PointBackend(prediction), BoxBackend(initial))
 
         result = executor.execute(
             AgentAction("t1", "negative_point", coordinate=(3, 3)),
@@ -61,8 +64,14 @@ class ExecutorLocalityTest(unittest.TestCase):
         )
 
         self.assertFalse(result.mask[3:5, 3:5].any())
+        self.assertTrue(result.mask[8:10, 8:10].all())
         self.assertTrue(result.mask[10:12, 10:12].all())
-        self.assertEqual(result.evidence["locality"]["component_count_delta"], -1)
+        self.assertEqual(result.evidence["locality"]["outside_roi_pixels"], 0)
+        self.assertEqual(
+            result.evidence["locality"]["composition_mode"],
+            "remove_simpleclick_delta_within_roi",
+        )
+        self.assertEqual(result.evidence["tool_input"]["composed_removed_pixels"], 4)
 
     def test_box_replaces_only_pixels_inside_box(self):
         initial = np.zeros((16, 16), dtype=bool)

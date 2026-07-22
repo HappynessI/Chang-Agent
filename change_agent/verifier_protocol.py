@@ -18,7 +18,6 @@ StageName = Literal[
     "evidence",
     "diagnosis",
     "candidate_evidence",
-    "candidate_diagnosis",
     "decision",
     "direct",
 ]
@@ -56,6 +55,7 @@ class EvidenceRecord:
     component_area: int = 0
     editable_seed_white: Mapping[str, bool] = field(default_factory=dict)
     allowed_actions: tuple[str, ...] = ()
+    transition_mask_facts: Mapping[str, int | bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.region_id:
@@ -76,6 +76,14 @@ class EvidenceRecord:
         for action in self.allowed_actions:
             if action not in ACTIONS - {"finish"}:
                 raise StageProtocolError(f"unsupported allowed action: {action!r}")
+        for key, value in self.transition_mask_facts.items():
+            valid_value = isinstance(value, bool) or (
+                isinstance(value, int) and value >= 0
+            )
+            if not isinstance(key, str) or not valid_value:
+                raise StageProtocolError(
+                    "transition_mask_facts must map strings to non-negative integers or booleans"
+                )
 
     @classmethod
     def from_proposal(cls, proposal: Mapping[str, Any]) -> "EvidenceRecord":
@@ -133,6 +141,11 @@ class EvidenceRecord:
             component_area=int(proposal.get("component_area", 0)),
             editable_seed_white=editable,
             allowed_actions=allowed,
+            transition_mask_facts={
+                str(key): value
+                for key, value in proposal.get("transition_mask_facts", {}).items()
+                if isinstance(value, (int, bool))
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +161,7 @@ class EvidenceRecord:
             "component_area": self.component_area,
             "editable_seed_white": dict(self.editable_seed_white),
             "allowed_actions": list(self.allowed_actions),
+            "transition_mask_facts": dict(self.transition_mask_facts),
         }
 
 
@@ -227,6 +241,39 @@ class Decision:
 
 
 @dataclass(frozen=True)
+class TransitionAssessment:
+    """Runtime-derived candidate effects from local model-observed RGB evidence."""
+
+    intended_error_improved: bool
+    introduced_false_positive: bool
+    introduced_false_negative: bool
+    boundary_or_artifact_worsened: bool
+    evidence_sufficient: bool = True
+    evidence: str = ""
+    source: str = "runtime_candidate_evidence"
+
+    @property
+    def introduced_harm(self) -> bool:
+        return bool(
+            self.introduced_false_positive
+            or self.introduced_false_negative
+            or self.boundary_or_artifact_worsened
+        )
+
+    @property
+    def comparison(self) -> str:
+        if not self.evidence_sufficient:
+            return "uncertain"
+        if self.intended_error_improved and not self.introduced_harm:
+            return "better"
+        if self.introduced_harm and not self.intended_error_improved:
+            return "worse"
+        if not self.intended_error_improved and not self.introduced_harm:
+            return "unchanged"
+        return "uncertain"
+
+
+@dataclass(frozen=True)
 class StageTrace:
     """Serializable intermediate state retained for audit and replay."""
 
@@ -237,6 +284,7 @@ class StageTrace:
     diagnoses: tuple[Diagnosis, ...] = ()
     plan: ActionPlan | None = None
     decision: Decision | None = None
+    transition_assessment: TransitionAssessment | None = None
     replan_evidence: tuple[EvidenceRecord, ...] = ()
     replan_selected_region_ids: tuple[str, ...] = ()
     replan_judgments: tuple[EvidenceJudgment, ...] = ()
@@ -251,6 +299,11 @@ class StageTrace:
             "diagnoses": [item.__dict__ for item in self.diagnoses],
             "plan": self.plan.__dict__ if self.plan else None,
             "decision": self.decision.__dict__ if self.decision else None,
+            "transition_assessment": (
+                self.transition_assessment.__dict__
+                if self.transition_assessment
+                else None
+            ),
             "replan_evidence": [item.to_dict() for item in self.replan_evidence],
             "replan_selected_region_ids": list(self.replan_selected_region_ids),
             "replan_judgments": [item.__dict__ for item in self.replan_judgments],

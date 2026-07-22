@@ -378,6 +378,31 @@ def _stage_images(
                     (f"{state_label} final change mask", _mask_image(previous_state.change_mask)),
                 ]
             )
+            if payload.get("mode") == "candidate":
+                added = np.logical_and(
+                    state.change_mask, ~previous_state.change_mask
+                )
+                removed = np.logical_and(
+                    previous_state.change_mask, ~state.change_mask
+                )
+                images.extend(
+                    [
+                        ("Candidate-added change pixels", _mask_image(added)),
+                        ("Candidate-removed change pixels", _mask_image(removed)),
+                    ]
+                )
+                crop_box = _delta_crop_box(np.logical_or(added, removed))
+                if crop_box is not None:
+                    images.extend(
+                        [
+                            ("Exact candidate-delta T1 RGB crop", _as_image(state.t1_image).crop(crop_box)),
+                            ("Exact candidate-delta T2 RGB crop", _as_image(state.t2_image).crop(crop_box)),
+                            ("Exact previous accepted change-mask crop", _mask_image(previous_state.change_mask).crop(crop_box)),
+                            ("Exact candidate change-mask crop", _mask_image(state.change_mask).crop(crop_box)),
+                            ("Exact candidate-added pixel crop", _mask_image(added).crop(crop_box)),
+                            ("Exact candidate-removed pixel crop", _mask_image(removed).crop(crop_box)),
+                        ]
+                    )
         return images
     if stage == "select":
         catalog = payload.get("proposal_catalog", [])
@@ -389,7 +414,7 @@ def _stage_images(
                 _proposal_overview(state, previous_state, catalog),
             )
         ]
-    if stage in {"evidence", "candidate_evidence", "diagnosis", "candidate_diagnosis"}:
+    if stage in {"evidence", "candidate_evidence", "diagnosis"}:
         visual_context = str(payload.get("visual_context", "hybrid"))
         if visual_context not in {"proposal", "hybrid"}:
             raise StageProtocolError(
@@ -397,25 +422,25 @@ def _stage_images(
             )
         images: list[tuple[str, Image.Image]] = []
         catalog = payload.get("proposal_catalog", [])
+        region = payload.get("region")
+        active_id = (
+            str(region.get("region_id"))
+            if isinstance(region, Mapping) and region.get("region_id")
+            else None
+        )
         if isinstance(catalog, list) and catalog:
-            active = payload.get("region", {})
-            active_id = (
-                str(active.get("region_id"))
-                if isinstance(active, Mapping) and active.get("region_id")
-                else None
-            )
             images.append(
                 (
-                    "Global numbered overview; yellow marks the active local region",
+                    f"Active-region marked global overview; yellow is {active_id}",
                     _proposal_overview(
                         state,
                         previous_state,
                         catalog,
                         active_region_id=active_id,
+                        include_object_masks=visual_context == "hybrid",
                     ),
                 )
             )
-        region = payload.get("region")
         if isinstance(region, Mapping):
             box = region.get("box_normalized_1000")
             if isinstance(box, (list, tuple)) and len(box) == 4:
@@ -429,12 +454,24 @@ def _stage_images(
                         ("Exact proposal change-mask crop", _mask_image(state.change_mask).crop(crop_box)),
                     ]
                 )
+                if previous_state is not None:
+                    images.extend(
+                        [
+                            (
+                                "Exact previous accepted T1 object-mask crop",
+                                _mask_image(previous_state.t1_mask).crop(crop_box),
+                            ),
+                            (
+                                "Exact previous accepted T2 object-mask crop",
+                                _mask_image(previous_state.t2_mask).crop(crop_box),
+                            ),
+                            (
+                                "Exact previous accepted change-mask crop",
+                                _mask_image(previous_state.change_mask).crop(crop_box),
+                            ),
+                        ]
+                    )
         return images
-    if stage == "decision" and previous_state is not None:
-        return [
-            ("Previous accepted final change mask", _mask_image(previous_state.change_mask)),
-            ("Candidate final change mask", _mask_image(state.change_mask)),
-        ]
     return []
 
 
@@ -454,14 +491,24 @@ def _proposal_overview(
     catalog: list[Any],
     *,
     active_region_id: str | None = None,
+    include_object_masks: bool = False,
 ) -> Image.Image:
     """Render deterministic Set-of-Mark contours from Environment proposals."""
 
     panels = [
         _as_image(state.t1_image).convert("RGB"),
         _as_image(state.t2_image).convert("RGB"),
-        _mask_image(state.change_mask).convert("RGB"),
     ]
+    if include_object_masks:
+        panels.extend(
+            [
+                _mask_image(state.t1_mask).convert("RGB"),
+                _mask_image(state.t2_mask).convert("RGB"),
+            ]
+        )
+    if previous_state is not None:
+        panels.append(_mask_image(previous_state.change_mask).convert("RGB"))
+    panels.append(_mask_image(state.change_mask).convert("RGB"))
     width, height = state.image_size
     for index, proposal in enumerate(catalog):
         if not isinstance(proposal, Mapping):
@@ -560,6 +607,33 @@ def _mask_boundary(mask: np.ndarray) -> np.ndarray:
     return np.logical_and(mask, ~eroded)
 
 
+def _delta_crop_box(
+    mask: np.ndarray, *, padding: int = 8, minimum_side: int = 32
+) -> tuple[int, int, int, int] | None:
+    """Return a padded PIL crop box around a non-empty binary delta."""
+
+    source = np.asarray(mask, dtype=bool)
+    ys, xs = np.nonzero(source)
+    if not len(xs):
+        return None
+    height, width = source.shape
+    left = max(0, int(xs.min()) - padding)
+    top = max(0, int(ys.min()) - padding)
+    right = min(width, int(xs.max()) + padding + 1)
+    bottom = min(height, int(ys.max()) + padding + 1)
+    if right - left < minimum_side:
+        extra = minimum_side - (right - left)
+        left = max(0, left - extra // 2)
+        right = min(width, right + extra - extra // 2)
+        left = max(0, right - minimum_side)
+    if bottom - top < minimum_side:
+        extra = minimum_side - (bottom - top)
+        top = max(0, top - extra // 2)
+        bottom = min(height, bottom + extra - extra // 2)
+        top = max(0, bottom - minimum_side)
+    return left, top, right, bottom
+
+
 def _stage_prompt(
     stage: StageName,
     payload: Mapping[str, Any],
@@ -591,16 +665,37 @@ def _stage_prompt(
     elif stage in {"evidence", "candidate_evidence"}:
         schema = (
             f'{{"region_id":"{region_id}","visual_judgment":{{'
-            '"t1_state":"background",'
-            '"t2_state":"building",'
-            '"visual_confidence":0.0,"evidence_quality":"clear"}}}'
+            '"t1_state":<RGB_STATE>,"t2_state":<RGB_STATE>,'
+            '"visual_confidence":<CONFIDENCE_0_TO_1>,'
+            '"evidence_quality":<EVIDENCE_QUALITY>}}}'
         )
-        task = (
-            "Read only the supplied local visual evidence and classify T1/T2 content. "
+        evidence_scope = (
+            "the active-region marked full-frame state and exact local proposal crops"
+            if payload.get("visual_context") == "hybrid"
+            else "the active-region marked RGB/change overview and exact local proposal crops"
+        )
+        if stage == "candidate_evidence":
+            task = (
+                f"Read {evidence_scope} and judge only real target-class presence in the exact "
+                "candidate-delta region from RGB evidence. T1/T2 states describe the physical "
+                "scene, never white/black mask color. For target_class=building, building means "
+                "a real building is present, background means no building is present, and mixed "
+                "or uncertain must be used when the crop cannot support a clean presence label. "
+                "Do not diagnose false_positive_change or false_negative and do not claim that "
+                "removing pixels fixes a false negative. Runtime combines this observation with "
+                "the attempted action and delta polarity. "
+            )
+        else:
+            task = (
+                f"Read {evidence_scope} and classify T1/T2 physical target-class content from "
+                "RGB evidence. Do not copy the example or classify mask color. "
+            )
+        task += (
             "Each state must be one of building, background, mixed, uncertain; evidence_quality "
-            "must be clear, ambiguous, or insufficient."
+            "must be clear, ambiguous, or insufficient. visual_confidence must reflect this "
+            "specific crop; use 0 only for no usable visual evidence."
         )
-    elif stage in {"diagnosis", "candidate_diagnosis"}:
+    elif stage == "diagnosis":
         schema = (
             '{"region_id":"' + region_id + '","diagnosis":{'
             '"error_type":<ERROR_TYPE>,"target_view":<TARGET_VIEW_OR_NULL>,'
@@ -611,8 +706,8 @@ def _stage_prompt(
             "proposal crop, and Environment facts. Do not infer correctness from the change-mask "
             "color or from a temporal difference alone. A proposal may contain both correct and "
             "incorrect pixels. Use false_positive_change when predicted white change lacks real "
-            "T1/T2 change, false_negative when a black region contains real change, mixed_error "
-            "Use mixed_error when one proposal contains both supported and unsupported predicted "
+            "T1/T2 change, false_negative when a black region contains real change. Use "
+            "mixed_error when one proposal contains both supported and unsupported predicted "
             "pixels or a partial omission, and uncertain_region when evidence is insufficient. "
             "Use none only "
             "when the whole audited region is supported by the RGB evidence and mask coverage. "
@@ -701,18 +796,16 @@ def _stage_prompt(
                 ""
             )
     else:
-        candidate_mode = payload.get("mode") == "candidate"
-        comparison_example = "uncertain" if candidate_mode else "initial"
         schema = (
-            f'{{"decision":{{"comparison":"{comparison_example}","quality_score":0.0,'
-            '"progress_score":0.0,"accept":false,"stop":false,'
-            '"feedback":"short explanation"}}'
+            '{"decision":{"quality_score":0.0,'
+            '"feedback":"short complete-state assessment"}}'
         )
         task = (
-            "Judge the complete initial state or compare the candidate with the previous accepted "
-            "state. comparison must be initial, better, worse, unchanged, or uncertain. accept "
-            "may be true for an initial state only when no error remains, and for a candidate "
-            "only when comparison is better. stop requires accept=true and no remaining error."
+            "Score the complete initial state from 0 to 1 using the audited diagnoses. "
+            "Describe the most material remaining error, if any. Do not output comparison, "
+            "accept, stop, or next action; runtime derives final readiness from the independent "
+            "state diagnosis and executable plan. Candidate transition decisions never use this "
+            "stage; runtime derives them from candidate_evidence."
         )
     repair = ""
     if validation_error:
@@ -746,7 +839,6 @@ _STAGE_EXPECTED_KEYS: dict[str, frozenset[str]] = {
     "evidence": frozenset({"region_id", "visual_judgment"}),
     "candidate_evidence": frozenset({"region_id", "visual_judgment"}),
     "diagnosis": frozenset({"region_id", "diagnosis"}),
-    "candidate_diagnosis": frozenset({"region_id", "diagnosis"}),
     "decision": frozenset({"decision"}),
     "direct": frozenset({"verdict"}),
 }
