@@ -68,7 +68,7 @@ printf '%s\n' \
   "- network_mode: \`$BAILIAN_NETWORK_MODE\`" \
   "- memory_per_arm: \`$MEMORY\`" \
   '- samples: `test_20_15 test_78_13 test_85_16`' \
-  "- arms: `${MODES[*]}`" \
+  "- arms: \`${MODES[*]}\`" \
   '- regional evidence: `active-region-marked global overview plus exact local crops`' \
   '- candidate evidence: `action-scoped delta masks plus delta-highlighted T1/T2 RGB and previous/candidate masks`' \
   '- transition policy: `v6 runtime action x scoped delta polarity x RGB evidence; low-confidence fail-closed`' \

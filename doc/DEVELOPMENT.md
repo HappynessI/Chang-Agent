@@ -29,6 +29,11 @@ silently converted into outer `accept=true, stop=true`.
 Slurm job `44459` passed all 70 focused staged-verifier, regional-backend,
 region-generation, Environment, Executor-locality, and runner-action tests.
 
+The Proposal-only launcher now escapes Markdown backticks around its dynamic
+`MODES` value. This prevents the shell from treating `proposal` as command
+substitution while writing `experiment_manifest.md`; the issue affected only
+manifest text, not the submitted arm command.
+
 ## 2026-07-22 — runtime candidate evidence and local negative edits
 
 The CA_0722(4) audit separated state-cache stability from semantic candidate
