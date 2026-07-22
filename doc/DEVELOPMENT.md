@@ -68,6 +68,22 @@ view order as T1/T2. Job `44513` was an implementation-independent fixture
 failure caused by clearing the smaller region while Proposal IDs are area-sorted;
 the corrected region mapping passed.
 
+Proposal-only job `44516` completed successfully on `gpu46` in 2m45s with empty
+stderr. Deterministic target resolution worked: test85 attempted both r0/T2 and
+r1/T2 instead of terminating without a candidate. The r1 candidate improved
+offline IoU from `0.30658070` to `0.33236925` by removing 349 false-positive
+pixels without removing any true-positive pixel. Runtime nevertheless rejected
+it because candidate evidence classified the aggregated delta as T1 background
+to T2 building with confidence `0.95`. Selected aggregate IoU therefore stayed
+at `0.69744116`.
+
+The remaining bottleneck is candidate RGB semantics, not evidence coverage or
+action planning. A next iteration should expose the unchanged RGB values under
+the exact delta directly (for example, delta-only original-color T1/T2 crops with
+a contour marker) instead of relying on a strongly yellow-blended highlight in a
+large action crop. Acceptance thresholds should remain unchanged until that
+evidence presentation is tested.
+
 ## 2026-07-22 — runtime candidate evidence and local negative edits
 
 The CA_0722(4) audit separated state-cache stability from semantic candidate

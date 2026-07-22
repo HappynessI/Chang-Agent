@@ -62,6 +62,15 @@ Environment facts identify exactly one view with the required editable seed.
 Ambiguous or impossible targets still fail closed. Submit it with
 `tools/submit_ca0722_proposal_deterministic_v8.sh`.
 
+CA_0722(8) verified the deterministic action path but did not improve selected
+aggregate IoU (`0.69744116`). test85 now attempted two T2 deletions. The second
+candidate improved offline IoU from `0.30658070` to `0.33236925`, removing 349
+false-positive pixels and no true positives, but candidate evidence labeled the
+action-scoped delta as background-to-building at confidence `0.95` and rejected
+it. The next Proposal experiment should preserve original RGB values in a
+delta-only view and use contours rather than a dominant fill highlight; do not
+lower the runtime evidence or harm gates to force acceptance.
+
 Each child contains its own `logs/`, trajectories, feedback, masks,
 predictions, and `per_sample_metrics.json`. Compare initial-error localization,
 small-change recall, invalid/unsafe tool actions, accepted-candidate IoU/F1,
