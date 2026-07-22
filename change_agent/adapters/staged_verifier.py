@@ -29,7 +29,7 @@ from ..verifier_protocol import (
 class StagedQwenVerifier:
     """Select proposals, inspect local evidence, and resolve geometry in code."""
 
-    SCHEMA_VERSION = "staged_verifier_runtime_transition_v5"
+    SCHEMA_VERSION = "staged_verifier_action_scoped_transition_v6"
 
     def __init__(
         self,
@@ -365,6 +365,23 @@ class StagedQwenVerifier:
         )
         selected = self._select_diagnosis(diagnoses)
         plan = self._plan(state, records, selected)
+        completion_passed, completion_reason = self._state_completion_gate(
+            state, records, selected_records, judgments, diagnoses
+        )
+        if plan is not None and plan.action == "finish" and not completion_passed:
+            missing = next(
+                (
+                    item
+                    for item in records
+                    if item.region_id
+                    not in {selected.region_id for selected in selected_records}
+                ),
+                records[0],
+            )
+            selected = Diagnosis(
+                missing.region_id, "uncertain_region", None, 0.0
+            )
+            plan = None
         decision = self._initial_decision(
             state,
             {
@@ -378,6 +395,15 @@ class StagedQwenVerifier:
         )
         if decision.comparison != "initial":
             raise StageProtocolError("initial decision must use comparison=initial")
+        if not completion_passed and plan is None:
+            decision = Decision(
+                decision.comparison,
+                decision.quality_score,
+                decision.progress_score,
+                decision.accept,
+                decision.stop,
+                f"{decision.feedback}; completion gate: {completion_reason}",
+            )
         output = self._output(decision, plan, selected, previous_score, initial=True)
         self._accepted_records = records
         self._accepted_diagnoses = diagnoses
@@ -390,6 +416,8 @@ class StagedQwenVerifier:
             plan=plan,
             decision=decision,
             transition_assessment=None,
+            state_completion_gate_passed=completion_passed,
+            state_completion_gate_reason=completion_reason,
         )
 
     def _verify_candidate(
@@ -400,6 +428,7 @@ class StagedQwenVerifier:
         previous_score: float | None,
         previous_action: AgentAction | None,
     ) -> tuple[VerifierOutput, StageTrace]:
+        self._validate_attempted_action(previous_state, previous_action)
         judgments = self._inspect_candidate_evidence(
             state,
             records,
@@ -415,6 +444,8 @@ class StagedQwenVerifier:
         replan_selected_records: tuple[EvidenceRecord, ...] = ()
         replan_judgments: tuple[EvidenceJudgment, ...] = ()
         replan_diagnoses: tuple[Diagnosis, ...] = ()
+        completion_passed: bool | None = None
+        completion_reason: str | None = None
         output_diagnosis = self._select_diagnosis(self._accepted_diagnoses)
         if decision.accept and decision.comparison == "better":
             proposal_config = state.evidence.get("verifier_mask_facts", {}).get(
@@ -441,9 +472,39 @@ class StagedQwenVerifier:
                 )
                 remaining = self._select_diagnosis(replan_diagnoses)
                 plan = self._plan(state, replan_records, remaining)
+                completion_passed, completion_reason = self._state_completion_gate(
+                    state,
+                    replan_records,
+                    replan_selected_records,
+                    replan_judgments,
+                    replan_diagnoses,
+                )
+                if (
+                    plan is not None
+                    and plan.action == "finish"
+                    and not completion_passed
+                ):
+                    missing = next(
+                        (
+                            item
+                            for item in replan_records
+                            if item.region_id
+                            not in {
+                                selected.region_id
+                                for selected in replan_selected_records
+                            }
+                        ),
+                        replan_records[0],
+                    )
+                    remaining = Diagnosis(
+                        missing.region_id, "uncertain_region", None, 0.0
+                    )
+                    plan = None
                 output_diagnosis = remaining
             else:
                 plan = ActionPlan(None, "finish", None)
+                completion_passed = True
+                completion_reason = "no audit region remains"
             self._accepted_records = replan_records
             self._accepted_diagnoses = replan_diagnoses
         output = self._output(
@@ -458,6 +519,8 @@ class StagedQwenVerifier:
             plan=plan,
             decision=decision,
             transition_assessment=transition_assessment,
+            state_completion_gate_passed=completion_passed,
+            state_completion_gate_reason=completion_reason,
             replan_evidence=replan_records,
             replan_selected_region_ids=tuple(
                 item.region_id for item in replan_selected_records
@@ -561,6 +624,68 @@ class StagedQwenVerifier:
             )
             judgments.append(judgment)
         return tuple(judgments)
+
+    @staticmethod
+    def _validate_attempted_action(
+        previous_state: ChangeState,
+        previous_action: AgentAction | None,
+    ) -> None:
+        """Recheck point editability against the accepted pre-action state."""
+
+        if previous_action is None:
+            raise StageProtocolError("candidate transition requires an attempted action")
+        if previous_action.action not in {"positive_point", "negative_point"}:
+            return
+        if previous_action.coordinate is None:
+            raise StageProtocolError("point candidate requires an attempted coordinate")
+        x, y = previous_action.coordinate
+        width, height = previous_state.image_size
+        if not (0 <= x < width and 0 <= y < height):
+            raise StageProtocolError("attempted point is outside the accepted state")
+        mask = (
+            previous_state.t1_mask
+            if previous_action.target_view == "t1"
+            else previous_state.t2_mask
+        )
+        seed_white = bool(mask[y, x])
+        if previous_action.action == "negative_point" and not seed_white:
+            raise StageProtocolError(
+                "negative point requires a white seed in the accepted target mask"
+            )
+        if previous_action.action == "positive_point" and seed_white:
+            raise StageProtocolError(
+                "positive point requires a black seed in the accepted target mask"
+            )
+
+    def _state_completion_gate(
+        self,
+        state: ChangeState,
+        records: tuple[EvidenceRecord, ...],
+        selected_records: tuple[EvidenceRecord, ...],
+        judgments: tuple[EvidenceJudgment, ...],
+        diagnoses: tuple[Diagnosis, ...],
+    ) -> tuple[bool, str]:
+        """Authorize finish only after every Environment audit region was inspected."""
+
+        facts = state.evidence.get("verifier_mask_facts", {})
+        if int(facts.get("initial_audit_uncovered_pixels", 0)) > 0:
+            return False, "environment audit mask has uncovered pixels"
+        record_ids = {item.region_id for item in records}
+        selected_ids = {item.region_id for item in selected_records}
+        if selected_ids != record_ids:
+            return False, (
+                f"audited {len(selected_ids)} of {len(record_ids)} region(s); "
+                "unselected regions are not evidence of correctness"
+            )
+        judgment_ids = {item.region_id for item in judgments}
+        diagnosis_ids = {item.region_id for item in diagnoses}
+        if judgment_ids != record_ids or diagnosis_ids != record_ids:
+            return False, "not every selected region has a judgment and diagnosis"
+        if any(not self._judgment_is_sufficient(item) for item in judgments):
+            return False, "at least one region lacks sufficient visual evidence"
+        if any(item.error_type != "none" for item in diagnoses):
+            return False, "at least one diagnosed error remains"
+        return True, "all Environment audit regions are covered and diagnosed none"
 
     def _select_global_regions(
         self,

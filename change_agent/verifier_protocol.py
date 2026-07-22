@@ -285,6 +285,8 @@ class StageTrace:
     plan: ActionPlan | None = None
     decision: Decision | None = None
     transition_assessment: TransitionAssessment | None = None
+    state_completion_gate_passed: bool | None = None
+    state_completion_gate_reason: str | None = None
     replan_evidence: tuple[EvidenceRecord, ...] = ()
     replan_selected_region_ids: tuple[str, ...] = ()
     replan_judgments: tuple[EvidenceJudgment, ...] = ()
@@ -304,6 +306,8 @@ class StageTrace:
                 if self.transition_assessment
                 else None
             ),
+            "state_completion_gate_passed": self.state_completion_gate_passed,
+            "state_completion_gate_reason": self.state_completion_gate_reason,
             "replan_evidence": [item.to_dict() for item in self.replan_evidence],
             "replan_selected_region_ids": list(self.replan_selected_region_ids),
             "replan_judgments": [item.__dict__ for item in self.replan_judgments],

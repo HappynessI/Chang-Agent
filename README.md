@@ -47,8 +47,12 @@ An opt-in `--verifier qwen_staged` path now separates visual evidence,
 error/target diagnosis, executable action planning, and previous/candidate comparison.
 Its typed intermediate records reject cross-stage semantic and geometry contradictions.
 Candidate comparison uses only clear local RGB presence evidence plus runtime-owned
-action/delta polarity; low-confidence or contradictory evidence fails closed rather
-than reusing initial-state black/white diagnosis rules.
+action/delta polarity. Point-tool delta fragments are aggregated into one
+Environment-owned action-ROI record and shown as exact added/removed masks plus
+delta-highlighted RGB crops; low-confidence or contradictory evidence fails closed
+rather than reusing initial-state black/white diagnosis rules. A staged `finish`
+requires every Environment audit region to have sufficient evidence and a `none`
+diagnosis.
 The same staged interface supports local Transformers weights and BaiLian
 `qwen3-vl-plus`; `--agent-backend bailian` also moves Agent action generation to the
 hosted model while preserving the existing Environment and ActionParser trust boundary.
@@ -61,11 +65,9 @@ uses one global SoM selection image followed by local-only Proposal crops and
 Environment geometry. Hybrid uses the same selection image, then sends five independent
 full-frame state images plus the five local crops while keeping Environment geometry
 for execution and candidate checks.
-The current BaiLian production path uses Direct because the hosted model handles the
-complete visual context; Proposal and Hybrid remain comparison arms rather than
-requirements for hosted inference. Direct uses a target-class-locked binary
-change-detection rubric and runtime-owned aggregation instead of model-authored
-quality/progress scores.
+The current optimization path uses Proposal with Environment-owned geometry.
+Direct and Hybrid remain available for historical ablations but are not part of
+the next BaiLian experiment after CA_0722(5).
 See [`doc/proposal_ablation.md`](doc/proposal_ablation.md).
 
 The offline training schema deliberately has no `target_view` target. Earlier smoke

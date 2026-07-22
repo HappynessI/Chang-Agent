@@ -189,6 +189,53 @@ class VerifierRegionTest(unittest.TestCase):
         self.assertEqual(facts["proposal_config"]["max_regions_per_batch"], 3)
         self.assertEqual(facts["proposal_config"]["batch_count"], 2)
 
+    def test_point_action_scope_aggregates_fragmented_delta_with_full_coverage(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        previous_mask = np.zeros((32, 32), dtype=bool)
+        previous_mask[8:12, 8:12] = True
+        previous_mask[16:18, 16:18] = True
+        candidate_mask = np.zeros_like(previous_mask)
+        previous = ChangeState(
+            image,
+            image,
+            "building",
+            np.zeros_like(previous_mask),
+            previous_mask,
+            previous_mask,
+        )
+        candidate = ChangeState(
+            image,
+            image,
+            "building",
+            np.zeros_like(candidate_mask),
+            candidate_mask,
+            candidate_mask,
+            evidence={
+                "locality": {
+                    "composition_mode": "remove_simpleclick_delta_within_roi",
+                    "roi_xyxy": [4, 4, 22, 22],
+                },
+                "tool_input": {"coordinate": [9, 9]},
+            },
+        )
+
+        proposals = attach_verifier_regions(
+            candidate, previous, max_delta_regions=1
+        )
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0]["component_area"], 20)
+        facts = proposals[0]["transition_mask_facts"]
+        self.assertTrue(facts["action_scoped_delta"])
+        self.assertEqual(facts["delta_component_count"], 2)
+        self.assertEqual(proposals[0]["component_seed_pixels"], [9, 9])
+        self.assertEqual(
+            candidate.evidence["verifier_mask_facts"][
+                "candidate_delta_coverage_ratio"
+            ],
+            1.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

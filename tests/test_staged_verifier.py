@@ -310,6 +310,22 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertTrue(output.accept)
         self.assertTrue(output.stop)
 
+    def test_initial_finish_requires_every_environment_region_to_be_audited(self):
+        verifier = StagedQwenVerifier(
+            ScriptedBackend(error="none", target=None),
+            max_selected_regions=1,
+        )
+
+        output = verifier.verify(make_two_region_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertFalse(output.accept)
+        self.assertFalse(output.stop)
+        self.assertIsNone(output.suggested_action)
+        self.assertIn("audited 1 of 2 region", output.feedback)
+        trace = verifier.last_evidence["stage_trace"]
+        self.assertFalse(trace["state_completion_gate_passed"])
+
     def test_clear_appearance_change_can_still_be_false_positive(self):
         backend = ScriptedBackend(
             error="false_positive_change", target="t2", action="negative_point"
@@ -501,12 +517,54 @@ class StagedVerifierTest(unittest.TestCase):
         transition = verifier.last_evidence["stage_trace"]["transition_assessment"]
         self.assertFalse(transition["evidence_sufficient"])
 
+    def test_candidate_negative_point_rechecks_accepted_target_seed(self):
+        image = np.zeros((16, 16, 3), dtype=np.uint8)
+        target_mask = np.zeros((16, 16), dtype=bool)
+        previous_change = np.zeros_like(target_mask)
+        previous_change[4:9, 4:9] = True
+        candidate_change = np.zeros_like(target_mask)
+        previous = ChangeState(
+            image,
+            image,
+            "building",
+            target_mask,
+            target_mask,
+            previous_change,
+        )
+        candidate = ChangeState(
+            image,
+            image,
+            "building",
+            target_mask,
+            target_mask,
+            candidate_change,
+        )
+        attach_verifier_regions(
+            candidate, previous, max_regions=6, min_component_area=1
+        )
+        verifier = StagedQwenVerifier(ScriptedBackend())
+
+        output = verifier.verify(
+            candidate,
+            0.4,
+            AgentAction("t2", "negative_point", coordinate=(4, 4)),
+            previous,
+        )
+
+        self.assertFalse(output.verifier_valid)
+        self.assertIn(
+            "negative point requires a white seed",
+            verifier.last_evidence["validation_errors"][0],
+        )
+
     def test_candidate_evidence_prompt_has_no_mask_error_reclassification(self):
         prompt = _stage_prompt(
             "candidate_evidence", {"visual_context": "proposal"}
         )
 
-        self.assertIn("judge only real target-class presence", prompt)
+        self.assertIn("judge only the pixels marked white", prompt)
+        self.assertIn("highlighted yellow", prompt)
+        self.assertIn("Ignore unedited objects", prompt)
         self.assertIn("Do not diagnose false_positive_change", prompt)
         self.assertIn("Runtime combines this observation", prompt)
         self.assertNotIn('"visual_confidence":0.0', prompt)

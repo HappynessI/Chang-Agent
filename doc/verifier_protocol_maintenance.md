@@ -36,9 +36,13 @@ The initial-state path is:
 5. `decision` emits only an initial quality assessment. Runtime derives final
    readiness from the independently diagnosed state and executable `finish` plan.
 
-The candidate path uses only `candidate_evidence` with marked delta regions,
-previous/candidate object masks, and previous/candidate change masks. Qwen labels
-physical target-class presence in T1/T2 RGB; it does not reclassify a removed
+The candidate path uses only `candidate_evidence` with an action-scoped delta
+record, previous/candidate object masks, and previous/candidate change masks.
+Point-tool fragments with the same polarity are aggregated inside the
+Environment-owned action scope, so all changed pixels are covered by one
+semantic decision rather than many one-pixel calls. Qwen receives exact
+added/removed masks and T1/T2 RGB crops with those delta pixels highlighted,
+then labels physical target-class presence under the highlighted pixels; it does not reclassify a removed
 black region as a current-state false positive/negative and does not author
 transition flags. Runtime combines the local RGB judgment with the attempted
 `positive_point|negative_point` and authoritative `delta_added|delta_removed`
@@ -47,8 +51,10 @@ polarity to derive intended improvement and introduced FP/FN harm. Evidence belo
 missing actions, box transitions, and unexpected polarity fail closed as
 `comparison=uncertain`. Runtime derives `better` and commit only from sufficient
 benefit without harm. After a
-commit, the verifier independently rebuilds current-state proposals, diagnoses
-remaining errors, and derives `stop` only from an executable `finish` plan. An
+commit, the verifier independently rebuilds current-state proposals and diagnoses
+remaining errors. Initial and post-commit `finish` additionally require complete
+Environment audit coverage: every proposal must be selected, have sufficient
+evidence, and be diagnosed `none`. An
 identical candidate is handled programmatically as `unchanged` without a model
 call.
 
@@ -134,8 +140,9 @@ judgment. Candidate deltas deliberately do not run `candidate_diagnosis`. Every 
 overview whose active proposal is marked yellow, followed by exact regional
 RGB/object-mask/change-mask crops. Hybrid includes T1/T2 object masks as marked
 full-frame panels; Proposal keeps the smaller marked RGB/change overview.
-Candidate calls additionally show previous accepted T1/T2 object-mask crops and
-the previous accepted change-mask crop. Candidate records serialize separate
+Candidate calls additionally show previous accepted T1/T2 object-mask crops,
+the previous accepted change-mask crop, exact added/removed delta-mask crops,
+and T1/T2 RGB crops with the delta highlighted in yellow. Candidate records serialize separate
 previous/candidate crop, delta-component, and seed occupancy facts.
 
 The visual judgment output template uses placeholders rather than a literal

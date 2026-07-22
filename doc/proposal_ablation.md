@@ -36,6 +36,13 @@ For the repaired visual-context contract, submit the three-arm smoke run with
 `outputs/`, pins all arms to the already-probed node, archives Slurm logs below each
 arm, and sends one completion notification per arm.
 
+CA_0722(5) retired Direct and Hybrid from the immediate optimization loop:
+Direct still accepted a harmful candidate, while Hybrid matched Proposal exactly
+after v5 failed closed. The next experiment is Proposal-only. Schema v6 aggregates
+the full point-action delta inside the authoritative ROI, shows exact delta masks
+and highlighted RGB, and requires complete region coverage before `finish`.
+Submit it with `tools/submit_ca0722_proposal_scoped_v6.sh`.
+
 Each child contains its own `logs/`, trajectories, feedback, masks,
 predictions, and `per_sample_metrics.json`. Compare initial-error localization,
 small-change recall, invalid/unsafe tool actions, accepted-candidate IoU/F1,

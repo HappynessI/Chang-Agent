@@ -211,11 +211,17 @@ class NormalizedCropBoxTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(len(images), 9)
+        self.assertEqual(len(images), 13)
         labels = [label for label, _ in images]
         self.assertIn("Exact previous accepted T1 object-mask crop", labels)
         self.assertIn("Exact previous accepted T2 object-mask crop", labels)
         self.assertIn("Exact previous accepted change-mask crop", labels)
+        self.assertIn("Exact candidate-added pixel crop", labels)
+        self.assertIn("Exact candidate-removed pixel crop", labels)
+        self.assertIn(
+            "Exact T2 RGB crop with candidate-delta pixels highlighted yellow",
+            labels,
+        )
 
     def test_direct_candidate_includes_delta_masks_and_exact_delta_crops(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)

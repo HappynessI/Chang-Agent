@@ -155,12 +155,14 @@ def build_candidate_delta_regions(
     min_component_area: int = 1,
     padding_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
-    """Build compact, polarity-preserving component panels for a candidate edit.
+    """Build compact, polarity-preserving panels for a candidate edit.
 
-    Connected components remain separate, so spatially distant or semantically mixed
-    edits cannot be collapsed into one label. ``max_regions`` is the downstream model
-    batch size, not a lossy global component cap: every delta component is returned and
-    exact coverage remains auditable.
+    Point-tool output is already clipped to one authoritative action ROI.  In that
+    case all same-polarity fragments are aggregated into one complete action-delta
+    record so the verifier judges the edit as a whole instead of making many calls
+    for one-pixel fragments.  Generic/offline callers without execution locality
+    retain component-separated records.  Exact delta coverage remains auditable in
+    both cases.
     """
 
     if max_regions < 1:
@@ -175,7 +177,8 @@ def build_candidate_delta_regions(
     candidate_added = np.logical_and(change, ~previous)
     candidate_removed = np.logical_and(previous, ~change)
     temporal_difference = np.logical_xor(state.t1_mask, state.t2_mask)
-    raw: list[tuple[str, np.ndarray]] = []
+    action_scope = _candidate_action_scope(state, change.shape)
+    raw: list[tuple[str, np.ndarray, bool, int]] = []
     for effect_kind, mask in (
         ("added", candidate_added),
         ("removed", candidate_removed),
@@ -183,14 +186,35 @@ def build_candidate_delta_regions(
         components = sorted(
             connected_components(mask), key=lambda item: int(item.sum()), reverse=True
         )
-        raw.extend((effect_kind, component) for component in components)
+        if action_scope is not None and components:
+            aggregate = np.logical_or.reduce(components)
+            raw.append((effect_kind, aggregate, True, len(components)))
+        else:
+            raw.extend(
+                (effect_kind, component, False, 1) for component in components
+            )
     raw.sort(key=lambda item: int(item[1].sum()), reverse=True)
 
     height, width = change.shape
     result: list[dict[str, Any]] = []
-    for index, (effect_kind, component) in enumerate(raw):
-        seed_x, seed_y = _distance_transform_seed(component)
+    for index, (effect_kind, component, action_scoped, component_count) in enumerate(raw):
+        action_coordinate = action_scope[1] if action_scope is not None else None
+        if (
+            action_coordinate is not None
+            and component[action_coordinate[1], action_coordinate[0]]
+        ):
+            seed_x, seed_y = action_coordinate
+        else:
+            seed_x, seed_y = _distance_transform_seed(component)
         crop_box = _padded_box(_mask_box(component), (height, width), padding_ratio)
+        if action_scope is not None:
+            roi = action_scope[0]
+            crop_box = (
+                min(crop_box[0], roi[0]),
+                min(crop_box[1], roi[1]),
+                max(crop_box[2], roi[2]),
+                max(crop_box[3], roi[3]),
+            )
         x1, y1, x2, y2 = crop_box
         crop = np.zeros_like(change)
         crop[y1 : y2 + 1, x1 : x2 + 1] = True
@@ -223,6 +247,8 @@ def build_candidate_delta_regions(
             "previous_seed_t2_white": bool(previous_state.t2_mask[seed_y, seed_x]),
             "candidate_seed_t1_white": bool(state.t1_mask[seed_y, seed_x]),
             "candidate_seed_t2_white": bool(state.t2_mask[seed_y, seed_x]),
+            "action_scoped_delta": action_scoped,
+            "delta_component_count": component_count,
         }
         result.append(
             {
@@ -265,6 +291,39 @@ def build_candidate_delta_regions(
             }
         )
     return result
+
+
+def _candidate_action_scope(
+    state: ChangeState, shape: tuple[int, int]
+) -> tuple[tuple[int, int, int, int], tuple[int, int] | None] | None:
+    """Return validated Environment-owned point/box locality for a candidate."""
+
+    locality = state.evidence.get("locality")
+    if not isinstance(locality, dict):
+        return None
+    mode = str(locality.get("composition_mode", ""))
+    if mode not in {
+        "merge_clicked_prediction_component",
+        "remove_simpleclick_delta_within_roi",
+        "replace_box_roi_only",
+    }:
+        return None
+    roi = locality.get("roi_xyxy")
+    if not isinstance(roi, (list, tuple)) or len(roi) != 4:
+        return None
+    height, width = shape
+    x1, y1, x2, y2 = (int(value) for value in roi)
+    if not (0 <= x1 <= x2 < width and 0 <= y1 <= y2 < height):
+        return None
+    coordinate: tuple[int, int] | None = None
+    tool_input = state.evidence.get("tool_input")
+    if isinstance(tool_input, dict):
+        raw_coordinate = tool_input.get("coordinate")
+        if isinstance(raw_coordinate, (list, tuple)) and len(raw_coordinate) == 2:
+            x, y = (int(value) for value in raw_coordinate)
+            if 0 <= x < width and 0 <= y < height:
+                coordinate = (x, y)
+    return (x1, y1, x2, y2), coordinate
 
 
 def build_verifier_regions(

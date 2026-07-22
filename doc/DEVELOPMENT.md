@@ -1,5 +1,34 @@
 # Development log
 
+## 2026-07-22 — Proposal action-scoped candidate evidence
+
+The completed CA_0722(5) run established a clean safety/utility split. Staged
+schema v5 prevented every harmful Proposal/Hybrid commit and restored Hybrid
+selected aggregate IoU from `0.63552202` to the common initial `0.69744116`,
+but it rejected every Proposal/Hybrid candidate. In particular, a Proposal
+negative-point candidate improved test85 from `0.30658070` to `0.33236925`
+without being committed. Direct still accepted a harmful positive point and
+fell to aggregate IoU `0.68976021`; Direct and Hybrid are therefore out of scope
+for the next experiment.
+
+Staged schema v6 treats one Environment-clipped tool edit as one evidence unit.
+When Executor locality metadata is present, all same-polarity delta fragments
+inside the authoritative action scope are aggregated without losing any delta
+pixels. Candidate regional calls now show exact added/removed masks plus T1/T2
+RGB crops with precisely those delta pixels highlighted; the prompt tells Qwen
+to ignore unedited objects elsewhere in the rectangle. Generic/offline
+candidate generation without action locality retains component-separated
+records.
+
+Runtime revalidates point editability against the accepted pre-action target
+mask before candidate inspection. Initial and post-commit `finish` plans now
+pass only when every Environment audit region was selected, received sufficient
+visual evidence, and was diagnosed `none`; unselected regions can no longer be
+silently converted into outer `accept=true, stop=true`.
+
+Slurm job `44459` passed all 70 focused staged-verifier, regional-backend,
+region-generation, Environment, Executor-locality, and runner-action tests.
+
 ## 2026-07-22 — runtime candidate evidence and local negative edits
 
 The CA_0722(4) audit separated state-cache stability from semantic candidate

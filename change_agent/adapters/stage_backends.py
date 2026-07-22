@@ -455,6 +455,13 @@ def _stage_images(
                     ]
                 )
                 if previous_state is not None:
+                    added = np.logical_and(
+                        state.change_mask, ~previous_state.change_mask
+                    )
+                    removed = np.logical_and(
+                        previous_state.change_mask, ~state.change_mask
+                    )
+                    delta = np.logical_or(added, removed)
                     images.extend(
                         [
                             (
@@ -468,6 +475,22 @@ def _stage_images(
                             (
                                 "Exact previous accepted change-mask crop",
                                 _mask_image(previous_state.change_mask).crop(crop_box),
+                            ),
+                            (
+                                "Exact candidate-added pixel crop",
+                                _mask_image(added).crop(crop_box),
+                            ),
+                            (
+                                "Exact candidate-removed pixel crop",
+                                _mask_image(removed).crop(crop_box),
+                            ),
+                            (
+                                "Exact T1 RGB crop with candidate-delta pixels highlighted yellow",
+                                _highlight_mask(state.t1_image, delta).crop(crop_box),
+                            ),
+                            (
+                                "Exact T2 RGB crop with candidate-delta pixels highlighted yellow",
+                                _highlight_mask(state.t2_image, delta).crop(crop_box),
                             ),
                         ]
                     )
@@ -676,11 +699,13 @@ def _stage_prompt(
         )
         if stage == "candidate_evidence":
             task = (
-                f"Read {evidence_scope} and judge only real target-class presence in the exact "
-                "candidate-delta region from RGB evidence. T1/T2 states describe the physical "
-                "scene, never white/black mask color. For target_class=building, building means "
-                "a real building is present, background means no building is present, and mixed "
-                "or uncertain must be used when the crop cannot support a clean presence label. "
+                f"Read {evidence_scope} and judge only the pixels marked white in the exact "
+                "candidate-added/removed mask crops and highlighted yellow on T1/T2 RGB. Ignore "
+                "unedited objects elsewhere in the rectangular crop. T1/T2 states describe the "
+                "physical scene under those delta pixels, never white/black mask color. For "
+                "target_class=building, building means those delta pixels cover a real building, "
+                "background means they cover no building, and mixed or uncertain must be used "
+                "only when the highlighted delta pixels themselves cannot support a clean label. "
                 "Do not diagnose false_positive_change or false_negative and do not claim that "
                 "removing pixels fixes a false negative. Runtime combines this observation with "
                 "the attempted action and delta polarity. "
@@ -926,6 +951,20 @@ def _as_image(value: Any) -> Image.Image:
 
 def _mask_image(mask: np.ndarray) -> Image.Image:
     return Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L")
+
+
+def _highlight_mask(image: np.ndarray, mask: np.ndarray) -> Image.Image:
+    """Overlay an authoritative binary delta in yellow without hiding RGB context."""
+
+    result = np.asarray(_as_image(image).convert("RGB"), dtype=np.uint8).copy()
+    active = np.asarray(mask, dtype=bool)
+    if active.shape != result.shape[:2]:
+        raise StageProtocolError("highlight mask must match RGB image dimensions")
+    if active.any():
+        yellow = np.array([255, 255, 0], dtype=np.float32)
+        blended = result[active].astype(np.float32) * 0.35 + yellow * 0.65
+        result[active] = np.clip(blended, 0, 255).astype(np.uint8)
+    return Image.fromarray(result, mode="RGB")
 
 
 def _normalized_crop_box(

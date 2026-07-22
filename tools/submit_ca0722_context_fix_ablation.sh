@@ -17,7 +17,7 @@ MEMORY="${MEMORY:-16G}"
 PARENT="${OUTPUT:-$ROOT/outputs/CA_0722(${RUN_INDEX})-bailian-context-fix-3arm}"
 SHARED_LOG_ROOT="${SHARED_LOG_ROOT:-/guisongxia01/pangchao/wangyihan/wyh/.slurm-logs/CA_0722_${RUN_INDEX}_marked_transition}"
 SAMPLES=(test_20_15 test_78_13 test_85_16)
-MODES=(direct proposal hybrid)
+read -r -a MODES <<< "${MODES:-direct proposal hybrid}"
 
 if [[ -z "$NODE" || ! "$NODE" =~ ^[A-Za-z0-9_.-]+$ ]]; then
   echo "NODE must be set to the node passed by tools/probe_ca0721_bailian_node.sh" >&2
@@ -31,6 +31,12 @@ if [[ ! "$RUN_INDEX" =~ ^[0-9]+$ ]]; then
   echo "RUN_INDEX must be a non-negative integer" >&2
   exit 2
 fi
+for mode in "${MODES[@]}"; do
+  if [[ "$mode" != "direct" && "$mode" != "proposal" && "$mode" != "hybrid" ]]; then
+    echo "unsupported proposal mode: $mode" >&2
+    exit 2
+  fi
+done
 if [[ -e "$PARENT" ]]; then
   echo "output parent already exists: $PARENT" >&2
   exit 2
@@ -62,10 +68,11 @@ printf '%s\n' \
   "- network_mode: \`$BAILIAN_NETWORK_MODE\`" \
   "- memory_per_arm: \`$MEMORY\`" \
   '- samples: `test_20_15 test_78_13 test_85_16`' \
-  '- arms: `direct`, `proposal`, `hybrid`' \
+  "- arms: `${MODES[*]}`" \
   '- regional evidence: `active-region-marked global overview plus exact local crops`' \
-  '- candidate evidence: `local physical T1/T2 RGB presence plus previous/candidate object/change masks`' \
-  '- transition policy: `runtime action x delta polarity x RGB evidence; low-confidence fail-closed`' \
+  '- candidate evidence: `action-scoped delta masks plus delta-highlighted T1/T2 RGB and previous/candidate masks`' \
+  '- transition policy: `v6 runtime action x scoped delta polarity x RGB evidence; low-confidence fail-closed`' \
+  '- finish policy: `all Environment audit regions require sufficient evidence and diagnosis=none`' \
   '- negative point: `SimpleClick-supported subtraction inside deterministic point ROI`' \
   '- GT policy: `loaded only after each arm rollout completes`' \
   > "$PARENT/experiment_manifest.md"
@@ -141,7 +148,10 @@ for mode in "${MODES[@]}"; do
   jobs["$mode"]=$(submit_arm "$mode")
 done
 
-printf 'parent=%s\nnode=%s\nnetwork_mode=%s\ndirect_job=%s\nproposal_job=%s\nhybrid_job=%s\n' \
-  "$PARENT" "$NODE" "$BAILIAN_NETWORK_MODE" \
-  "${jobs[direct]}" "${jobs[proposal]}" "${jobs[hybrid]}" \
-  | tee "$PARENT/submission.txt"
+{
+  printf 'parent=%s\nnode=%s\nnetwork_mode=%s\n' \
+    "$PARENT" "$NODE" "$BAILIAN_NETWORK_MODE"
+  for mode in "${MODES[@]}"; do
+    printf '%s_job=%s\n' "$mode" "${jobs[$mode]}"
+  done
+} | tee "$PARENT/submission.txt"
