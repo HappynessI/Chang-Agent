@@ -3,14 +3,28 @@ import unittest
 import numpy as np
 
 from change_agent.adapters.stage_backends import (
+    _delta_only_contour,
     _normalized_crop_box,
     _stage_images,
     _stage_prompt,
 )
 from change_agent.state import ChangeState
+from change_agent.verifier_protocol import AuditChecklist
 
 
 class NormalizedCropBoxTests(unittest.TestCase):
+    def test_delta_only_contour_preserves_delta_rgb_and_blacks_padding(self):
+        image = np.zeros((5, 5, 3), dtype=np.uint8)
+        image[2, 2] = (12, 34, 56)
+        mask = np.zeros((5, 5), dtype=bool)
+        mask[2, 2] = True
+
+        rendered = np.asarray(_delta_only_contour(image, mask))
+
+        self.assertEqual(tuple(rendered[2, 2]), (12, 34, 56))
+        self.assertEqual(tuple(rendered[0, 0]), (0, 0, 0))
+        self.assertEqual(tuple(rendered[1, 1]), (0, 255, 255))
+
     def test_tiny_region_is_expanded_for_bailian(self):
         crop = _normalized_crop_box((500, 500, 500, 500), (256, 256))
         self.assertEqual(crop, (128, 128, 139, 139))
@@ -211,7 +225,7 @@ class NormalizedCropBoxTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(len(images), 13)
+        self.assertEqual(len(images), 11)
         labels = [label for label, _ in images]
         self.assertIn("Exact previous accepted T1 object-mask crop", labels)
         self.assertIn("Exact previous accepted T2 object-mask crop", labels)
@@ -219,9 +233,11 @@ class NormalizedCropBoxTests(unittest.TestCase):
         self.assertIn("Exact candidate-added pixel crop", labels)
         self.assertIn("Exact candidate-removed pixel crop", labels)
         self.assertIn(
-            "Exact T2 RGB crop with candidate-delta pixels highlighted yellow",
+            "Exact candidate-delta-only T2 RGB crop; cyan contour marks delta",
             labels,
         )
+        self.assertNotIn("Exact T1 proposal crop", labels)
+        self.assertNotIn("Exact T2 proposal crop", labels)
 
     def test_direct_candidate_includes_delta_masks_and_exact_delta_crops(self):
         image = np.zeros((32, 32, 3), dtype=np.uint8)
@@ -242,7 +258,10 @@ class NormalizedCropBoxTests(unittest.TestCase):
         labels = [label for label, _ in images]
         self.assertIn("Candidate-added change pixels", labels)
         self.assertIn("Candidate-removed change pixels", labels)
-        self.assertIn("Exact candidate-delta T1 RGB crop", labels)
+        self.assertIn(
+            "Exact candidate-delta-only T1 RGB crop; cyan contour marks delta",
+            labels,
+        )
         self.assertIn("Exact candidate-added pixel crop", labels)
 
     def test_direct_replan_prompt_forbids_repeating_rejected_action(self):
@@ -266,6 +285,97 @@ class NormalizedCropBoxTests(unittest.TestCase):
         self.assertIn("Do not repeat the rejected action or geometry", prompt)
         self.assertIn("rejection_history", prompt)
         self.assertIn("comparison must be uncertain", prompt)
+
+    def test_atomic_prompt_keeps_target_semantics_and_grounded_checklist(self):
+        audit_prompt = _stage_prompt(
+            "audit",
+            {
+                "target_class": "building",
+                "region": {"region_id": "r7"},
+            },
+        )
+
+        self.assertNotIn("visual_confidence", audit_prompt)
+        self.assertNotIn("<CONFIDENCE_0_TO_1>", audit_prompt)
+        self.assertIn('"audit_checklist"', audit_prompt)
+        self.assertIn('"mask_assessment"', audit_prompt)
+        self.assertIn('"evidence":"short observable local evidence"', audit_prompt)
+        self.assertIn("trailers, RVs, mobile equipment", audit_prompt)
+        self.assertIn("persisted global screening hypothesis", audit_prompt)
+        self.assertIn("Never silently replace it", audit_prompt)
+
+    def test_atomic_stage_includes_exact_component_geometry(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        t2 = np.zeros((32, 32), dtype=bool)
+        t2[8:12, 8:12] = True
+        state = ChangeState(image, image, "building", np.zeros_like(t2), t2, t2)
+        region = {
+            "region_id": "r0",
+            "audit_kind": "present",
+            "component_seed_normalized_1000": [300, 300],
+            "box_normalized_1000": [200, 200, 450, 450],
+        }
+
+        images = _stage_images(
+            "audit",
+            state,
+            None,
+            {
+                "visual_context": "proposal",
+                "region": region,
+                "proposal_catalog": [region],
+            },
+        )
+
+        self.assertEqual(images[-1][0], "Exact audited component geometry crop")
+        self.assertTrue(np.asarray(images[-1][1]).any())
+
+    def test_audit_checklist_deterministically_derives_error_and_quality(self):
+        correct = AuditChecklist(
+            evidence_sufficient="pass",
+            target_class_only="pass",
+            white_pixels_supported="pass",
+            boundary_alignment="pass",
+            internal_holes_absent="pass",
+            changed_object_extent_complete="pass",
+            fragment_artifacts_absent="pass",
+        )
+        mixed = AuditChecklist(
+            evidence_sufficient="pass",
+            target_class_only="pass",
+            white_pixels_supported="fail",
+            boundary_alignment="fail",
+            internal_holes_absent="pass",
+            changed_object_extent_complete="fail",
+            fragment_artifacts_absent="pass",
+        )
+        missing = AuditChecklist(
+            evidence_sufficient="pass",
+            target_class_only="not_applicable",
+            white_pixels_supported="not_applicable",
+            boundary_alignment="not_applicable",
+            internal_holes_absent="pass",
+            changed_object_extent_complete="fail",
+            fragment_artifacts_absent="not_applicable",
+        )
+        uncertain = AuditChecklist(
+            evidence_sufficient="uncertain",
+            target_class_only="uncertain",
+            white_pixels_supported="uncertain",
+            boundary_alignment="uncertain",
+            internal_holes_absent="uncertain",
+            changed_object_extent_complete="uncertain",
+            fragment_artifacts_absent="uncertain",
+        )
+
+        self.assertEqual(correct.error_type, "none")
+        self.assertEqual(correct.quality_score, 1.0)
+        self.assertEqual(mixed.error_type, "mixed_error")
+        self.assertEqual(mixed.quality_score, 0.5)
+        self.assertEqual(missing.error_type, "false_negative")
+        self.assertEqual(missing.quality_score, 0.5)
+        self.assertEqual(uncertain.error_type, "uncertain_region")
+        self.assertEqual(uncertain.quality_score, 0.0)
 
 
 if __name__ == "__main__":

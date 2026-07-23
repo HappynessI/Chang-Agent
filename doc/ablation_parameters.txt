@@ -1,0 +1,78 @@
+Change-Agent 参数消融记录
+========================
+
+一、当前基线（CA_0723(5) 最佳配置）
+
+Verifier: Qwen3.7 非思考
+proposal_mode: proposal
+max_steps: 3
+sam3_resolution: 1008
+matching_mode: overlap_presence
+overlap_threshold: 0.25
+verifier_min_region_area: 4
+verifier_region_padding_ratio: 0.25
+verifier_max_selected_regions: 3
+verifier_retries: 2
+seed: 42
+
+二、优先消融参数
+
+1. 最大动作步数
+   --max-steps: 1 / 3 / 5
+   目的：观察性能是否受三步上限限制。
+
+2. SAM3 初始化分辨率
+   --sam3-resolution: 756 / 1008 / 1344
+   目的：观察小目标和边界目标的初始检出能力，重点关注 test_50_8。
+
+3. Verifier 区域上下文
+   --verifier-region-padding-ratio: 0.10 / 0.25 / 0.50
+   目的：研究局部上下文对跨时相语义判断的影响，重点关注 test_1_1。
+
+4. 跨时相实例匹配阈值
+   --overlap-threshold: 0.10 / 0.25 / 0.50
+   目的：研究匹配松紧对 FP 和 FN 的影响。
+
+5. 跨时相实例匹配方式
+   --matching-mode: overlap_presence / greedy_one_to_one
+   目的：比较存在性匹配与一对一匹配。
+
+6. 最小审计区域面积
+   --verifier-min-region-area: 1 / 4 / 16
+   目的：研究小区域召回与噪声之间的平衡。
+
+7. Verifier 最大选择区域数
+   --verifier-max-selected-regions: 1 / 3 / 5
+   目的：研究同时选择的错误区域数量对质量和调用成本的影响。
+
+8. Verifier 协议重试次数
+   --verifier-retries: 1 / 2 / 3
+   目的：研究重试对无效输出率和 API 成本的影响。
+
+三、第二优先级参数
+
+--t12-min-instance-area: 0 / 16 / 64
+--cd-min-instance-area: 0 / 16 / 64
+--max-selection-area-delta: 0.10 / 0.25 / 0.50
+--max-locality-outside-ratio: 0.05 / 0.10 / 0.20
+--max-target-mask-change-ratio: 0.10 / 0.25 / 0.50
+--max-component-count-delta: 1 / 4 / 8
+--verifier-max-new-tokens: 768 / 1536 / 2048
+--verifier-repetition-penalty: 1.00 / 1.05 / 1.10
+
+四、不建议用于 v11 消融的参数
+
+--verifier-min-visual-confidence：v11 已弃用。
+--verifier-accept-threshold：v11 原子 pairwise 路径未实际使用。
+--selection-epsilon：v11 使用 better/worse 离散比较时基本不生效。
+conservative_best vs verifier_best：当前单调接受链中通常选择相同结果。
+
+五、每组实验需要记录
+
+1. 每组自己的 Initial 和 Selected 指标：IoU、Precision、Recall、F1、TP、FP、FN。
+2. 每个样本的逐项指标，GT 为空的样本重点报告 FP。
+3. 动作数、接受数、拒绝数和有害动作接受率。
+4. Verifier invalid 数量、空 proposal 数量、耗时和 token。
+5. 每次只改变一个参数，其余配置、样本和 seed 保持一致。
+
+建议先用 5 个样本筛选参数，再在更大样本集上验证有效配置。

@@ -85,12 +85,33 @@ class BailianBackendTest(unittest.TestCase):
             body["response_format"], {"type": "json_object"}
         )
         self.assertEqual(body["model"], "qwen3-vl-plus")
+        self.assertIs(body["enable_thinking"], False)
+        self.assertNotIn("thinking_budget", body)
         self.assertEqual(
             opener.request.headers["Authorization"], "Bearer secret-test-key"
         )
         self.assertEqual(result["decision"]["comparison"], "initial")
         self.assertNotIn("secret-test-key", json.dumps(backend.last_call))
         self.assertEqual(backend.last_call["request_id"], "request-test")
+
+    def test_thinking_mode_uses_explicit_budget(self):
+        opener = FakeOpener()
+        backend = BailianQwen3VLStageBackend(
+            base_url="https://example.invalid/compatible-mode/v1",
+            enable_thinking=True,
+            thinking_budget=256,
+            opener=opener,
+        )
+        with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "secret-test-key"}):
+            backend.generate_stage("decision", make_state(), {"mode": "initial"})
+
+        body = json.loads(opener.request.data.decode("utf-8"))
+        self.assertIs(body["enable_thinking"], True)
+        self.assertEqual(body["thinking_budget"], 256)
+
+    def test_thinking_budget_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "thinking_budget must be positive"):
+            BailianQwen3VLStageBackend(thinking_budget=0)
 
     def test_missing_api_key_fails_before_network(self):
         backend = BailianQwen3VLStageBackend(

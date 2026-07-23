@@ -35,6 +35,38 @@ def make_two_region_state():
     return state
 
 
+def audit_checklist_for(error):
+    statuses = {
+        "evidence_sufficient": "pass",
+        "target_class_only": "pass",
+        "white_pixels_supported": "pass",
+        "boundary_alignment": "pass",
+        "internal_holes_absent": "pass",
+        "changed_object_extent_complete": "pass",
+        "fragment_artifacts_absent": "pass",
+    }
+    if error == "false_positive_change":
+        statuses["white_pixels_supported"] = "fail"
+    elif error == "false_negative":
+        statuses["changed_object_extent_complete"] = "fail"
+    elif error == "mixed_error":
+        statuses["white_pixels_supported"] = "fail"
+        statuses["changed_object_extent_complete"] = "fail"
+    elif error == "uncertain_region":
+        statuses = {key: "uncertain" for key in statuses}
+    return statuses
+
+
+def grounded_audit_checklist_for(error):
+    return {
+        name: {
+            "status": status,
+            "evidence": f"Observable evidence for {name}: {status}.",
+        }
+        for name, status in audit_checklist_for(error).items()
+    }
+
+
 class ScriptedBackend:
     def __init__(
         self,
@@ -44,7 +76,6 @@ class ScriptedBackend:
         error="none",
         target=None,
         action="negative_point",
-        visual_confidence=0.9,
         evidence_quality="clear",
     ):
         self.t1 = t1
@@ -52,14 +83,15 @@ class ScriptedBackend:
         self.error = error
         self.target = target
         self.action = action
-        self.visual_confidence = visual_confidence
         self.evidence_quality = evidence_quality
         self.calls = []
         self.previous_seen = []
+        self.payloads = []
 
     def generate_stage(self, stage, state, payload, previous_state=None):
         self.calls.append(stage)
         self.previous_seen.append(previous_state is not None)
+        self.payloads.append(payload)
         if stage == "select":
             return {
                 "selection": {
@@ -69,13 +101,43 @@ class ScriptedBackend:
             }
         region = payload.get("region", {})
         region_id = region.get("region_id")
+        if stage == "audit":
+            assessment = {
+                "none": "correct",
+                "false_positive_change": "false_positive",
+                "false_negative": "false_negative",
+                "mixed_error": "mixed",
+                "uncertain_region": "uncertain",
+            }[self.error]
+            return {
+                "region_id": region_id,
+                "visual_judgment": {
+                    "change_mask_state": region["change_mask_state"],
+                    "t1_state": self.t1,
+                    "t2_state": self.t2,
+                    "mask_assessment": assessment,
+                    "evidence_quality": self.evidence_quality,
+                    "evidence": "Paired RGB and exact component are observable.",
+                    "screening_resolution": (
+                        "refuted"
+                        if assessment == "correct"
+                        else "uncertain"
+                        if assessment == "uncertain"
+                        else "confirmed"
+                    ),
+                },
+                "diagnosis": {
+                    "audit_checklist": grounded_audit_checklist_for(self.error),
+                    "target_view": self.target,
+                    "summary": "Atomic audit preserves one coherent conclusion.",
+                },
+            }
         if stage in {"evidence", "candidate_evidence"}:
             return {
                 "region_id": region_id,
                 "visual_judgment": {
                     "t1_state": self.t1,
                     "t2_state": self.t2,
-                    "visual_confidence": self.visual_confidence,
                     "evidence_quality": self.evidence_quality,
                 },
             }
@@ -83,9 +145,8 @@ class ScriptedBackend:
             return {
                 "region_id": region_id,
                 "diagnosis": {
-                    "error_type": self.error,
+                    "audit_checklist": audit_checklist_for(self.error),
                     "target_view": self.target,
-                    "confidence": 0.9,
                 },
             }
         if stage == "plan":
@@ -100,7 +161,6 @@ class ScriptedBackend:
             }
         return {
             "decision": {
-                "quality_score": 0.91,
                 "feedback": "Structured staged decision.",
             }
         }
@@ -112,7 +172,7 @@ class RepairingBackend(ScriptedBackend):
         self.repair_errors = []
 
     def generate_stage(self, stage, state, payload, previous_state=None):
-        if stage == "evidence":
+        if stage == "audit":
             self.calls.append(stage)
             return {"region": payload["region"], "schema": payload["schema"]}
         return super().generate_stage(stage, state, payload, previous_state)
@@ -122,16 +182,9 @@ class RepairingBackend(ScriptedBackend):
     ):
         self.calls.append(f"repair:{stage}")
         self.repair_errors.append(validation_error)
-        region_id = payload["region"]["region_id"]
-        return {
-            "region_id": region_id,
-            "visual_judgment": {
-                "t1_state": "background",
-                "t2_state": "building",
-                "visual_confidence": 0.9,
-                "evidence_quality": "clear",
-            },
-        }
+        return ScriptedBackend.generate_stage(
+            self, stage, state, payload, previous_state
+        )
 
 
 class MissingDiagnosisConfidenceBackend(ScriptedBackend):
@@ -221,14 +274,22 @@ class StagedVerifierTest(unittest.TestCase):
 
         self.assertTrue(output.stop)
 
-    def test_stage_parser_selects_schema_match_instead_of_first_json(self):
+    def test_stage_parser_selects_atomic_schema_match_instead_of_first_json(self):
         correct = {
             "region_id": "r0",
             "visual_judgment": {
+                "change_mask_state": "white",
                 "t1_state": "background",
                 "t2_state": "building",
-                "visual_confidence": 0.9,
+                "mask_assessment": "correct",
                 "evidence_quality": "clear",
+                "evidence": "Exact white component covers a building appearance.",
+                "screening_resolution": "refuted",
+            },
+            "diagnosis": {
+                "audit_checklist": grounded_audit_checklist_for("none"),
+                "target_view": None,
+                "summary": "The exact predicted component is supported.",
             },
         }
         raw = (
@@ -237,17 +298,21 @@ class StagedVerifierTest(unittest.TestCase):
             + json.dumps(correct)
         )
 
-        self.assertEqual(_extract_stage_json(raw, "evidence"), correct)
+        self.assertEqual(_extract_stage_json(raw, "audit"), correct)
 
     def test_stage_parser_rejects_copied_environment_context(self):
         raw = json.dumps({"region": {"region_id": "r0"}, "schema": "input"})
         with self.assertRaisesRegex(StageProtocolError, "candidate_keys"):
-            _extract_stage_json(raw, "evidence")
+            _extract_stage_json(raw, "audit")
 
     def test_prompt_puts_output_contract_before_wrapped_environment(self):
         prompt = _stage_prompt(
-            "evidence",
-            {"region": {"region_id": "r7"}, "schema": "evidence_judgment_v1"},
+            "audit",
+            {
+                "target_class": "building",
+                "region": {"region_id": "r7"},
+                "schema": "atomic_grounded_region_audit_v11",
+            },
         )
 
         self.assertLess(prompt.index("OUTPUT CONTRACT"), prompt.index("<ENVIRONMENT_FACTS>"))
@@ -255,17 +320,95 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertIn('"region_id":"r7"', prompt)
         self.assertIn("Do not copy the Environment envelope", prompt)
 
-    def test_diagnosis_prompt_has_no_default_none_bias(self):
+    def test_atomic_prompt_has_no_default_none_bias_and_keeps_target_semantics(self):
         prompt = _stage_prompt(
-            "diagnosis",
-            {"region": {"region_id": "r7"}, "schema": "diagnosis_v1"},
+            "audit",
+            {
+                "target_class": "building",
+                "region": {"region_id": "r7"},
+                "schema": "atomic_grounded_region_audit_v11",
+            },
         )
 
         self.assertNotIn("normally correct and error_type is none", prompt)
-        self.assertIn("A proposal may contain both correct and incorrect pixels", prompt)
-        self.assertIn("Use mixed_error", prompt)
-        self.assertIn("Use none only when the whole audited region is supported", prompt)
-        self.assertIn("<ERROR_TYPE>", prompt)
+        self.assertIn("one atomic semantic audit", prompt)
+        self.assertIn("trailers, RVs, mobile equipment", prompt)
+        self.assertIn("observable evidence", prompt)
+        self.assertIn('"audit_checklist"', prompt)
+        self.assertIn('"mask_assessment"', prompt)
+        self.assertIn('"screening_resolution"', prompt)
+
+    def test_atomic_audit_receives_state_target_class(self):
+        backend = ScriptedBackend(error="none", target=None)
+        output = StagedQwenVerifier(backend).verify(make_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        audit_payload = next(
+            payload
+            for stage, payload in zip(backend.calls, backend.payloads)
+            if stage == "audit"
+        )
+        self.assertEqual(audit_payload["target_class"], "building")
+
+    def test_atomic_audit_fails_contradictory_region_closed(self):
+        class ContradictoryBackend(ScriptedBackend):
+            def generate_stage(self, stage, state, payload, previous_state=None):
+                response = super().generate_stage(
+                    stage, state, payload, previous_state
+                )
+                if stage == "audit":
+                    response["visual_judgment"]["mask_assessment"] = "correct"
+                    response["diagnosis"]["audit_checklist"] = (
+                        grounded_audit_checklist_for("false_positive_change")
+                    )
+                return response
+
+        verifier = StagedQwenVerifier(ContradictoryBackend(), max_retries=1)
+        output = verifier.verify(make_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertFalse(output.localization_valid)
+        self.assertIsNone(output.suggested_action)
+        self.assertIn(
+            "mask_assessment disagrees",
+            verifier.last_evidence["regional_validation_errors"][0]["error"],
+        )
+
+    def test_observed_high_evidence_quality_alias_normalizes_to_clear(self):
+        backend = ScriptedBackend(
+            error="false_positive_change",
+            target="t2",
+            evidence_quality="high",
+        )
+
+        output = StagedQwenVerifier(backend).verify(make_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(
+            output.suggested_action,
+            "negative_point",
+        )
+
+    def test_atomic_audit_fails_lost_screening_hypothesis_closed(self):
+        class LostHypothesisBackend(ScriptedBackend):
+            def generate_stage(self, stage, state, payload, previous_state=None):
+                response = super().generate_stage(
+                    stage, state, payload, previous_state
+                )
+                if stage == "audit":
+                    response["visual_judgment"]["screening_resolution"] = "confirmed"
+                return response
+
+        verifier = StagedQwenVerifier(LostHypothesisBackend(), max_retries=1)
+        output = verifier.verify(make_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertFalse(output.localization_valid)
+        self.assertIsNone(output.suggested_action)
+        self.assertIn(
+            "screening_resolution must explicitly preserve or refute",
+            verifier.last_evidence["regional_validation_errors"][0]["error"],
+        )
 
     def test_invalid_stage_output_is_repaired_before_verifier_aborts(self):
         backend = RepairingBackend()
@@ -275,18 +418,22 @@ class StagedVerifierTest(unittest.TestCase):
 
         self.assertTrue(output.verifier_valid)
         self.assertTrue(output.stop)
-        self.assertIn("repair:evidence", backend.calls)
+        self.assertIn("repair:audit", backend.calls)
         self.assertIn("must contain exactly", backend.repair_errors[0])
 
-    def test_missing_diagnosis_confidence_uses_conservative_default(self):
-        backend = MissingDiagnosisConfidenceBackend(error="none", target=None)
+    def test_atomic_diagnosis_persists_grounded_checklist_evidence(self):
+        backend = ScriptedBackend(error="none", target=None)
         verifier = StagedQwenVerifier(backend)
 
         output = verifier.verify(make_state(), None, None)
 
         self.assertTrue(output.verifier_valid)
         diagnosis = verifier.last_evidence["stage_trace"]["diagnoses"][0]
-        self.assertEqual(diagnosis["confidence"], 0.0)
+        self.assertNotIn("confidence", diagnosis)
+        self.assertEqual(diagnosis["error_type"], "none")
+        self.assertEqual(diagnosis["audit_checklist"]["evidence_sufficient"], "pass")
+        self.assertTrue(diagnosis["audit_evidence"]["evidence_sufficient"])
+        self.assertIn("coherent", diagnosis["summary"])
 
     def test_correct_appearance_change_can_finish_without_action_plan(self):
         backend = ScriptedBackend(error="none", target=None)
@@ -299,7 +446,7 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertTrue(output.stop)
         self.assertEqual(output.suggested_action, "finish")
         self.assertEqual(
-            backend.calls, ["select", "evidence", "diagnosis", "decision"]
+            backend.calls, ["select", "audit", "decision"]
         )
         self.assertEqual(
             verifier.last_evidence["stage_trace"]["evidence"][0]["change_mask_state"],
@@ -313,25 +460,61 @@ class StagedVerifierTest(unittest.TestCase):
 
         output = verifier.verify(make_state(), None, None)
 
-        self.assertEqual(output.quality_score, 0.0)
+        self.assertEqual(output.quality_score, 1.0)
         self.assertTrue(output.accept)
         self.assertTrue(output.stop)
 
-    def test_initial_finish_requires_every_environment_region_to_be_audited(self):
+    def test_initial_audits_every_environment_region_across_batches(self):
+        backend = ScriptedBackend(error="none", target=None)
         verifier = StagedQwenVerifier(
-            ScriptedBackend(error="none", target=None),
+            backend,
             max_selected_regions=1,
         )
 
         output = verifier.verify(make_two_region_state(), None, None)
 
         self.assertTrue(output.verifier_valid)
-        self.assertFalse(output.accept)
-        self.assertFalse(output.stop)
-        self.assertIsNone(output.suggested_action)
-        self.assertIn("audited 1 of 2 region", output.feedback)
+        self.assertTrue(output.accept)
+        self.assertTrue(output.stop)
+        self.assertEqual(output.suggested_action, "finish")
+        self.assertEqual(
+            backend.calls,
+            ["select", "select", "audit", "audit", "decision"],
+        )
         trace = verifier.last_evidence["stage_trace"]
-        self.assertFalse(trace["state_completion_gate_passed"])
+        self.assertTrue(trace["state_completion_gate_passed"])
+        self.assertEqual(set(trace["selected_region_ids"]), {"r0", "r1"})
+
+    def test_invalid_region_fails_closed_without_suppressing_later_action(self):
+        class OneAmbiguousRegionBackend(ScriptedBackend):
+            def generate_stage(self, stage, state, payload, previous_state=None):
+                response = super().generate_stage(
+                    stage, state, payload, previous_state
+                )
+                if stage == "audit" and payload["region"]["region_id"] == "r0":
+                    response["visual_judgment"]["mask_assessment"] = "mixed"
+                return response
+
+        backend = OneAmbiguousRegionBackend(
+            error="false_positive_change",
+            target="t2",
+        )
+        verifier = StagedQwenVerifier(
+            backend,
+            max_selected_regions=1,
+            max_retries=2,
+        )
+
+        output = verifier.verify(make_two_region_state(), None, None)
+
+        self.assertTrue(output.verifier_valid)
+        self.assertEqual(output.suggested_action, "negative_point")
+        self.assertEqual(output.error_type, "false_positive_change")
+        regional_errors = verifier.last_evidence["regional_validation_errors"]
+        self.assertEqual(regional_errors[0]["region_id"], "r0")
+        diagnoses = verifier.last_evidence["stage_trace"]["diagnoses"]
+        self.assertEqual(diagnoses[0]["error_type"], "uncertain_region")
+        self.assertEqual(diagnoses[1]["error_type"], "false_positive_change")
 
     def test_clear_appearance_change_can_still_be_false_positive(self):
         backend = ScriptedBackend(
@@ -394,15 +577,26 @@ class StagedVerifierTest(unittest.TestCase):
     def test_invalid_top_diagnosis_falls_back_to_executable_region(self):
         class MixedTargetBackend(SelectAllBackend):
             def generate_stage(self, stage, state, payload, previous_state=None):
-                if stage == "diagnosis":
+                if stage == "audit":
                     self.calls.append(stage)
                     region_id = payload["region"]["region_id"]
                     return {
                         "region_id": region_id,
+                        "visual_judgment": {
+                            "change_mask_state": payload["region"]["change_mask_state"],
+                            "t1_state": "background",
+                            "t2_state": "background",
+                            "mask_assessment": "false_positive",
+                            "evidence_quality": "clear",
+                            "evidence": "The white component has no building transition.",
+                            "screening_resolution": "confirmed",
+                        },
                         "diagnosis": {
-                            "error_type": "false_positive_change",
+                            "audit_checklist": grounded_audit_checklist_for(
+                                "false_positive_change"
+                            ),
                             "target_view": "t1" if region_id == "r0" else "t2",
-                            "confidence": 0.99 if region_id == "r0" else 0.8,
+                            "summary": "Remove this unsupported component.",
                         },
                     }
                 return super().generate_stage(stage, state, payload, previous_state)
@@ -457,25 +651,27 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertEqual(list(output.error_region[:2]), proposal_seed)
         self.assertNotIn("plan", backend.calls)
 
-    def test_global_selection_rejects_unknown_region_id(self):
+    def test_atomic_audit_fails_changed_region_id_closed(self):
         class UnknownRegionBackend(ScriptedBackend):
             def generate_stage(self, stage, state, payload, previous_state=None):
-                if stage == "select":
-                    self.calls.append(stage)
-                    return {
-                        "selection": {
-                            "region_ids": ["invented"],
-                            "reason": "invalid",
-                        }
-                    }
-                return super().generate_stage(stage, state, payload, previous_state)
+                response = super().generate_stage(
+                    stage, state, payload, previous_state
+                )
+                if stage == "audit":
+                    response["region_id"] = "invented"
+                return response
 
         verifier = StagedQwenVerifier(UnknownRegionBackend(), max_retries=1)
 
         output = verifier.verify(make_state(), None, None)
 
-        self.assertFalse(output.verifier_valid)
-        self.assertIn("unknown region ids", verifier.last_evidence["validation_errors"][0])
+        self.assertTrue(output.verifier_valid)
+        self.assertFalse(output.localization_valid)
+        self.assertIsNone(output.suggested_action)
+        self.assertIn(
+            "wrong region_id",
+            verifier.last_evidence["regional_validation_errors"][0]["error"],
+        )
 
     def test_candidate_comparison_receives_previous_state_and_accepts_better(self):
         candidate = make_state()
@@ -566,7 +762,7 @@ class StagedVerifierTest(unittest.TestCase):
         self.assertTrue(output.accept)
         self.assertTrue(output.stop)
 
-    def test_low_confidence_candidate_evidence_fails_closed(self):
+    def test_ambiguous_candidate_evidence_fails_closed(self):
         previous = make_state()
         empty = np.zeros_like(previous.change_mask)
         candidate = ChangeState(
@@ -578,9 +774,7 @@ class StagedVerifierTest(unittest.TestCase):
             empty,
         )
         attach_verifier_regions(candidate, previous, max_regions=6, min_component_area=1)
-        verifier = StagedQwenVerifier(
-            ScriptedBackend(visual_confidence=0.0), min_visual_confidence=0.6
-        )
+        verifier = StagedQwenVerifier(ScriptedBackend(evidence_quality="ambiguous"))
 
         output = verifier.verify(
             candidate,
@@ -636,12 +830,14 @@ class StagedVerifierTest(unittest.TestCase):
 
     def test_candidate_evidence_prompt_has_no_mask_error_reclassification(self):
         prompt = _stage_prompt(
-            "candidate_evidence", {"visual_context": "proposal"}
+            "candidate_evidence",
+            {"visual_context": "proposal", "target_class": "building"},
         )
 
         self.assertIn("judge only the pixels marked white", prompt)
-        self.assertIn("highlighted yellow", prompt)
-        self.assertIn("Ignore unedited objects", prompt)
+        self.assertIn("cyan contour", prompt)
+        self.assertIn("presentation padding", prompt)
+        self.assertIn("ignore unedited objects", prompt)
         self.assertIn("Do not diagnose false_positive_change", prompt)
         self.assertIn("Runtime combines this observation", prompt)
         self.assertNotIn('"visual_confidence":0.0', prompt)
@@ -649,7 +845,8 @@ class StagedVerifierTest(unittest.TestCase):
     def test_initial_prompt_leaves_final_readiness_to_runtime(self):
         prompt = _stage_prompt("decision", {"mode": "initial"})
 
-        self.assertIn('"quality_score"', prompt)
+        self.assertNotIn('"quality_score"', prompt)
+        self.assertIn("runtime derives quality", prompt)
         self.assertIn("runtime derives final readiness", prompt)
         self.assertNotIn('"stop":', prompt)
 

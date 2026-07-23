@@ -14,6 +14,7 @@ from typing import Any, Literal, Mapping, Protocol, Sequence
 from .state import ChangeState
 
 StageName = Literal[
+    "audit",
     "select",
     "evidence",
     "diagnosis",
@@ -34,6 +35,26 @@ ACTIONS = {"positive_point", "negative_point", "box", "finish"}
 COMPARISONS = {"initial", "better", "worse", "unchanged", "uncertain"}
 RGB_STATES = {"building", "background", "mixed", "uncertain"}
 AUDIT_KINDS = {"present", "missing", "delta_added", "delta_removed", "mixed"}
+AUDIT_STATUSES = {"pass", "fail", "not_applicable", "uncertain"}
+AUDIT_CHECKS = (
+    "evidence_sufficient",
+    "target_class_only",
+    "white_pixels_supported",
+    "boundary_alignment",
+    "internal_holes_absent",
+    "changed_object_extent_complete",
+    "fragment_artifacts_absent",
+)
+FALSE_POSITIVE_AUDIT_CHECKS = {
+    "target_class_only",
+    "white_pixels_supported",
+    "boundary_alignment",
+    "fragment_artifacts_absent",
+}
+FALSE_NEGATIVE_AUDIT_CHECKS = {
+    "internal_holes_absent",
+    "changed_object_extent_complete",
+}
 
 
 class StageProtocolError(ValueError):
@@ -170,8 +191,131 @@ class EvidenceJudgment:
     region_id: str
     t1_state: str
     t2_state: str
-    confidence: float
     evidence_quality: Literal["clear", "ambiguous", "insufficient"]
+    change_mask_state: str | None = None
+    mask_assessment: str | None = None
+    evidence: str = ""
+    screening_hypothesis: str | None = None
+    screening_resolution: str | None = None
+
+    @property
+    def confidence(self) -> float:
+        """Compatibility score derived by runtime, never authored by the model."""
+
+        return 1.0 if self.evidence_quality == "clear" else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "region_id": self.region_id,
+            "t1_state": self.t1_state,
+            "t2_state": self.t2_state,
+            "evidence_quality": self.evidence_quality,
+            "change_mask_state": self.change_mask_state,
+            "mask_assessment": self.mask_assessment,
+            "evidence": self.evidence,
+            "screening_hypothesis": self.screening_hypothesis,
+            "screening_resolution": self.screening_resolution,
+        }
+
+
+@dataclass(frozen=True)
+class AuditChecklist:
+    """Discrete local mask audit used to derive diagnosis and quality."""
+
+    evidence_sufficient: str
+    target_class_only: str
+    white_pixels_supported: str
+    boundary_alignment: str
+    internal_holes_absent: str
+    changed_object_extent_complete: str
+    fragment_artifacts_absent: str
+    evidence: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in AUDIT_CHECKS:
+            status = getattr(self, name)
+            if status not in AUDIT_STATUSES:
+                raise StageProtocolError(
+                    f"audit checklist {name} has unsupported status: {status!r}"
+                )
+        if self.evidence_sufficient == "not_applicable":
+            raise StageProtocolError(
+                "audit checklist evidence_sufficient cannot be not_applicable"
+            )
+        if self.evidence:
+            if set(self.evidence) != set(AUDIT_CHECKS):
+                raise StageProtocolError(
+                    "grounded audit evidence must cover every checklist item"
+                )
+            if any(not str(value).strip() for value in self.evidence.values()):
+                raise StageProtocolError(
+                    "grounded audit evidence must be non-empty for every checklist item"
+                )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "AuditChecklist":
+        if set(payload) != set(AUDIT_CHECKS):
+            raise StageProtocolError(
+                "audit checklist must contain exactly: "
+                + ", ".join(AUDIT_CHECKS)
+            )
+        statuses: dict[str, str] = {}
+        evidence: dict[str, str] = {}
+        grounded = any(isinstance(payload[name], Mapping) for name in AUDIT_CHECKS)
+        for name in AUDIT_CHECKS:
+            value = payload[name]
+            if grounded:
+                if not isinstance(value, Mapping) or set(value) != {"status", "evidence"}:
+                    raise StageProtocolError(
+                        f"grounded audit item {name} must contain status and evidence"
+                    )
+                statuses[name] = str(value["status"])
+                evidence[name] = str(value["evidence"])
+            else:
+                statuses[name] = str(value)
+        return cls(**statuses, evidence=evidence)
+
+    def to_dict(self) -> dict[str, str]:
+        return {name: getattr(self, name) for name in AUDIT_CHECKS}
+
+    def evidence_dict(self) -> dict[str, str]:
+        return {name: str(self.evidence.get(name, "")) for name in AUDIT_CHECKS}
+
+    @property
+    def quality_score(self) -> float:
+        """Return a reproducible pass ratio; abstention is scored as zero."""
+
+        if (
+            self.evidence_sufficient != "pass"
+            or "uncertain" in self.to_dict().values()
+        ):
+            return 0.0
+        scorable = [
+            status
+            for name, status in self.to_dict().items()
+            if name != "evidence_sufficient" and status != "not_applicable"
+        ]
+        if not scorable:
+            return 0.0
+        return sum(status == "pass" for status in scorable) / len(scorable)
+
+    @property
+    def error_type(self) -> str:
+        """Derive the coarse executor diagnosis from failed audit dimensions."""
+
+        values = self.to_dict()
+        if self.evidence_sufficient != "pass" or "uncertain" in values.values():
+            return "uncertain_region"
+        failed = {name for name, status in values.items() if status == "fail"}
+        false_positive = bool(failed & FALSE_POSITIVE_AUDIT_CHECKS)
+        false_negative = bool(failed & FALSE_NEGATIVE_AUDIT_CHECKS)
+        if false_positive and false_negative:
+            return "mixed_error"
+        if false_positive:
+            return "false_positive_change"
+        if false_negative:
+            return "false_negative"
+        return "none"
 
 
 @dataclass(frozen=True)
@@ -179,7 +323,8 @@ class Diagnosis:
     region_id: str
     error_type: str
     target_view: str | None
-    confidence: float
+    audit_checklist: AuditChecklist | None = None
+    summary: str = ""
 
     def __post_init__(self) -> None:
         if self.error_type not in ERROR_TYPES:
@@ -188,7 +333,33 @@ class Diagnosis:
             raise StageProtocolError("target_view must be t1, t2, or null")
         if self.error_type == "none" and self.target_view is not None:
             raise StageProtocolError("none diagnosis must not target a view")
-        _validate_confidence(self.confidence)
+        if (
+            self.audit_checklist is not None
+            and self.error_type != self.audit_checklist.error_type
+        ):
+            raise StageProtocolError(
+                "diagnosis error_type must equal the runtime-derived audit checklist result"
+            )
+
+    @property
+    def confidence(self) -> float:
+        """Compatibility score computed from the binary checklist."""
+
+        return self.audit_checklist.quality_score if self.audit_checklist else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "region_id": self.region_id,
+            "error_type": self.error_type,
+            "target_view": self.target_view,
+            "audit_checklist": (
+                self.audit_checklist.to_dict() if self.audit_checklist else None
+            ),
+            "audit_evidence": (
+                self.audit_checklist.evidence_dict() if self.audit_checklist else None
+            ),
+            "summary": self.summary,
+        }
 
 
 @dataclass(frozen=True)
@@ -297,8 +468,8 @@ class StageTrace:
             "mode": self.mode,
             "evidence": [item.to_dict() for item in self.evidence],
             "selected_region_ids": list(self.selected_region_ids),
-            "judgments": [item.__dict__ for item in self.judgments],
-            "diagnoses": [item.__dict__ for item in self.diagnoses],
+            "judgments": [item.to_dict() for item in self.judgments],
+            "diagnoses": [item.to_dict() for item in self.diagnoses],
             "plan": self.plan.__dict__ if self.plan else None,
             "decision": self.decision.__dict__ if self.decision else None,
             "transition_assessment": (
@@ -310,8 +481,8 @@ class StageTrace:
             "state_completion_gate_reason": self.state_completion_gate_reason,
             "replan_evidence": [item.to_dict() for item in self.replan_evidence],
             "replan_selected_region_ids": list(self.replan_selected_region_ids),
-            "replan_judgments": [item.__dict__ for item in self.replan_judgments],
-            "replan_diagnoses": [item.__dict__ for item in self.replan_diagnoses],
+            "replan_judgments": [item.to_dict() for item in self.replan_judgments],
+            "replan_diagnoses": [item.to_dict() for item in self.replan_diagnoses],
         }
 
 

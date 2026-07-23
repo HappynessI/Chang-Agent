@@ -144,14 +144,20 @@ class BailianQwen3VLStageBackend:
         timeout_seconds: float = 120.0,
         max_completion_tokens: int = 512,
         seed: int = 42,
+        enable_thinking: bool = False,
+        thinking_budget: int | None = None,
         opener: Any | None = None,
     ):
+        if thinking_budget is not None and thinking_budget <= 0:
+            raise ValueError("thinking_budget must be positive when provided")
         self.model = model
         self.base_url = (base_url or os.environ.get("DASHSCOPE_BASE_URL") or self.DEFAULT_BASE_URL).rstrip("/")
         self.api_key_env = api_key_env
         self.timeout_seconds = timeout_seconds
         self.max_completion_tokens = max_completion_tokens
         self.seed = seed
+        self.enable_thinking = enable_thinking
+        self.thinking_budget = thinking_budget
         self.opener = opener or urllib.request.urlopen
         self.last_call: dict[str, Any] = {}
         self.call_history: list[dict[str, Any]] = []
@@ -213,8 +219,11 @@ class BailianQwen3VLStageBackend:
             "response_format": {"type": "json_object"},
             "max_completion_tokens": self.max_completion_tokens,
             "seed": self.seed,
+            "enable_thinking": self.enable_thinking,
             "stream": False,
         }
+        if self.enable_thinking and self.thinking_budget is not None:
+            body["thinking_budget"] = self.thinking_budget
         request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -395,8 +404,14 @@ def _stage_images(
                 if crop_box is not None:
                     images.extend(
                         [
-                            ("Exact candidate-delta T1 RGB crop", _as_image(state.t1_image).crop(crop_box)),
-                            ("Exact candidate-delta T2 RGB crop", _as_image(state.t2_image).crop(crop_box)),
+                            (
+                                "Exact candidate-delta-only T1 RGB crop; cyan contour marks delta",
+                                _delta_only_contour(state.t1_image, np.logical_or(added, removed)).crop(crop_box),
+                            ),
+                            (
+                                "Exact candidate-delta-only T2 RGB crop; cyan contour marks delta",
+                                _delta_only_contour(state.t2_image, np.logical_or(added, removed)).crop(crop_box),
+                            ),
                             ("Exact previous accepted change-mask crop", _mask_image(previous_state.change_mask).crop(crop_box)),
                             ("Exact candidate change-mask crop", _mask_image(state.change_mask).crop(crop_box)),
                             ("Exact candidate-added pixel crop", _mask_image(added).crop(crop_box)),
@@ -414,7 +429,7 @@ def _stage_images(
                 _proposal_overview(state, previous_state, catalog),
             )
         ]
-    if stage in {"evidence", "candidate_evidence", "diagnosis"}:
+    if stage in {"audit", "evidence", "candidate_evidence", "diagnosis"}:
         visual_context = str(payload.get("visual_context", "hybrid"))
         if visual_context not in {"proposal", "hybrid"}:
             raise StageProtocolError(
@@ -445,15 +460,57 @@ def _stage_images(
             box = region.get("box_normalized_1000")
             if isinstance(box, (list, tuple)) and len(box) == 4:
                 crop_box = _normalized_crop_box(box, state.image_size)
-                images.extend(
-                    [
-                        ("Exact T1 proposal crop", _as_image(state.t1_image).crop(crop_box)),
-                        ("Exact T2 proposal crop", _as_image(state.t2_image).crop(crop_box)),
-                        ("Exact proposal T1 object-mask crop", _mask_image(state.t1_mask).crop(crop_box)),
-                        ("Exact proposal T2 object-mask crop", _mask_image(state.t2_mask).crop(crop_box)),
-                        ("Exact proposal change-mask crop", _mask_image(state.change_mask).crop(crop_box)),
-                    ]
-                )
+                if stage == "candidate_evidence" and previous_state is not None:
+                    added = np.logical_and(
+                        state.change_mask, ~previous_state.change_mask
+                    )
+                    removed = np.logical_and(
+                        previous_state.change_mask, ~state.change_mask
+                    )
+                    delta = np.logical_or(added, removed)
+                    images.extend(
+                        [
+                            (
+                                "Exact candidate-delta-only T1 RGB crop; cyan contour marks delta",
+                                _delta_only_contour(state.t1_image, delta).crop(crop_box),
+                            ),
+                            (
+                                "Exact candidate-delta-only T2 RGB crop; cyan contour marks delta",
+                                _delta_only_contour(state.t2_image, delta).crop(crop_box),
+                            ),
+                            (
+                                "Exact proposal T1 object-mask crop",
+                                _mask_image(state.t1_mask).crop(crop_box),
+                            ),
+                            (
+                                "Exact proposal T2 object-mask crop",
+                                _mask_image(state.t2_mask).crop(crop_box),
+                            ),
+                            (
+                                "Exact proposal change-mask crop",
+                                _mask_image(state.change_mask).crop(crop_box),
+                            ),
+                        ]
+                    )
+                else:
+                    images.extend(
+                        [
+                            ("Exact T1 proposal crop", _as_image(state.t1_image).crop(crop_box)),
+                            ("Exact T2 proposal crop", _as_image(state.t2_image).crop(crop_box)),
+                            ("Exact proposal T1 object-mask crop", _mask_image(state.t1_mask).crop(crop_box)),
+                            ("Exact proposal T2 object-mask crop", _mask_image(state.t2_mask).crop(crop_box)),
+                            ("Exact proposal change-mask crop", _mask_image(state.change_mask).crop(crop_box)),
+                        ]
+                    )
+                    if stage == "audit":
+                        images.append(
+                            (
+                                "Exact audited component geometry crop",
+                                _mask_image(
+                                    _audited_component_mask(state, region)
+                                ).crop(crop_box),
+                            )
+                        )
                 if previous_state is not None:
                     added = np.logical_and(
                         state.change_mask, ~previous_state.change_mask
@@ -483,14 +540,6 @@ def _stage_images(
                             (
                                 "Exact candidate-removed pixel crop",
                                 _mask_image(removed).crop(crop_box),
-                            ),
-                            (
-                                "Exact T1 RGB crop with candidate-delta pixels highlighted yellow",
-                                _highlight_mask(state.t1_image, delta).crop(crop_box),
-                            ),
-                            (
-                                "Exact T2 RGB crop with candidate-delta pixels highlighted yellow",
-                                _highlight_mask(state.t2_image, delta).crop(crop_box),
                             ),
                         ]
                     )
@@ -673,23 +722,90 @@ def _stage_prompt(
         if isinstance(region, Mapping) and region.get("region_id") is not None
         else "r0"
     )
+    target_class = str(payload.get("target_class", "")).strip()
     if stage == "select":
         max_selected = int(payload.get("max_selected_regions", 1))
+        target_label = target_class or "the requested target class"
         schema = (
             '{"selection":{"region_ids":["r0"],'
             '"reason":"short observable reason"}}'
         )
         task = (
             "Inspect the numbered global overview and choose the regions most likely to contain "
-            "a material target-class change-mask error. Return one or more supplied region IDs, "
+            f"a material {target_label} change-mask error. Return one or more supplied region IDs, "
             f"at most {max_selected}; never output coordinates. Selection only prioritizes local "
-            "inspection and does not assert that unselected regions are correct."
+            "inspection and does not assert that unselected regions are correct. State the "
+            "strongest observable suspected error because this exact reason will be persisted "
+            "into each selected region's atomic audit. For building change, roads, parking, "
+            "vehicles, trailers/mobile equipment, vegetation, bare ground, shadows, lighting, "
+            "and registration artifacts are non-target."
+        )
+    elif stage == "audit":
+        if not target_class:
+            raise StageProtocolError("audit payload must include target_class")
+        audit_item = (
+            '{"status":<AUDIT_STATUS>,'
+            '"evidence":"short observable local evidence"}'
+        )
+        schema = (
+            '{"region_id":"' + region_id + '","visual_judgment":{'
+            '"change_mask_state":<MASK_STATE>,"t1_state":<RGB_STATE>,'
+            '"t2_state":<RGB_STATE>,"mask_assessment":<MASK_ASSESSMENT>,'
+            '"evidence_quality":<EVIDENCE_QUALITY>,'
+            '"evidence":"strongest local support or contradiction after checking the whole component",'
+            '"screening_resolution":<SCREENING_RESOLUTION>},'
+            '"diagnosis":{"audit_checklist":{'
+            '"evidence_sufficient":' + audit_item + ','
+            '"target_class_only":' + audit_item + ','
+            '"white_pixels_supported":' + audit_item + ','
+            '"boundary_alignment":' + audit_item + ','
+            '"internal_holes_absent":' + audit_item + ','
+            '"changed_object_extent_complete":' + audit_item + ','
+            '"fragment_artifacts_absent":' + audit_item + '},'
+            '"target_view":<TARGET_VIEW_OR_NULL>,'
+            '"summary":"coherent local conclusion"}}'
+        )
+        task = (
+            f"Perform one atomic semantic audit for target_class={target_class}. The same "
+            "response must preserve the complete contract from authoritative mask polarity "
+            "through RGB states, semantic assessment, grounded checklist, and target view. "
+            f"The persisted global screening hypothesis is: {payload.get('screening_hypothesis')!s}. "
+            "You must explicitly resolve that hypothesis in screening_resolution: confirmed when "
+            "the component has a material error, refuted only when the entire component is correct, "
+            "or uncertain when local evidence cannot decide. Never silently replace it with a new "
+            "all-pass story. Inspect only the exact "
+            "audited component geometry while using unmodified local and full-frame RGB as "
+            "context. Copy change_mask_state exactly from Environment facts. For building "
+            "change detection, permanent roofed building structures are target objects; roads, "
+            "parking areas, vehicles, trailers, RVs, mobile equipment, vegetation, bare ground, "
+            "shadows, illumination, and registration differences are non-target context. "
+            "Predicted object masks are fallible aids, never ground truth. Classify T1/T2 RGB "
+            "states as building, background, mixed, or uncertain at the exact component pixels. "
+            "Set mask_assessment to exactly correct, false_positive, false_negative, mixed, or "
+            "uncertain: white plus a fully supported real target transition is correct; white "
+            "without a real target transition or with any unsupported white spill is false_positive, "
+            "even when other pixels in that component cover a real changed building; black that "
+            "misses a real target transition is false_negative; mixed is reserved for simultaneous "
+            "precision-side and recall-side failures in the same audit region; unresolved evidence "
+            "is uncertain. A visible object "
+            "appearing in T2 is not automatically a building or a correct change. Correct requires "
+            "every pixel of the exact connected component to be supported; one real changed building "
+            "does not justify attached bare ground, roads, vehicles, or boundary spill. Fill every "
+            "checklist item with both status and observable evidence. AUDIT_STATUS is pass, fail, "
+            "not_applicable, or uncertain; evidence_sufficient cannot be not_applicable. Runtime "
+            "derives error_type and rejects disagreement with mask_assessment. For a white false "
+            "positive, a precision-side check must fail. For a black false negative, a recall-side "
+            "check must fail. Mixed must contain both precision- and recall-side failures. Use "
+            "target_view null for correct or uncertain; otherwise name the predicted T1/T2 object "
+            "mask whose edit can correct this exact region. EVIDENCE_QUALITY is exactly clear, "
+            "ambiguous, or insufficient; do not use high/medium/low. Do not copy the evidence text "
+            "from the schema. Do not output coordinates, numeric confidence, accept, stop, or hidden "
+            "reasoning. Replace every placeholder with a JSON string."
         )
     elif stage in {"evidence", "candidate_evidence"}:
         schema = (
             f'{{"region_id":"{region_id}","visual_judgment":{{'
             '"t1_state":<RGB_STATE>,"t2_state":<RGB_STATE>,'
-            '"visual_confidence":<CONFIDENCE_0_TO_1>,'
             '"evidence_quality":<EVIDENCE_QUALITY>}}}'
         )
         evidence_scope = (
@@ -698,50 +814,87 @@ def _stage_prompt(
             else "the active-region marked RGB/change overview and exact local proposal crops"
         )
         if stage == "candidate_evidence":
+            if not target_class:
+                raise StageProtocolError(
+                    "candidate_evidence payload must include target_class"
+                )
             task = (
                 f"Read {evidence_scope} and judge only the pixels marked white in the exact "
-                "candidate-added/removed mask crops and highlighted yellow on T1/T2 RGB. Ignore "
-                "unedited objects elsewhere in the rectangular crop. T1/T2 states describe the "
+                "candidate-added/removed mask crops and the original-color pixels inside the "
+                "cyan contour in the delta-only T1/T2 RGB crops. Black outside that contour is "
+                "presentation padding, not scene evidence; ignore unedited objects elsewhere in "
+                "the rectangular crop. T1/T2 states describe the "
                 "physical scene under those delta pixels, never white/black mask color. For "
-                "target_class=building, building means those delta pixels cover a real building, "
+                f"target_class={target_class}; for building, permanent roofed structures are "
+                "targets while vehicles, trailers, RVs, mobile equipment, roads, parking areas, "
+                "vegetation, and bare ground are non-target. Building means those delta pixels cover a real building, "
                 "background means they cover no building, and mixed or uncertain must be used "
-                "only when the highlighted delta pixels themselves cannot support a clean label. "
+                "only when the contoured delta pixels themselves cannot support a clean label. "
                 "Do not diagnose false_positive_change or false_negative and do not claim that "
                 "removing pixels fixes a false negative. Runtime combines this observation with "
-                "the attempted action and delta polarity. "
+                "the attempted action, persisted initial diagnosis, and delta polarity. If new "
+                "candidate evidence conflicts with that diagnosis, use ambiguous or insufficient "
+                "instead of silently reversing the semantic conclusion. "
             )
         else:
             task = (
                 f"Read {evidence_scope} and classify T1/T2 physical target-class content from "
-                "RGB evidence. Do not copy the example or classify mask color. "
+                "RGB evidence. Do not copy the example or classify mask color. Actively audit "
+                "the fallible predicted mask: seeing a real target transition under part of a "
+                "white component does not prove that its full extent, boundary, or interior is "
+                "correct. "
             )
         task += (
             "Each state must be one of building, background, mixed, uncertain; evidence_quality "
-            "must be clear, ambiguous, or insufficient. visual_confidence must reflect this "
-            "specific crop; use 0 only for no usable visual evidence."
+            "must be clear, ambiguous, or insufficient. Use ambiguous or insufficient instead "
+            "of inventing a numeric confidence."
         )
     elif stage == "diagnosis":
         schema = (
             '{"region_id":"' + region_id + '","diagnosis":{'
-            '"error_type":<ERROR_TYPE>,"target_view":<TARGET_VIEW_OR_NULL>,'
-            '"confidence":<CONFIDENCE_0_TO_1>}}'
+            '"audit_checklist":{'
+            '"evidence_sufficient":<AUDIT_STATUS>,'
+            '"target_class_only":<AUDIT_STATUS>,'
+            '"white_pixels_supported":<AUDIT_STATUS>,'
+            '"boundary_alignment":<AUDIT_STATUS>,'
+            '"internal_holes_absent":<AUDIT_STATUS>,'
+            '"changed_object_extent_complete":<AUDIT_STATUS>,'
+            '"fragment_artifacts_absent":<AUDIT_STATUS>},'
+            '"target_view":<TARGET_VIEW_OR_NULL>}}'
         )
         task = (
-            "Classify the current mask error from supplied RGB evidence, predicted masks, "
-            "proposal crop, and Environment facts. Do not infer correctness from the change-mask "
-            "color or from a temporal difference alone. A proposal may contain both correct and "
-            "incorrect pixels. Use false_positive_change when predicted white change lacks real "
-            "T1/T2 change, false_negative when a black region contains real change. Use "
-            "mixed_error when one proposal contains both supported and unsupported predicted "
-            "pixels or a partial omission, and uncertain_region when evidence is insufficient. "
-            "Use none only "
-            "when the whole audited region is supported by the RGB evidence and mask coverage. "
-            "Inspect boundaries and internal gaps, not only the dominant object. error_type must "
-            "be one of none, false_positive_change, false_negative, mixed_error, "
-            "uncertain_region. target_view must be JSON null when error_type is none; otherwise "
-            "use the JSON string t1 or t2 for the object mask that needs correction. confidence "
-            "means confidence in this diagnosis; for none, report confidence that the whole "
-            "region is correct. Replace every schema placeholder with a valid JSON value."
+            "Actively audit the current fallible mask from supplied RGB evidence, predicted "
+            "masks, proposal crop, and Environment facts. Do not infer correctness from the "
+            "change-mask color or from a temporal difference alone. A proposal may contain both "
+            "correct and incorrect pixels. Fill every checklist item independently. Every "
+            "AUDIT_STATUS must be exactly pass, fail, not_applicable, or uncertain; "
+            "evidence_sufficient cannot be not_applicable. target_class_only asks whether all "
+            "audited predicted change is confined to the requested semantic class. "
+            "white_pixels_supported asks whether every material predicted white pixel is "
+            "supported by a real target-class transition. boundary_alignment checks spill or "
+            "erosion at object edges. internal_holes_absent checks missing interiors. "
+            "changed_object_extent_complete checks missing target-change extent, including a "
+            "black missing-change proposal. fragment_artifacts_absent checks isolated noise and "
+            "detached fragments. Use not_applicable only when that mask property is genuinely "
+            "absent from the audited proposal. If evidence cannot resolve an item, use uncertain, "
+            "not pass. Seeing a changed building under any portion of a white component is a hard "
+            "negative: it does not prove the component boundary, exterior pixels, holes, or full "
+            "extent are correct. Runtime, not the model, deterministically derives error_type and "
+            "quality from these statuses. Use target_view null when no correction is indicated or "
+            "evidence is insufficient; otherwise use t1 or t2 for the object mask needing "
+            "correction.\n"
+            "TEXT-ONLY FEW-SHOT CONTRASTS (abstract; never copy blindly):\n"
+            "1) Correct white component: a target transition supports its entire white area, "
+            "boundary, and interior, with no missing extent or fragments. Mark every applicable "
+            "quality item pass; runtime derives none.\n"
+            "2) Boundary-spill mixed component: part of a white component covers a real target "
+            "transition, but pixels spill onto background and part of the changed target is "
+            "missing. Mark white_pixels_supported/boundary_alignment fail and "
+            "changed_object_extent_complete fail; runtime derives mixed_error.\n"
+            "3) Black missing-change component: RGB shows a real target transition in an "
+            "unpredicted black region. Mark changed_object_extent_complete fail, mark white-only "
+            "checks not_applicable where appropriate, and runtime derives false_negative. "
+            "Replace every schema placeholder with a valid JSON string."
         )
     elif stage == "direct":
         mode = str(payload.get("mode", "initial"))
@@ -822,15 +975,15 @@ def _stage_prompt(
             )
     else:
         schema = (
-            '{"decision":{"quality_score":0.0,'
-            '"feedback":"short complete-state assessment"}}'
+            '{"decision":{"feedback":"short complete-state assessment"}}'
         )
         task = (
-            "Score the complete initial state from 0 to 1 using the audited diagnoses. "
-            "Describe the most material remaining error, if any. Do not output comparison, "
-            "accept, stop, or next action; runtime derives final readiness from the independent "
-            "state diagnosis and executable plan. Candidate transition decisions never use this "
-            "stage; runtime derives them from candidate_evidence."
+            "Summarize the complete initial state using the audited diagnoses and describe the "
+            "most material remaining error, if any. Do not output a numeric quality or confidence, "
+            "comparison, accept, stop, or next action; runtime derives quality from the discrete "
+            "audit checklist; runtime derives final readiness from the independent state diagnosis and "
+            "executable plan. Candidate transition decisions never use this stage; runtime derives "
+            "them from candidate_evidence."
         )
     repair = ""
     if validation_error:
@@ -859,7 +1012,35 @@ def _stage_prompt(
     )
 
 
+def _audited_component_mask(
+    state: ChangeState, region: Mapping[str, Any]
+) -> np.ndarray:
+    """Rebuild the exact Environment-owned component from its canonical seed."""
+
+    kind = str(region.get("audit_kind", "mixed"))
+    change = np.asarray(state.change_mask, dtype=bool)
+    temporal = np.logical_xor(state.t1_mask, state.t2_mask)
+    source = (
+        change
+        if kind == "present"
+        else np.logical_and(temporal, ~change)
+        if kind == "missing"
+        else np.logical_or(change, temporal)
+    )
+    seed = region.get("component_seed_normalized_1000")
+    if not isinstance(seed, (list, tuple)) or len(seed) != 2:
+        raise StageProtocolError("audit region lacks a canonical component seed")
+    x, y = normalized_point_to_pixel(seed, state.image_size)
+    for component in connected_components(source):
+        if component[y, x]:
+            return component
+    raise StageProtocolError(
+        "audit seed does not belong to the authoritative source mask"
+    )
+
+
 _STAGE_EXPECTED_KEYS: dict[str, frozenset[str]] = {
+    "audit": frozenset({"region_id", "visual_judgment", "diagnosis"}),
     "select": frozenset({"selection"}),
     "evidence": frozenset({"region_id", "visual_judgment"}),
     "candidate_evidence": frozenset({"region_id", "visual_judgment"}),
@@ -951,6 +1132,39 @@ def _as_image(value: Any) -> Image.Image:
 
 def _mask_image(mask: np.ndarray) -> Image.Image:
     return Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L")
+
+
+def _delta_only_contour(
+    image: np.ndarray,
+    mask: np.ndarray,
+    *,
+    contour_color: tuple[int, int, int] = (0, 255, 255),
+) -> Image.Image:
+    """Keep original RGB only on the candidate delta and mark its outer contour.
+
+    Pixels outside the authoritative delta are black presentation padding, not
+    scene evidence.  The one-pixel cyan ring is drawn outside the delta so the
+    original RGB values at every delta pixel remain unchanged.
+    """
+
+    source = np.asarray(_as_image(image).convert("RGB"), dtype=np.uint8)
+    active = np.asarray(mask, dtype=bool)
+    if active.shape != source.shape[:2]:
+        raise StageProtocolError("delta-only mask must match RGB image dimensions")
+    result = np.zeros_like(source)
+    result[active] = source[active]
+    if active.any():
+        padded = np.pad(active, 1, constant_values=False)
+        dilated = np.zeros_like(active, dtype=bool)
+        for offset_y in range(3):
+            for offset_x in range(3):
+                dilated |= padded[
+                    offset_y : offset_y + active.shape[0],
+                    offset_x : offset_x + active.shape[1],
+                ]
+        contour = np.logical_and(dilated, ~active)
+        result[contour] = np.asarray(contour_color, dtype=np.uint8)
+    return Image.fromarray(result, mode="RGB")
 
 
 def _highlight_mask(image: np.ndarray, mask: np.ndarray) -> Image.Image:

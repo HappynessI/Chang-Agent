@@ -15,6 +15,7 @@ from ..state import AgentAction, ChangeState, VerifierOutput
 from ..verifier_regions import build_verifier_regions
 from ..verifier_protocol import (
     ActionPlan,
+    AuditChecklist,
     Decision,
     Diagnosis,
     EvidenceJudgment,
@@ -29,7 +30,7 @@ from ..verifier_protocol import (
 class StagedQwenVerifier:
     """Select proposals, inspect local evidence, and resolve geometry in code."""
 
-    SCHEMA_VERSION = "staged_verifier_deterministic_target_resolution_v8"
+    SCHEMA_VERSION = "staged_verifier_atomic_grounded_audit_v11"
 
     def __init__(
         self,
@@ -65,12 +66,16 @@ class StagedQwenVerifier:
         self._last_valid_output: VerifierOutput | None = None
         self._accepted_records: tuple[EvidenceRecord, ...] = ()
         self._accepted_diagnoses: tuple[Diagnosis, ...] = ()
+        self._planned_diagnosis: Diagnosis | None = None
+        self._regional_validation_errors: list[dict[str, str]] = []
 
     def reset(self) -> None:
         self.last_evidence = {}
         self._last_valid_output = None
         self._accepted_records = ()
         self._accepted_diagnoses = ()
+        self._planned_diagnosis = None
+        self._regional_validation_errors = []
         reset_audit = getattr(self.backend, "reset_audit", None)
         if callable(reset_audit):
             reset_audit()
@@ -116,15 +121,11 @@ class StagedQwenVerifier:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-        candidates = sorted(
-            (
-                diagnosis
-                for diagnosis in self._accepted_diagnoses
-                if diagnosis.error_type
-                in {"false_positive_change", "false_negative"}
-            ),
-            key=lambda item: item.confidence,
-            reverse=True,
+        candidates = tuple(
+            diagnosis
+            for diagnosis in self._accepted_diagnoses
+            if diagnosis.error_type
+            in {"false_positive_change", "false_negative"}
         )
         for diagnosis in candidates:
             plan = self._plan(accepted_state, self._accepted_records, diagnosis)
@@ -205,6 +206,7 @@ class StagedQwenVerifier:
         previous_state: ChangeState | None = None,
     ) -> VerifierOutput:
         audit_start = self._audit_length()
+        self._regional_validation_errors = []
         try:
             if previous_state is not None and self._states_identical(
                 state, previous_state
@@ -262,6 +264,9 @@ class StagedQwenVerifier:
                 "localization_valid": output.localization_valid,
                 "stage_trace": trace.to_dict(),
                 "validation_errors": [],
+                "regional_validation_errors": list(
+                    self._regional_validation_errors
+                ),
                 "backend_calls": self._backend_calls_since(audit_start),
             }
             if output.verifier_valid:
@@ -357,11 +362,8 @@ class StagedQwenVerifier:
         records: tuple[EvidenceRecord, ...],
         previous_score: float | None,
     ) -> tuple[VerifierOutput, StageTrace]:
-        selected_records = self._select_global_regions(state, records)
-        judgments, diagnoses = self._inspect_and_diagnose(
-            state,
-            selected_records,
-            proposal_catalog=records,
+        selected_records, judgments, diagnoses = self._audit_regions_in_batches(
+            state, records
         )
         selected, plan = self._select_action_plan(state, records, diagnoses)
         completion_passed, completion_reason = self._state_completion_gate(
@@ -378,7 +380,10 @@ class StagedQwenVerifier:
                 records[0],
             )
             selected = Diagnosis(
-                missing.region_id, "uncertain_region", None, 0.0
+                missing.region_id,
+                "uncertain_region",
+                None,
+                _uncertain_audit_checklist(),
             )
             plan = None
         decision = self._initial_decision(
@@ -386,11 +391,12 @@ class StagedQwenVerifier:
             {
                 "mode": "initial",
                 "evidence": [item.to_dict() for item in records],
-                "diagnoses": [item.__dict__ for item in diagnoses],
+                "diagnoses": [item.to_dict() for item in diagnoses],
                 "plan": _plan_dict(plan),
                 "previous_score": previous_score,
             },
             previous_state=None,
+            runtime_quality=_diagnosis_quality(diagnoses),
         )
         if decision.comparison != "initial":
             raise StageProtocolError("initial decision must use comparison=initial")
@@ -406,6 +412,7 @@ class StagedQwenVerifier:
         output = self._output(decision, plan, selected, previous_score, initial=True)
         self._accepted_records = records
         self._accepted_diagnoses = diagnoses
+        self._planned_diagnosis = selected
         return output, StageTrace(
             mode="initial",
             evidence=records,
@@ -433,6 +440,7 @@ class StagedQwenVerifier:
             records,
             previous_state=previous_state,
             proposal_catalog=records,
+            previous_action=previous_action,
         )
         transition_assessment = self._assess_candidate_transition(
             records, judgments, previous_action
@@ -461,13 +469,12 @@ class StagedQwenVerifier:
                 EvidenceRecord.from_proposal(item) for item in full_proposals
             )
             if replan_records:
-                replan_selected_records = self._select_global_regions(
-                    state, replan_records
-                )
-                replan_judgments, replan_diagnoses = self._inspect_and_diagnose(
-                    state,
+                (
                     replan_selected_records,
-                    proposal_catalog=replan_records,
+                    replan_judgments,
+                    replan_diagnoses,
+                ) = self._audit_regions_in_batches(
+                    state, replan_records
                 )
                 remaining, plan = self._select_action_plan(
                     state, replan_records, replan_diagnoses
@@ -497,7 +504,10 @@ class StagedQwenVerifier:
                         replan_records[0],
                     )
                     remaining = Diagnosis(
-                        missing.region_id, "uncertain_region", None, 0.0
+                        missing.region_id,
+                        "uncertain_region",
+                        None,
+                        _uncertain_audit_checklist(),
                     )
                     plan = None
                 output_diagnosis = remaining
@@ -507,6 +517,7 @@ class StagedQwenVerifier:
                 completion_reason = "no audit region remains"
             self._accepted_records = replan_records
             self._accepted_diagnoses = replan_diagnoses
+            self._planned_diagnosis = output_diagnosis
         output = self._output(
             decision, plan, output_diagnosis, previous_score, initial=False
         )
@@ -528,6 +539,162 @@ class StagedQwenVerifier:
             replan_judgments=replan_judgments,
             replan_diagnoses=replan_diagnoses,
         )
+
+    def _audit_regions_in_batches(
+        self,
+        state: ChangeState,
+        records: tuple[EvidenceRecord, ...],
+    ) -> tuple[
+        tuple[EvidenceRecord, ...],
+        tuple[EvidenceJudgment, ...],
+        tuple[Diagnosis, ...],
+    ]:
+        """Audit every region atomically without a lossy selection hand-off.
+
+        v10 split one semantic judgment across selection, RGB evidence, and
+        diagnosis calls, then discarded the selection rationale.  v11 uses one
+        grounded call per Environment region so mask polarity, RGB states,
+        semantic assessment, checklist evidence, and target view are validated
+        together.  The Environment ordering is deterministic and complete.
+        """
+
+        screened_records, screening_hypotheses = self._screen_region_hypotheses(
+            state, records
+        )
+        judgments: list[EvidenceJudgment] = []
+        diagnoses: list[Diagnosis] = []
+        for record in screened_records:
+            screening_hypothesis = screening_hypotheses[record.region_id]
+            try:
+                judgment, diagnosis = self._run_stage(
+                    "audit",
+                    state,
+                    {
+                        "target_class": state.query,
+                        "region": record.to_dict(),
+                        "proposal_catalog": [item.to_dict() for item in records],
+                        "schema": "atomic_grounded_region_audit_v11",
+                        "visual_context": self.visual_context,
+                        "screening_hypothesis": screening_hypothesis,
+                    },
+                    lambda response, current_record=record, current_hypothesis=screening_hypothesis: _parse_atomic_audit(
+                        response, current_record, current_hypothesis
+                    ),
+                    None,
+                )
+            except StageProtocolError as error:
+                error_text = str(error)
+                self._regional_validation_errors.append(
+                    {"region_id": record.region_id, "error": error_text}
+                )
+                judgment = EvidenceJudgment(
+                    record.region_id,
+                    "uncertain",
+                    "uncertain",
+                    "insufficient",
+                    record.change_mask_state,
+                    "uncertain",
+                    f"Atomic audit failed closed: {error_text}",
+                    screening_hypothesis,
+                    "uncertain",
+                )
+                diagnosis = Diagnosis(
+                    record.region_id,
+                    "uncertain_region",
+                    None,
+                    _uncertain_audit_checklist(),
+                    f"Global hypothesis retained but local audit failed closed: {error_text}",
+                )
+            self._validate_diagnosis(record, diagnosis)
+            judgments.append(judgment)
+            diagnoses.append(diagnosis)
+        return screened_records, tuple(judgments), tuple(diagnoses)
+
+    def _screen_region_hypotheses(
+        self,
+        state: ChangeState,
+        records: tuple[EvidenceRecord, ...],
+    ) -> tuple[tuple[EvidenceRecord, ...], dict[str, str]]:
+        """Persist every global screening rationale into its local atomic audit.
+
+        V10 discarded the useful selection reason before diagnosis. This pass still
+        covers every Environment region, but each selected batch carries its exact
+        global hypothesis into the subsequent local audit and requires an explicit
+        confirmation, refutation, or uncertainty result.
+        """
+
+        pending = list(records)
+        ordered: list[EvidenceRecord] = []
+        hypotheses: dict[str, str] = {}
+        by_id = {item.region_id: item for item in records}
+        while pending:
+            allowed_ids = {item.region_id for item in pending}
+
+            def parse_selection(
+                response: Mapping[str, Any],
+            ) -> tuple[tuple[str, ...], str]:
+                if set(response) != {"selection"} or not isinstance(
+                    response["selection"], Mapping
+                ):
+                    raise StageProtocolError(
+                        "screening response must contain only selection"
+                    )
+                body = response["selection"]
+                if set(body) != {"region_ids", "reason"}:
+                    raise StageProtocolError(
+                        "screening selection must contain exactly region_ids and reason"
+                    )
+                region_ids = body["region_ids"]
+                if not isinstance(region_ids, list) or not region_ids:
+                    raise StageProtocolError(
+                        "screening region_ids must be a non-empty list"
+                    )
+                if len(region_ids) > self.max_selected_regions:
+                    raise StageProtocolError(
+                        "screening exceeds max_selected_regions="
+                        f"{self.max_selected_regions}"
+                    )
+                if any(not isinstance(item, str) for item in region_ids):
+                    raise StageProtocolError(
+                        "screening region_ids must contain strings"
+                    )
+                if len(set(region_ids)) != len(region_ids):
+                    raise StageProtocolError(
+                        "screening region_ids must be unique"
+                    )
+                unknown = set(region_ids) - allowed_ids
+                if unknown:
+                    raise StageProtocolError(
+                        f"screening contains unknown region ids: {sorted(unknown)}"
+                    )
+                reason = str(body["reason"]).strip()
+                if not reason:
+                    raise StageProtocolError(
+                        "screening reason must be non-empty"
+                    )
+                return tuple(region_ids), reason
+
+            selected_ids, reason = self._run_stage(
+                "select",
+                state,
+                {
+                    "target_class": state.query,
+                    "proposal_catalog": [item.to_dict() for item in pending],
+                    "max_selected_regions": min(
+                        self.max_selected_regions, len(pending)
+                    ),
+                    "schema": "persistent_region_screening_v11",
+                },
+                parse_selection,
+            )
+            selected_set = set(selected_ids)
+            for region_id in selected_ids:
+                ordered.append(by_id[region_id])
+                hypotheses[region_id] = reason
+            pending = [
+                item for item in pending if item.region_id not in selected_set
+            ]
+        return tuple(ordered), hypotheses
 
     def _inspect_and_diagnose(
         self,
@@ -562,7 +729,7 @@ class StagedQwenVerifier:
                         record.region_id,
                         "uncertain_region",
                         None,
-                        judgment.confidence,
+                        _uncertain_audit_checklist(),
                     )
                 )
                 continue
@@ -584,7 +751,7 @@ class StagedQwenVerifier:
                     "proposal_catalog": [
                         item.to_dict() for item in proposal_catalog
                     ],
-                    "visual_judgment": judgment.__dict__,
+                    "visual_judgment": judgment.to_dict(),
                     "schema": "diagnosis_v1",
                     "visual_context": self.visual_context,
                 },
@@ -601,6 +768,7 @@ class StagedQwenVerifier:
         *,
         previous_state: ChangeState,
         proposal_catalog: tuple[EvidenceRecord, ...],
+        previous_action: AgentAction | None,
     ) -> tuple[EvidenceJudgment, ...]:
         """Inspect candidate deltas without reclassifying black/white state errors."""
 
@@ -610,12 +778,21 @@ class StagedQwenVerifier:
                 "candidate_evidence",
                 state,
                 {
+                    "target_class": state.query,
                     "region": record.to_dict(),
                     "proposal_catalog": [
                         item.to_dict() for item in proposal_catalog
                     ],
                     "schema": "candidate_transition_evidence_v1",
                     "visual_context": self.visual_context,
+                    "attempted_action": (
+                        previous_action.to_dict() if previous_action else None
+                    ),
+                    "persisted_initial_diagnosis": (
+                        self._planned_diagnosis.to_dict()
+                        if self._planned_diagnosis is not None
+                        else None
+                    ),
                 },
                 lambda response, region_id=record.region_id: _parse_judgment(
                     response, region_id
@@ -763,7 +940,6 @@ class StagedQwenVerifier:
     def _judgment_is_sufficient(self, judgment: EvidenceJudgment) -> bool:
         return bool(
             judgment.evidence_quality == "clear"
-            and judgment.confidence >= self.min_visual_confidence
             and judgment.t1_state in {"building", "background"}
             and judgment.t2_state in {"building", "background"}
         )
@@ -799,7 +975,7 @@ class StagedQwenVerifier:
             evidence_parts.append(
                 f"{record.region_id}:{record.audit_kind}:"
                 f"{judgment.t1_state}->{judgment.t2_state}:"
-                f"confidence={judgment.confidence:.3f}"
+                f"evidence_quality={judgment.evidence_quality}"
             )
             if record.audit_kind == "delta_removed":
                 if real_target_change:
@@ -849,7 +1025,7 @@ class StagedQwenVerifier:
         }
         return max(
             actionable,
-            key=lambda item: (safe_priority[item.error_type], item.confidence),
+            key=lambda item: safe_priority[item.error_type],
         )
 
     def _select_action_plan(
@@ -874,10 +1050,13 @@ class StagedQwenVerifier:
             "mixed_error": 1,
             "uncertain_region": 0,
         }
+        records_by_id = {item.region_id: item for item in records}
         ranked = sorted(
             (item for item in diagnoses if item.error_type != "none"),
-            key=lambda item: (safe_priority[item.error_type], item.confidence),
-            reverse=True,
+            key=lambda item: (
+                -safe_priority[item.error_type],
+                records_by_id[item.region_id].component_area,
+            ),
         )
         for diagnosis in ranked:
             plan = self._plan(state, records, diagnosis)
@@ -934,15 +1113,16 @@ class StagedQwenVerifier:
         payload: Mapping[str, Any],
         *,
         previous_state: ChangeState | None,
+        runtime_quality: float,
     ) -> Decision:
-        quality_score, feedback = self._run_stage(
+        feedback = self._run_stage(
             "decision",
             state,
             payload,
             _parse_initial_assessment,
             previous_state,
         )
-        return Decision("initial", quality_score, 0.0, False, False, feedback)
+        return Decision("initial", runtime_quality, 0.0, False, False, feedback)
 
     @staticmethod
     def _candidate_decision(
@@ -1033,26 +1213,163 @@ class StagedQwenVerifier:
         )
 
 
+def _normalize_evidence_quality(value: Any) -> str:
+    quality = str(value).strip().lower()
+    if quality == "high":
+        return "clear"
+    if quality not in {"clear", "ambiguous", "insufficient"}:
+        raise StageProtocolError("visual judgment contains an invalid evidence_quality")
+    return quality
+
+
 def _parse_judgment(payload: Mapping[str, Any], region_id: str) -> EvidenceJudgment:
     _exact_keys(payload, {"region_id", "visual_judgment"}, "evidence")
     if payload["region_id"] != region_id or not isinstance(payload["visual_judgment"], Mapping):
         raise StageProtocolError("evidence response has the wrong region_id or shape")
     body = payload["visual_judgment"]
-    _exact_keys(body, {"t1_state", "t2_state", "visual_confidence", "evidence_quality"}, "visual_judgment")
+    keys = set(body)
+    current_keys = {"t1_state", "t2_state", "evidence_quality"}
+    legacy_keys = current_keys | {"visual_confidence"}
+    if keys != current_keys and keys != legacy_keys:
+        raise StageProtocolError(
+            "visual_judgment must contain t1_state, t2_state, and evidence_quality"
+        )
     t1, t2 = body["t1_state"], body["t2_state"]
     if t1 not in {"building", "background", "mixed", "uncertain"} or t2 not in {"building", "background", "mixed", "uncertain"}:
         raise StageProtocolError("visual judgment contains an invalid RGB state")
-    quality = body["evidence_quality"]
-    if quality not in {"clear", "ambiguous", "insufficient"}:
-        raise StageProtocolError("visual judgment contains an invalid evidence_quality")
-    if isinstance(body["visual_confidence"], bool) or not isinstance(
-        body["visual_confidence"], (int, float)
-    ):
-        raise StageProtocolError("visual_confidence must be numeric")
-    confidence = float(body["visual_confidence"])
-    if not 0 <= confidence <= 1:
-        raise StageProtocolError("visual_confidence must be in [0,1]")
-    return EvidenceJudgment(region_id, t1, t2, confidence, quality)
+    quality = _normalize_evidence_quality(body["evidence_quality"])
+    return EvidenceJudgment(region_id, t1, t2, quality)
+
+
+def _parse_atomic_audit(
+    payload: Mapping[str, Any], record: EvidenceRecord, screening_hypothesis: str
+) -> tuple[EvidenceJudgment, Diagnosis]:
+    """Parse one v11 audit without allowing semantic state to disappear between calls."""
+
+    _exact_keys(
+        payload,
+        {"region_id", "visual_judgment", "diagnosis"},
+        "atomic audit",
+    )
+    if payload["region_id"] != record.region_id:
+        raise StageProtocolError("atomic audit response has the wrong region_id")
+    visual = payload["visual_judgment"]
+    if not isinstance(visual, Mapping):
+        raise StageProtocolError("atomic audit visual_judgment must be an object")
+    _exact_keys(
+        visual,
+        {
+            "change_mask_state",
+            "t1_state",
+            "t2_state",
+            "mask_assessment",
+            "evidence_quality",
+            "evidence",
+            "screening_resolution",
+        },
+        "atomic audit visual_judgment",
+    )
+    mask_state = str(visual["change_mask_state"])
+    if mask_state != record.change_mask_state:
+        raise StageProtocolError(
+            "atomic audit must copy authoritative change_mask_state"
+        )
+    t1_state = str(visual["t1_state"])
+    t2_state = str(visual["t2_state"])
+    if t1_state not in {"building", "background", "mixed", "uncertain"} or t2_state not in {
+        "building",
+        "background",
+        "mixed",
+        "uncertain",
+    }:
+        raise StageProtocolError("atomic audit contains an invalid RGB state")
+    assessment = str(visual["mask_assessment"])
+    assessment_to_error = {
+        "correct": "none",
+        "false_positive": "false_positive_change",
+        "false_negative": "false_negative",
+        "mixed": "mixed_error",
+        "uncertain": "uncertain_region",
+    }
+    if assessment not in assessment_to_error:
+        raise StageProtocolError("atomic audit contains an invalid mask_assessment")
+    quality = _normalize_evidence_quality(visual["evidence_quality"])
+    evidence = str(visual["evidence"]).strip()
+    if not evidence:
+        raise StageProtocolError("atomic audit must provide observable visual evidence")
+    screening_resolution = str(visual["screening_resolution"])
+    if screening_resolution not in {"confirmed", "refuted", "uncertain"}:
+        raise StageProtocolError(
+            "atomic audit contains an invalid screening_resolution"
+        )
+
+    body = payload["diagnosis"]
+    if not isinstance(body, Mapping):
+        raise StageProtocolError("atomic audit diagnosis must be an object")
+    _exact_keys(
+        body,
+        {"audit_checklist", "target_view", "summary"},
+        "atomic audit diagnosis",
+    )
+    checklist_payload = body["audit_checklist"]
+    if not isinstance(checklist_payload, Mapping):
+        raise StageProtocolError("atomic audit checklist must be an object")
+    checklist = AuditChecklist.from_mapping(checklist_payload)
+    if checklist.error_type != assessment_to_error[assessment]:
+        raise StageProtocolError(
+            "mask_assessment disagrees with runtime-derived audit checklist"
+        )
+    if quality != "clear" and assessment != "uncertain":
+        raise StageProtocolError(
+            "ambiguous or insufficient evidence must use uncertain assessment"
+        )
+    if quality != "clear" and checklist.evidence_sufficient != "uncertain":
+        raise StageProtocolError(
+            "ambiguous or insufficient evidence must mark evidence_sufficient uncertain"
+        )
+    expected_resolution = (
+        "refuted"
+        if assessment == "correct"
+        else "uncertain"
+        if assessment == "uncertain"
+        else "confirmed"
+    )
+    if screening_resolution != expected_resolution:
+        raise StageProtocolError(
+            "screening_resolution must explicitly preserve or refute the global "
+            "screening hypothesis consistently with mask_assessment"
+        )
+    if mask_state == "white" and assessment == "false_negative":
+        raise StageProtocolError("a white region cannot be a pure false negative")
+    if mask_state == "black" and assessment == "false_positive":
+        raise StageProtocolError("a black region cannot be a false positive")
+    target_view = body["target_view"]
+    summary = str(body["summary"]).strip()
+    if not summary:
+        raise StageProtocolError("atomic audit diagnosis summary must be non-empty")
+    if checklist.error_type in {"none", "uncertain_region"} and target_view is not None:
+        raise StageProtocolError(
+            "correct or uncertain atomic audit must not select a target view"
+        )
+    judgment = EvidenceJudgment(
+        record.region_id,
+        t1_state,
+        t2_state,
+        quality,
+        mask_state,
+        assessment,
+        evidence,
+        screening_hypothesis,
+        screening_resolution,
+    )
+    diagnosis = Diagnosis(
+        record.region_id,
+        checklist.error_type,
+        target_view,
+        checklist,
+        summary,
+    )
+    return judgment, diagnosis
 
 
 def _parse_diagnosis(payload: Mapping[str, Any], region_id: str) -> Diagnosis:
@@ -1060,24 +1377,68 @@ def _parse_diagnosis(payload: Mapping[str, Any], region_id: str) -> Diagnosis:
     if payload["region_id"] != region_id or not isinstance(payload["diagnosis"], Mapping):
         raise StageProtocolError("diagnosis response has the wrong region_id or shape")
     body = payload["diagnosis"]
-    _required_keys(
-        body,
-        required={"error_type", "target_view"},
-        optional={"confidence"},
-        name="diagnosis body",
-    )
-    confidence = body.get("confidence", 0.0)
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        raise StageProtocolError("diagnosis confidence must be numeric")
-    return Diagnosis(
-        region_id,
-        str(body["error_type"]),
-        body["target_view"],
-        float(confidence),
+    if set(body) == {"audit_checklist", "target_view"}:
+        checklist_payload = body["audit_checklist"]
+        if not isinstance(checklist_payload, Mapping):
+            raise StageProtocolError("diagnosis audit_checklist must be an object")
+        checklist = AuditChecklist.from_mapping(checklist_payload)
+        error_type = checklist.error_type
+    else:
+        # Backward-compatible parser for archived/local scripted backends.  The
+        # current prompt never requests model-authored error_type/confidence.
+        _required_keys(
+            body,
+            required={"error_type", "target_view"},
+            optional={"confidence"},
+            name="diagnosis body",
+        )
+        error_type = str(body["error_type"])
+        checklist = _legacy_audit_checklist(error_type)
+    target_view = body["target_view"]
+    if error_type in {"none", "uncertain_region"} and target_view is not None:
+        raise StageProtocolError(
+            "none/uncertain diagnosis must not select a target view"
+        )
+    return Diagnosis(region_id, error_type, target_view, checklist)
+
+
+def _uncertain_audit_checklist() -> AuditChecklist:
+    return AuditChecklist(
+        evidence_sufficient="uncertain",
+        target_class_only="uncertain",
+        white_pixels_supported="uncertain",
+        boundary_alignment="uncertain",
+        internal_holes_absent="uncertain",
+        changed_object_extent_complete="uncertain",
+        fragment_artifacts_absent="uncertain",
     )
 
 
-def _parse_initial_assessment(payload: Mapping[str, Any]) -> tuple[float, str]:
+def _legacy_audit_checklist(error_type: str) -> AuditChecklist:
+    statuses = {
+        "evidence_sufficient": "pass",
+        "target_class_only": "pass",
+        "white_pixels_supported": "pass",
+        "boundary_alignment": "pass",
+        "internal_holes_absent": "pass",
+        "changed_object_extent_complete": "pass",
+        "fragment_artifacts_absent": "pass",
+    }
+    if error_type == "false_positive_change":
+        statuses["white_pixels_supported"] = "fail"
+    elif error_type == "false_negative":
+        statuses["changed_object_extent_complete"] = "fail"
+    elif error_type == "mixed_error":
+        statuses["white_pixels_supported"] = "fail"
+        statuses["changed_object_extent_complete"] = "fail"
+    elif error_type == "uncertain_region":
+        return _uncertain_audit_checklist()
+    elif error_type != "none":
+        raise StageProtocolError(f"unsupported legacy error_type: {error_type!r}")
+    return AuditChecklist(**statuses)
+
+
+def _parse_initial_assessment(payload: Mapping[str, Any]) -> str:
     _exact_keys(
         payload,
         {"decision"},
@@ -1086,13 +1447,20 @@ def _parse_initial_assessment(payload: Mapping[str, Any]) -> tuple[float, str]:
     body = payload["decision"]
     if not isinstance(body, Mapping):
         raise StageProtocolError("decision must be an object")
-    _exact_keys(body, {"quality_score", "feedback"}, "initial assessment body")
-    quality = body["quality_score"]
-    if isinstance(quality, bool) or not isinstance(quality, (int, float)):
-        raise StageProtocolError("initial assessment quality_score must be numeric")
-    if not 0 <= float(quality) <= 1:
-        raise StageProtocolError("initial assessment quality_score must be in [0,1]")
-    return float(quality), str(body["feedback"])
+    if set(body) not in ({"feedback"}, {"quality_score", "feedback"}):
+        raise StageProtocolError(
+            "initial assessment must contain feedback and no model-authored decisions"
+        )
+    return str(body["feedback"])
+
+
+def _diagnosis_quality(diagnoses: tuple[Diagnosis, ...]) -> float:
+    scores = [
+        item.audit_checklist.quality_score
+        for item in diagnoses
+        if item.audit_checklist is not None
+    ]
+    return sum(scores) / len(scores) if scores else 0.0
 
 
 def _exact_keys(payload: Mapping[str, Any], expected: set[str], name: str) -> None:

@@ -43,16 +43,26 @@ presence/object scores, prompt/configuration, stdout/stderr, and worker report b
 running Qwen3-VL Agent actions. Qwen3-VL zero-shot verification is the default and the
 rule Verifier remains an explicit `--verifier rule` ablation.
 
-An opt-in `--verifier qwen_staged` path now separates visual evidence,
-error/target diagnosis, executable action planning, and previous/candidate comparison.
-Its typed intermediate records reject cross-stage semantic and geometry contradictions.
+An opt-in `--verifier qwen_staged` path uses a v11 atomic, target-aware regional
+audit. Each region call must jointly report the copied mask state, T1/T2 physical
+state, whole-component mask assessment, and a complete checklist with observable
+evidence for every item. Exhaustive global screening runs first, and its exact
+suspected-error reason is persisted into each selected region; the atomic audit must
+explicitly confirm, refute, or mark that hypothesis uncertain. Runtime rejects
+contradictions inside that record, so a model cannot identify over-segmentation in
+one stage and silently turn the same region into an unrelated all-pass diagnosis.
 Candidate comparison uses only clear local RGB presence evidence plus runtime-owned
 action/delta polarity. Point-tool delta fragments are aggregated into one
 Environment-owned action-ROI record and shown as exact added/removed masks plus
-delta-highlighted RGB crops; low-confidence or contradictory evidence fails closed
+original-color delta-only RGB crops with a cyan contour; low-confidence or contradictory evidence fails closed
 rather than reusing initial-state black/white diagnosis rules. A staged `finish`
 requires every Environment audit region to have sufficient evidence and a `none`
 diagnosis.
+The planner prefers a safe executable diagnosis with the smallest component first.
+After Executor produces a candidate, the attempted action, persisted initial
+diagnosis, and exact mask delta are returned to the Verifier. Only a runtime-derived
+`better` transition is committed; rejected candidates roll back, while accepted
+candidates trigger a complete fresh regional audit before the next action or finish.
 The same staged interface supports local Transformers weights and BaiLian
 `qwen3-vl-plus`; `--agent-backend bailian` also moves Agent action generation to the
 hosted model while preserving the existing Environment and ActionParser trust boundary.
@@ -61,14 +71,42 @@ API credentials are read only from `DASHSCOPE_API_KEY` (or the variable named by
 
 `--proposal-mode direct|proposal|hybrid` provides a controlled Proposal ablation.
 Direct sends full state to Qwen and accepts model-authored action geometry. Proposal
-uses one global SoM selection image followed by local-only Proposal crops and
-Environment geometry. Hybrid uses the same selection image, then sends five independent
-full-frame state images plus the five local crops while keeping Environment geometry
-for execution and candidate checks.
+deterministically audits every Environment region with a marked overview, local RGB
+and mask crops, and the exact audited component geometry. Hybrid adds full-frame mask
+state while keeping the same exhaustive audit and Environment-owned execution geometry.
+`--verifier-bailian-model` permits verifier model/thinking ablations while the hosted
+Agent remains fixed through `--bailian-model`.
 The current optimization path uses Proposal with Environment-owned geometry.
 Direct and Hybrid remain available for historical ablations but are not part of
 the next BaiLian experiment after CA_0722(5).
 See [`doc/proposal_ablation.md`](doc/proposal_ablation.md).
+
+The completed five-sample CA_0723(5) v11 run validates the full closed loop. The
+recommended Qwen3.7 non-thinking Verifier executed nine actions, accepted seven,
+rejected two, and improved aggregate IoU from `0.67629040` to `0.70009134`; test85
+improved from `0.30658070` to `0.33580247`. Every accepted candidate improved
+offline IoU and both rejected candidates were worse than the retained mask.
+
+### Visualize staged Verifier inputs
+
+To prepare presentation images from a completed staged Proposal run, use
+`tools/visualize_verifier_inputs.py`. The script makes no model/API call. It exports
+the numbered global proposal overview, each region's T1/T2 RGB crop and binary mask
+crops, candidate added/removed delta crops, contact sheets, and a JSON manifest:
+
+```bash
+/guisongxia01/pangchao/wangyihan/omniovcd-env/bin/python \
+  tools/visualize_verifier_inputs.py \
+  --run-dir outputs/CA_0722\(5\)-bailian-context-fix-3arm/proposal \
+  --samples test_20_15 \
+  --initial-only \
+  --output outputs/visualization
+```
+
+`step_000_initial/00_global_overview.png` is the selection-stage input. Each
+`step_000_initial/rN/` directory contains local evidence inputs for region `rN`;
+`contact_sheet.png` is a compact presentation view. Omit `--initial-only` to also
+reconstruct candidate-step delta inputs from saved tool artifacts.
 
 The offline training schema deliberately has no `target_view` target. Earlier smoke
 data alternated T1/T2 by sample index, which was not a real label and must not be used

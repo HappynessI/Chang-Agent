@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import random
 import resource
@@ -41,6 +42,8 @@ from change_agent.trajectory import default_run_metadata
 from change_agent.verifier import RuleBasedVerifier
 
 
+def _staged_protocol_version() -> str:
+    return os.environ.get("CHANGE_AGENT_STAGED_PROTOCOL_VERSION", "v11")
 SAMPLES = ("test_20_15.png", "test_78_13.png", "test_85_16.png")
 
 
@@ -119,13 +122,32 @@ def parse_args() -> argparse.Namespace:
         default="hybrid",
         help=(
             "Direct uses full-state Qwen diagnosis/action geometry without Proposals; "
-            "Proposal and Hybrid use numbered global region selection plus local crops; "
-            "Environment owns execution geometry."
+            "Proposal and Hybrid exhaustively audit Environment-numbered regions with "
+            "local/exact-component crops; Environment owns execution geometry."
         ),
     )
     parser.add_argument("--bailian-model", default="qwen3-vl-plus")
+    parser.add_argument(
+        "--verifier-bailian-model",
+        default=None,
+        help=(
+            "Optional hosted verifier model. When omitted, --bailian-model is shared; "
+            "setting it isolates verifier-model ablations from the hosted Agent."
+        ),
+    )
     parser.add_argument("--bailian-base-url", default=None)
     parser.add_argument("--bailian-api-key-env", default="DASHSCOPE_API_KEY")
+    parser.add_argument(
+        "--bailian-enable-thinking",
+        action="store_true",
+        help="Enable hosted hybrid-model reasoning before each structured stage response.",
+    )
+    parser.add_argument(
+        "--bailian-thinking-budget",
+        type=int,
+        default=None,
+        help="Optional positive reasoning-token budget; used only with --bailian-enable-thinking.",
+    )
     parser.add_argument("--verifier-max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-accept-threshold", type=float, default=0.82)
     parser.add_argument(
@@ -133,8 +155,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.6,
         help=(
-            "Fail-closed threshold for staged regional RGB evidence; candidate "
-            "transitions below it are uncertain and cannot be committed."
+            "Deprecated compatibility option. Staged v11 uses grounded discrete "
+            "evidence_quality and an atomic runtime audit checklist instead of "
+            "model-authored numeric confidence."
         ),
     )
     parser.add_argument("--verifier-retries", type=int, default=2)
@@ -162,6 +185,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    staged_protocol_version = _staged_protocol_version()
     start = time.monotonic()
     seed_runtime = _seed_runtime(args.seed)
     args.output.mkdir(parents=True, exist_ok=False)
@@ -190,26 +214,38 @@ def main() -> None:
             device_map=args.device_map,
             max_new_tokens=args.max_new_tokens,
         )
-    hosted_client = None
-    if args.agent_backend == "bailian" or (
+    agent_hosted_client = None
+    if args.agent_backend == "bailian":
+        agent_hosted_client = BailianQwen3VLStageBackend(
+            model=args.bailian_model,
+            base_url=args.bailian_base_url,
+            api_key_env=args.bailian_api_key_env,
+            max_completion_tokens=args.max_new_tokens,
+            seed=args.seed,
+            enable_thinking=False,
+        )
+    verifier_hosted_client = None
+    if (
         args.verifier == "qwen_staged"
         and args.staged_verifier_backend == "bailian"
     ):
-        hosted_client = BailianQwen3VLStageBackend(
-            model=args.bailian_model,
+        verifier_hosted_client = BailianQwen3VLStageBackend(
+            model=args.verifier_bailian_model or args.bailian_model,
             base_url=args.bailian_base_url,
             api_key_env=args.bailian_api_key_env,
             max_completion_tokens=args.verifier_max_new_tokens,
             seed=args.seed,
+            enable_thinking=args.bailian_enable_thinking,
+            thinking_budget=args.bailian_thinking_budget,
         )
     qwen = (
         local_qwen
         if args.agent_backend == "local"
-        else BailianGroundingModelQwen3VL(client=hosted_client)
+        else BailianGroundingModelQwen3VL(client=agent_hosted_client)
     )
     if qwen is None:
         raise RuntimeError("agent backend was not initialized")
-    verifier = _build_verifier(args, local_qwen, hosted_client)
+    verifier = _build_verifier(args, local_qwen, verifier_hosted_client)
     rollout_records: dict[str, dict[str, Any]] = {}
     sample_files = tuple(
         name if str(name).endswith(".png") else f"{name}.png"
@@ -296,14 +332,19 @@ def main() -> None:
                     else "verifier_region_id_programmatic_geometry"
                 ),
                 "verifier": args.verifier,
+                "verifier_model": (
+                    args.verifier_bailian_model or args.bailian_model
+                    if args.staged_verifier_backend == "bailian"
+                    else args.model_path
+                ),
                 "proposal_mode": args.proposal_mode,
                 "proposal_grounding_enabled": args.proposal_mode != "direct",
                 "verifier_decision_mode": (
                     "qwen_full_context_direct_binary_rubric"
                     if args.proposal_mode == "direct"
-                    else "qwen_staged_deterministic_target_resolution_v8"
+                    else f"qwen_staged_deterministic_target_resolution_{staged_protocol_version}"
                     if args.proposal_mode == "proposal"
-                    else "qwen_staged_deterministic_target_resolution_v8_full_context"
+                    else f"qwen_staged_deterministic_target_resolution_{staged_protocol_version}_full_context"
                     if args.verifier == "qwen_staged"
                     else "qwen_rich_region_diagnosis_and_global_synthesis"
                     if args.verifier == "qwen_zero_shot"
@@ -313,8 +354,13 @@ def main() -> None:
                 "verifier_max_selected_regions": args.verifier_max_selected_regions,
                 "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
                 "verifier_do_sample": False,
+                "bailian_enable_thinking": args.bailian_enable_thinking,
+                "bailian_thinking_budget": args.bailian_thinking_budget,
                 "verifier_repetition_penalty": args.verifier_repetition_penalty,
-                "verifier_min_visual_confidence": args.verifier_min_visual_confidence,
+                "verifier_min_visual_confidence": None,
+                "verifier_confidence_policy": (
+                    "atomic grounded audit checklist with per-item evidence; no model-authored numeric confidence"
+                ),
                 "verifier_candidate_evidence_modes": list(
                     Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
                 )
@@ -500,7 +546,6 @@ def _build_verifier(
             max_selected_regions=args.verifier_max_selected_regions,
             max_retries=args.verifier_retries,
             visual_context=args.proposal_mode,
-            min_visual_confidence=args.verifier_min_visual_confidence,
         ) if args.proposal_mode != "direct" else DirectQwenVerifier(
             stage_backend,
             accept_threshold=args.verifier_accept_threshold,
@@ -737,7 +782,11 @@ def _validate_inputs(args: argparse.Namespace) -> None:
     files = [Path(args.simpleclick_checkpoint), Path(args.sam3_checkpoint), Path(args.sam3_bpe)]
     if needs_local_qwen:
         files.append(Path(args.model_path))
-    for sample in SAMPLES:
+    sample_files = [
+        str(sample) if str(sample).endswith(".png") else f"{sample}.png"
+        for sample in args.samples
+    ]
+    for sample in sample_files:
         files.extend([
             args.input_root / "A" / sample,
             args.input_root / "B" / sample,
@@ -755,7 +804,10 @@ def _base_manifest(
     return {
         "status": "running",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "samples": list(SAMPLES),
+        "samples": [
+            str(sample) if str(sample).endswith(".png") else f"{sample}.png"
+            for sample in args.samples
+        ],
         "query": args.query,
         "input_root": str(args.input_root),
         "initialization": "fresh dual-view SAM3 text prompting for every sample; no cached masks",
@@ -775,8 +827,8 @@ def _base_manifest(
         "proposal_mode": args.proposal_mode,
         "proposal_semantics": {
             "direct": "full-state Qwen diagnosis and model-authored action geometry; no Proposal attachment",
-            "proposal": "SoM global selection, active-region-marked RGB/change overview plus local crops, runtime transition rubric, and programmatic geometry",
-            "hybrid": "SoM global selection, active-region-marked full mask state plus local crops, runtime transition rubric, and programmatic geometry",
+            "proposal": "atomic grounded region audit over marked RGB/change overview plus exact component/local crops, runtime candidate transition rubric, and programmatic geometry",
+            "hybrid": "atomic grounded region audit over marked full mask state plus exact component/local crops, runtime candidate transition rubric, and programmatic geometry",
         }[args.proposal_mode],
         "verifier_model": (
             "shared local Qwen3-VL weights"
@@ -784,7 +836,7 @@ def _base_manifest(
             else args.model_path
             if args.verifier == "qwen_staged"
             and args.staged_verifier_backend == "local"
-            else args.bailian_model
+            else args.verifier_bailian_model or args.bailian_model
             if args.verifier == "qwen_staged"
             else None
         ),
@@ -796,9 +848,9 @@ def _base_manifest(
             if args.verifier == "qwen_zero_shot"
             else "qwen_full_context_direct_binary_rubric"
             if args.verifier == "qwen_staged" and args.proposal_mode == "direct"
-            else "qwen_staged_deterministic_target_resolution_v8"
+            else f"qwen_staged_deterministic_target_resolution_{_staged_protocol_version()}"
             if args.verifier == "qwen_staged" and args.proposal_mode == "proposal"
-            else "qwen_staged_deterministic_target_resolution_v8_full_context"
+            else f"qwen_staged_deterministic_target_resolution_{_staged_protocol_version()}_full_context"
             if args.verifier == "qwen_staged" and args.proposal_mode == "hybrid"
             else "legacy_rule_score"
         ),
@@ -806,8 +858,13 @@ def _base_manifest(
         "verifier_max_selected_regions": args.verifier_max_selected_regions,
         "verifier_max_delta_regions_per_batch": args.verifier_max_delta_regions,
         "verifier_do_sample": False,
+        "bailian_enable_thinking": args.bailian_enable_thinking,
+        "bailian_thinking_budget": args.bailian_thinking_budget,
         "verifier_repetition_penalty": args.verifier_repetition_penalty,
-        "verifier_min_visual_confidence": args.verifier_min_visual_confidence,
+        "verifier_min_visual_confidence": None,
+        "verifier_confidence_policy": (
+            "atomic grounded audit checklist with per-item evidence; no model-authored numeric confidence"
+        ),
         "verifier_candidate_evidence_modes": list(
             Qwen3VLZeroShotVerifier.CANDIDATE_EVIDENCE_MODES
         )
@@ -847,6 +904,12 @@ def _base_manifest(
                 and args.staged_verifier_backend == "local"
             )
             else {"provider": "bailian", "model": args.bailian_model}
+        ),
+        "verifier_model_identity": (
+            {"provider": "bailian", "model": args.verifier_bailian_model or args.bailian_model}
+            if args.verifier == "qwen_staged"
+            and args.staged_verifier_backend == "bailian"
+            else None
         ),
         "git_commit": source["git_commit"],
         "git_dirty": source["git_dirty"],

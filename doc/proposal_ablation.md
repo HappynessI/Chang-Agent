@@ -71,6 +71,53 @@ it. The next Proposal experiment should preserve original RGB values in a
 delta-only view and use contours rather than a dominant fill highlight; do not
 lower the runtime evidence or harm gates to force acceptance.
 
+Schema v9 implements that evidence-only change. Candidate regional calls replace the
+large rectangular RGB crop and yellow fill with delta-only T1/T2 RGB crops: original
+colors are retained only on authoritative delta pixels, black is presentation padding,
+and a one-pixel cyan outer contour marks the delta without overwriting its colors.
+The candidate evidence threshold, polarity checks, and harm gates are unchanged.
+Submit it with `tools/submit_ca0722_proposal_delta_only_v9.sh`.
+
+CA_0722(9) completed successfully in Slurm job `44554` (2m45s, empty stderr),
+but selected aggregate IoU remained `0.69744116`. test85 again attempted two T2
+deletions; the second removed 349 false-positive pixels without losing any true
+positive and reached offline IoU `0.33236925`, but was rejected. With the v9
+delta-only input Qwen labeled it `T1 building -> T2 background` at confidence
+`0.95`; v8 had labeled the same useful delta in the opposite temporal direction,
+also at `0.95`. The unchanged rejection under opposite high-confidence labels
+indicates that the remaining bottleneck is fine-grained visual semantic capability,
+not action planning, delta coverage, or the runtime safety threshold. The next
+controlled experiment should switch the candidate-evidence vision model while
+keeping the v9 representation and all runtime gates fixed.
+
+The next controlled run uses the fixed BaiLian snapshot
+`qwen3.7-plus-2026-05-26` with thinking disabled, while retaining the v9 evidence
+representation, samples, thresholds, and safety gates. The launcher records the
+model explicitly in the parent manifest:
+`tools/submit_ca0722_proposal_qwen37_v9.sh`.
+
+CA_0722(10) completed successfully in Slurm job `44562` on `gpu46` (1m28s,
+empty stderr), but it did not reach candidate-delta verification. On test85,
+Qwen3.7's selection reason explicitly identified bare ground/dirt inside r0 as
+over-segmented non-change, then its evidence and diagnosis stages labeled the
+same region `T1 background -> T2 building` and `error_type=none`, both at
+confidence `0.95`. With no authorized action, every sample produced zero
+candidates and selected aggregate IoU remained `0.69744116`. test20 and test78
+also executed no action, so the conservative safety behavior did not regress.
+This full-model replacement is therefore inconclusive about Qwen3.7's v9
+candidate-delta semantics: the model failed earlier through a cross-stage
+selection/diagnosis contradiction. A future model comparison should either
+enforce consistency between those stages or hold the v9 initial planner fixed
+and replace only the candidate-evidence model.
+
+CA_0722(11) is the direct thinking-mode follow-up to CA_0722(10). It keeps the
+fixed Qwen3.7 snapshot, Proposal v9 evidence, prompts, samples, seed, thresholds,
+and safety gates, while changing hosted calls to `enable_thinking=true` with a
+fixed `thinking_budget=256`. Submit it with
+`tools/submit_ca0722_proposal_qwen37_thinking_v9.sh`. The run manifest records
+both values so the treatment cannot be confused with the preceding non-thinking
+run.
+
 Each child contains its own `logs/`, trajectories, feedback, masks,
 predictions, and `per_sample_metrics.json`. Compare initial-error localization,
 small-change recall, invalid/unsafe tool actions, accepted-candidate IoU/F1,
@@ -111,3 +158,43 @@ NODE=gpuXX BAILIAN_NETWORK_MODE=direct \
 
 The run writes to `outputs/CA_0721(9)-bailian-direct-rollback-replan/`, with
 Slurm stdout/stderr archived below its `logs/` directory.
+
+## CA_0723 atomic v11 five-sample verifier ablation
+
+V10 demonstrated that exhaustive region coverage alone is insufficient: a useful
+selection rationale can be lost across independent evidence and diagnosis calls.
+V11 uses one grounded target-aware audit per Environment region and carries the
+selected diagnosis and attempted action into candidate verification. Runtime keeps
+exclusive authority over geometry, transition polarity, acceptance, rollback, and
+post-commit re-audit.
+
+The corrected variant also preserves the global screening reason inside every
+atomic audit and requires an explicit confirmed/refuted/uncertain resolution. It
+normalizes the observed hosted alias `high` to categorical `clear`, but unknown
+qualities and every semantic contradiction still fail closed. The initial
+`CA_0723(3)` hosted attempt was invalidated before semantic audit and moved to the
+workspace diagnostics directory. A contradictory local audit now fails only that
+region closed and cannot authorize finish, while independent valid diagnoses remain
+actionable. Use run index 5 for the corrected experiment.
+
+`tools/submit_ca0723_atomic_v11_5sample.sh` holds Agent `qwen3-vl-plus`
+non-thinking fixed and submits three verifier treatments in parallel:
+
+- `qwen37-thinking`: `qwen3.7-plus-2026-05-26`, thinking budget 256;
+- `qwen37-no-thinking`: the same snapshot without thinking;
+- `qwen3vl-plus`: `qwen3-vl-plus` without thinking.
+
+All arms use `test_20_15`, `test_78_13`, `test_85_16`, `test_1_1`, and
+`test_50_8`, seed 42, Proposal mode, identical fresh SAM3 initialization, and at
+most three action steps. Compare diagnosis/action rate, candidate acceptance,
+post-commit re-audit behavior, and per-sample initial-to-selected metrics—not only
+aggregate IoU.
+
+CA_0723(5) completed on `gpu46` in jobs `44878`--`44880`. Qwen3.7 non-thinking
+was best, moving five-sample aggregate IoU/F1 from the common
+`0.67629040/0.80688931` to `0.70009134/0.82359262`. It executed nine actions,
+accepted seven, rejected two, and selected every accepted improvement correctly in
+offline evaluation. test85 reached IoU `0.33580247` after three accepted edits,
+compared with `0.30658070` initially. Qwen3.7 thinking reached `0.69462518`; Qwen3-VL-Plus
+reached `0.68465376` and misaccepted a harmful test20 edit. Use the non-thinking
+Qwen3.7 arm as the primary v11 result.

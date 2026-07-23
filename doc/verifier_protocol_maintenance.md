@@ -24,17 +24,55 @@ The protocol implementation is split across:
 - `change_agent/adapters/bailian_adapter.py`: hosted Agent action generation;
 - `tools/run_levir_change_agent.py`: CLI selection and run-manifest metadata.
 
+## Verifier-input visualization
+
+`tools/visualize_verifier_inputs.py` reconstructs the staged image payload from a
+completed run without loading a model or contacting BaiLian. It writes the global
+numbered proposal overview, per-region T1/T2 RGB crops, object/change-mask crops,
+candidate added/removed delta crops, contact sheets, and JSON manifests. It uses
+the run metadata for batch size and crop padding, and reconstructs saved point/box
+tool composition for candidate-step presentation. Example:
+
+```bash
+/guisongxia01/pangchao/wangyihan/omniovcd-env/bin/python \
+  tools/visualize_verifier_inputs.py \
+  --run-dir outputs/CA_0722\(5\)-bailian-context-fix-3arm/proposal \
+  --samples test_20_15 --initial-only \
+  --output outputs/visualization
+```
+
 ## Stage contract
 
-The initial-state path is:
+The v11 initial-state path is:
 
-1. Environment creates stable proposals, normalized geometry, mask occupancy,
-   and editable-seed facts.
-2. `evidence` classifies only T1/T2 visual state and evidence quality.
-3. `diagnosis` emits one supported error type and target view.
-4. `plan` selects an executable action using supplied geometry.
-5. `decision` emits only an initial quality assessment. Runtime derives final
-   readiness from the independently diagnosed state and executable `finish` plan.
+1. Environment creates stable proposals, normalized geometry, authoritative
+   white/black change-mask occupancy, and editable-seed facts.
+2. Runtime exhaustively screens pending proposals in bounded global batches. The
+   model cannot omit a difficult region: every selected batch is removed from the
+   pending set until coverage is complete, and each exact screening reason is
+   persisted with its regions.
+3. One `audit` call per region jointly emits the copied mask state, physical
+   T1/T2 target-class states, whole-component mask assessment, categorical
+   evidence quality, and the complete checklist. Every checklist status must
+   include an observable evidence string.
+4. The local audit must resolve its persisted global hypothesis as
+   `confirmed|refuted|uncertain`. Runtime validates this resolution together with
+   copied-state, assessment/checklist, target-view, evidence-quality, and
+   proposal-polarity consistency. It cannot silently discard an earlier
+   over-segmentation or missing-extent observation.
+5. `plan` selects a safe executable diagnosis with Environment-owned geometry,
+   preferring the smallest component within the same error-priority class.
+6. Executor builds a candidate. The attempted action, persisted initial
+   diagnosis, and authoritative added/removed delta are returned through
+   `candidate_evidence`; runtime derives benefit, harm, and comparison.
+7. Only `comparison=better, accept=true` commits. A rejected candidate rolls
+   back and replans; an accepted candidate rebuilds the catalog and performs a
+   complete fresh v11 audit before another action or `finish`.
+
+An accepted candidate rebuilds the proposal catalog and starts a fresh batched
+audit because the previous region identities and mask facts may be stale after
+an edit. Audit rounds do not consume Environment action steps; only executed
+point/box edits do.
 
 The candidate path uses only `candidate_evidence` with an action-scoped delta
 record, previous/candidate object masks, and previous/candidate change masks.
@@ -142,13 +180,63 @@ RGB/object-mask/change-mask crops. Hybrid includes T1/T2 object masks as marked
 full-frame panels; Proposal keeps the smaller marked RGB/change overview.
 Candidate calls additionally show previous accepted T1/T2 object-mask crops,
 the previous accepted change-mask crop, exact added/removed delta-mask crops,
-and T1/T2 RGB crops with the delta highlighted in yellow. Candidate records serialize separate
+and original-color delta-only T1/T2 RGB crops. Black outside the delta is
+presentation padding; a one-pixel cyan outer contour marks the delta without
+overwriting its RGB values. Candidate records serialize separate
 previous/candidate crop, delta-component, and seed occupancy facts.
 
-The visual judgment output template uses placeholders rather than a literal
-`visual_confidence=0.0`. Confidence is a runtime gate, not a ranking decoration:
-zero/low confidence or non-clear evidence skips initial diagnosis and prevents
+### Atomic grounded regional audit and confidence policy
+
+Staged v11 has no model-authored `visual_confidence`, diagnosis `confidence`, or
+initial `quality_score`. Evidence uses only `clear|ambiguous|insufficient`.
+Ambiguous/insufficient evidence fails closed as `uncertain_region` and prevents
 candidate commit.
+
+Every initial audit returns these statuses, each exactly
+`pass|fail|not_applicable|uncertain` and paired with a non-empty visual evidence
+string:
+
+- `evidence_sufficient`;
+- `target_class_only`;
+- `white_pixels_supported`;
+- `boundary_alignment`;
+- `internal_holes_absent`;
+- `changed_object_extent_complete`;
+- `fragment_artifacts_absent`.
+
+The same response must explicitly assess the whole audited component as
+`correct|false_positive|false_negative|mixed|uncertain`. Runtime requires that
+assessment to agree with the checklist-derived error. Failed target scope, white-pixel,
+boundary, or fragment checks produce a false-positive diagnosis; failed hole
+or extent checks produce a false-negative diagnosis; failures from both groups
+produce `mixed_error`; insufficient/uncertain evidence produces
+`uncertain_region`; only a fully passing applicable checklist produces `none`.
+The per-region quality is the deterministic pass ratio over applicable quality
+checks, and global initial quality is their mean. Model-authored numeric values
+are accepted only by the legacy parser compatibility path used for archived
+mock/replay data and are ignored for current runtime scoring and ordering.
+
+The audit prompt states the `building` ontology explicitly: permanent roofed
+structures are target; roads, parking, vehicles, trailers/mobile equipment,
+vegetation, bare ground, shadows, illumination, and registration artifacts are
+not. It receives a marked overview, exact local RGB/masks, and an exact binary
+render of the audited connected component. A visible target transition under
+part of a white component does not prove that the entire component is correct.
+
+The dated v10 smoke entry point is:
+
+```bash
+NODE=gpuXX BAILIAN_NETWORK_MODE=direct \
+  bash tools/submit_ca0723_batched_rubric_v10.sh 2 test_85_16
+```
+
+It writes only below
+`outputs/CA_0723(2)-bailian-proposal-batched-rubric-v10`, fixes the submitted
+job to the node that passed the Bailian probe, uses one action step for smoke
+validation, archives Slurm logs under the run's `proposal/logs/`, and sends a
+QQ completion notification on success or failure. Unit and full-regression
+tests use `tools/submit_ca0723_verifier_tests.sh` and write below the separate
+`CA_0723(1)-verifier-batched-rubric-tests` directory.
 
 ### Point composition
 
@@ -172,6 +260,18 @@ objects.  `BailianQwen3VLStageBackend` uses the OpenAI-compatible chat endpoint,
 `response_format={"type":"json_object"}`, and base64 PNG inputs.  Both satisfy
 the same `StageBackend.generate_stage` interface and return provider-independent
 Python mappings.
+
+Hosted structured calls explicitly set `enable_thinking=false`. This keeps
+Qwen3.7-Plus synchronous JSON behavior comparable with the existing Qwen3-VL-Plus
+protocol and prevents hidden reasoning tokens from consuming the bounded completion
+budget before the required stage envelope is emitted.
+
+The runner can instead pass `--bailian-enable-thinking` and an optional positive
+`--bailian-thinking-budget`. These settings are shared by the hosted Agent and
+staged Verifier and are recorded in both run-level and trajectory metadata.
+`tools/submit_ca0722_proposal_qwen37_thinking_v9.sh` uses a fixed budget of 256
+for the CA_0722(10) non-thinking versus CA_0722(11) thinking comparison; it does
+not change candidate evidence or runtime acceptance gates.
 
 Local Transformers decoding does not provide a provider-side JSON constraint.
 The staged backend therefore uses stage-aware extraction: it scans all complete
@@ -267,6 +367,7 @@ The runner exposes independent Agent and Verifier backend selection:
 --verifier qwen_zero_shot|qwen_staged|rule
 --staged-verifier-backend local|bailian
 --bailian-model qwen3-vl-plus
+--verifier-bailian-model qwen3.7-plus-2026-05-26
 --proposal-mode direct|proposal|hybrid
 ```
 
@@ -286,6 +387,18 @@ uses complete state plus regional crops for diagnosis while retaining
 Environment-owned Proposal geometry for execution and candidate verification.
 All modes retain coordinate parsing, tool safety gates, rollback, and
 offline-only GT evaluation.
+
+`--verifier-bailian-model` overrides only the hosted staged Verifier; the Agent
+continues to use `--bailian-model` with thinking disabled. This permits a clean
+verifier-only model/thinking comparison. `--bailian-model` is not limited to the
+example value above. The Proposal v9
+Qwen3.7 comparison uses the fixed snapshot `qwen3.7-plus-2026-05-26` and sends
+`enable_thinking=false` for deterministic structured stages. Job `44562` showed
+that replacing both the initial planner and candidate verifier can stop before
+candidate generation: its test85 selection text identified over-segmented bare
+ground, while the structured diagnosis returned `none` at confidence `0.95`.
+Do not interpret such a run as a direct candidate-evidence model comparison;
+hold initial planning fixed when the experimental question is delta semantics.
 
 ## Required evaluation
 
@@ -323,3 +436,75 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. \
 `test_bailian_adapter` uses an injected fake HTTP opener and a temporary fake
 environment key.  It verifies JSON mode, endpoint construction, usage/request
 metadata, missing-key failure, and absence of credentials from audit records.
+
+## 2026-07-23 batched-audit smoke record
+
+The v10 smoke helper is `tools/submit_ca0723_batched_rubric_v10.sh`; its CPU
+regression/targeted companion is `tools/submit_ca0723_verifier_tests.sh`.  Job
+44826 ran on the previously probed `gpu46` node in direct Bailian mode with
+`qwen3.7-plus-2026-05-26`, one action step, and at most three regions per
+selection batch.  The output is
+`outputs/CA_0723(2)-bailian-proposal-batched-rubric-v10`.
+
+For `test_85_16`, the verifier audited all 19 connected-component proposals in
+seven sequential batches (the trace records 19 selected region IDs and 19
+judgments/diagnoses).  The runtime checklist removed model-authored numeric
+confidence as intended, but the hosted model marked every checklist item for
+all 19 regions as `pass` and authorized `finish` without an action.  Offline
+GT evaluation was IoU `0.3066`, precision `0.3176`, recall `0.8984`, and F1
+`0.4693` (2963 false-positive pixels, 156 false-negative pixels).  Thus the
+experiment validates exhaustive coverage and deterministic runtime scoring,
+but does not yet validate diagnosis accuracy: a discrete checklist alone does
+not prevent systematic all-pass overconfidence when the visual evidence is
+ambiguous.  Future ablations should add hard-negative calibration or an
+independent rule-based contradiction gate before allowing `finish`.
+
+## 2026-07-23 atomic-audit v11 follow-up
+
+V11 replaces v10's lossy `select -> evidence -> diagnosis` chain with exhaustive
+global screening followed by one grounded atomic regional audit. The exact
+screening rationale is an input to that audit and must be explicitly confirmed,
+refuted, or marked uncertain. It requires per-check evidence, validates the
+model's whole-mask assessment against the checklist, and carries the chosen
+diagnosis plus attempted action into candidate verification. Executor candidates
+are still committed only by the existing runtime benefit-without-harm rule;
+accepted edits are audited again from the new state and rejected edits roll back.
+
+An invalid local audit after bounded repair no longer aborts all independent
+regions. Runtime records that region as `uncertain_region` together with the exact
+screening hypothesis and validation error; it still blocks `finish`, but another
+consistent and executable FP/FN diagnosis may authorize an action. This preserves
+fail-closed semantics without recreating v10's zero-action failure mode.
+
+The first hosted attempt (`44855`--`44857`) was invalidated because all models
+returned the categorical alias `evidence_quality=high`; strict parsing failed
+before semantic auditing. V11 normalizes only that observed alias to `clear`, while
+retaining all consistency and harm gates. Slurm jobs `44876` and `44877` passed the
+updated focused protocol tests and complete 167-test regression suite. The
+five-sample, three-arm hosted entry point is:
+
+```bash
+NODE=gpu46 BAILIAN_NETWORK_MODE=direct \
+  bash tools/submit_ca0723_atomic_v11_5sample.sh 5
+```
+
+All arms keep Agent `qwen3-vl-plus` non-thinking and vary only the Verifier:
+Qwen3.7 thinking budget 256, Qwen3.7 non-thinking, and Qwen3-VL-Plus
+non-thinking. Each arm uses the same five samples and up to three executed edits.
+
+CA_0723(5) completed successfully in jobs `44878`, `44879`, and `44880`, with empty
+stderr. The common initial aggregate IoU/F1 was `0.67629040/0.80688931`:
+
+| Verifier | actions | accepted/rejected | selected IoU | selected F1 |
+|---|---:|---:|---:|---:|
+| Qwen3.7 non-thinking | 9 | 7/2 | 0.70009134 | 0.82359262 |
+| Qwen3.7 thinking-256 | 9 | 6/3 | 0.69462518 | 0.81979802 |
+| Qwen3-VL-Plus | 8 | 8/0 | 0.68465376 | 0.81281243 |
+
+Qwen3.7 non-thinking is the recommended treatment. Its seven accepted candidates
+all improved offline IoU, while its two rejected candidates were worse than the
+retained state. On test85 it committed three successively re-verified edits and
+improved IoU `0.30658070 -> 0.33580247`. Qwen3-VL-Plus also improved test85, but
+misaccepted a harmful test20 deletion, showing why acceptance count must not replace
+post-rollout candidate analysis. test50 remains structurally unactionable when the
+Environment has no proposal from either predicted temporal mask.

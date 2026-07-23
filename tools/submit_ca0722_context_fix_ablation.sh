@@ -16,6 +16,12 @@ BAILIAN_NETWORK_MODE="${BAILIAN_NETWORK_MODE:-}"
 MEMORY="${MEMORY:-16G}"
 PARENT="${OUTPUT:-$ROOT/outputs/CA_0722(${RUN_INDEX})-bailian-context-fix-3arm}"
 SHARED_LOG_ROOT="${SHARED_LOG_ROOT:-/guisongxia01/pangchao/wangyihan/wyh/.slurm-logs/CA_0722_${RUN_INDEX}_marked_transition}"
+PROTOCOL_VERSION="${PROTOCOL_VERSION:-v8}"
+PROTOCOL_EVIDENCE="${PROTOCOL_EVIDENCE:-action-scoped delta masks plus delta-highlighted T1/T2 RGB and previous/candidate masks}"
+PROTOCOL_TRANSITION="${PROTOCOL_TRANSITION:-v8 deterministic T1/T2 facts plus unique editable-target resolution and action-scoped delta RGB evidence}"
+BAILIAN_MODEL="${BAILIAN_MODEL:-qwen3-vl-plus}"
+BAILIAN_ENABLE_THINKING="${BAILIAN_ENABLE_THINKING:-0}"
+BAILIAN_THINKING_BUDGET="${BAILIAN_THINKING_BUDGET:-}"
 SAMPLES=(test_20_15 test_78_13 test_85_16)
 read -r -a MODES <<< "${MODES:-direct proposal hybrid}"
 
@@ -29,6 +35,18 @@ if [[ "$BAILIAN_NETWORK_MODE" != "direct" && "$BAILIAN_NETWORK_MODE" != "proxy" 
 fi
 if [[ ! "$RUN_INDEX" =~ ^[0-9]+$ ]]; then
   echo "RUN_INDEX must be a non-negative integer" >&2
+  exit 2
+fi
+if [[ "$BAILIAN_ENABLE_THINKING" != "0" && "$BAILIAN_ENABLE_THINKING" != "1" ]]; then
+  echo "BAILIAN_ENABLE_THINKING must be 0 or 1" >&2
+  exit 2
+fi
+if [[ -n "$BAILIAN_THINKING_BUDGET" && ! "$BAILIAN_THINKING_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BAILIAN_THINKING_BUDGET must be a positive integer" >&2
+  exit 2
+fi
+if [[ "$BAILIAN_ENABLE_THINKING" == "0" && -n "$BAILIAN_THINKING_BUDGET" ]]; then
+  echo "BAILIAN_THINKING_BUDGET requires BAILIAN_ENABLE_THINKING=1" >&2
   exit 2
 fi
 for mode in "${MODES[@]}"; do
@@ -69,9 +87,12 @@ printf '%s\n' \
   "- memory_per_arm: \`$MEMORY\`" \
   '- samples: `test_20_15 test_78_13 test_85_16`' \
   "- arms: \`${MODES[*]}\`" \
+  "- bailian_model: \`$BAILIAN_MODEL\`" \
+  "- bailian_enable_thinking: \`$BAILIAN_ENABLE_THINKING\`" \
+  "- bailian_thinking_budget: \`${BAILIAN_THINKING_BUDGET:-none}\`" \
   '- regional evidence: `active-region-marked global overview plus exact local crops`' \
-  '- candidate evidence: `action-scoped delta masks plus delta-highlighted T1/T2 RGB and previous/candidate masks`' \
-  '- transition policy: `v8 deterministic T1/T2 facts plus unique editable-target resolution and action-scoped delta RGB evidence`' \
+  "- candidate evidence: \`$PROTOCOL_EVIDENCE\`" \
+  "- transition policy: \`$PROTOCOL_TRANSITION\`" \
   '- finish policy: `all Environment audit regions require sufficient evidence and diagnosis=none`' \
   '- negative point: `SimpleClick-supported subtraction inside deterministic point ROI`' \
   '- GT policy: `loaded only after each arm rollout completes`' \
@@ -83,7 +104,10 @@ if [[ "$BAILIAN_NETWORK_MODE" == "direct" ]]; then
     env
     -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY
     -u http_proxy -u https_proxy -u all_proxy -u no_proxy
+    "CHANGE_AGENT_STAGED_PROTOCOL_VERSION=$PROTOCOL_VERSION"
   )
+else
+  NETWORK_PREFIX=(env "CHANGE_AGENT_STAGED_PROTOCOL_VERSION=$PROTOCOL_VERSION")
 fi
 
 submit_arm() {
@@ -113,7 +137,7 @@ submit_arm() {
     --agent-backend bailian
     --verifier qwen_staged
     --staged-verifier-backend bailian
-    --bailian-model qwen3-vl-plus
+    --bailian-model "$BAILIAN_MODEL"
     --max-new-tokens 128
     --verifier-max-new-tokens 512
     --verifier-accept-threshold 0.82
@@ -131,6 +155,12 @@ submit_arm() {
     --sam3-bpe /guisongxia01/pangchao/wangyihan/OmniOVCD/sam3/assets/bpe_simple_vocab_16e6.txt.gz
     --sam3-resolution 1008
   )
+  if [[ "$BAILIAN_ENABLE_THINKING" == "1" ]]; then
+    command+=(--bailian-enable-thinking)
+  fi
+  if [[ -n "$BAILIAN_THINKING_BUDGET" ]]; then
+    command+=(--bailian-thinking-budget "$BAILIAN_THINKING_BUDGET")
+  fi
   local command_string child_q log_dir_q
   command_string=$(printf '%q ' "${command[@]}")
   child_q=$(printf '%q' "$child")

@@ -1,5 +1,75 @@
 # Development log
 
+## 2026-07-23 — Atomic grounded verifier v11
+
+CA_0723(2) v10 exhaustively audited test85 but still produced zero actions: its
+selection prose recognized over-segmentation and non-target content, then the
+separate evidence/diagnosis calls lost that meaning and marked all 19 regions
+all-pass. V11 removes that semantic handoff. Each region now has one target-aware
+audit response containing copied mask state, RGB states, a whole-component mask
+assessment, and a seven-item checklist with evidence for every judgment. Runtime
+rejects assessment/checklist, mask-polarity, evidence-quality, and target-view
+contradictions.
+
+Planning now prefers the smallest safe executable diagnosis. Candidate review
+receives the attempted action and persisted initial diagnosis together with exact
+Environment-owned deltas. A better candidate commits and triggers a complete fresh
+audit; all other candidates roll back and replan. The runner also supports a
+separate `--verifier-bailian-model`, keeps the hosted Agent non-thinking, and
+correctly validates/records an arbitrary requested sample list.
+
+Focused Slurm regression job `44850` and the 164-test full regression job `44851`
+both completed successfully. `tools/submit_ca0723_atomic_v11_5sample.sh` defines
+three verifier-only arms over five samples while holding Agent, initialization,
+execution, seed, and safety gates fixed.
+
+The first hosted attempt (`44855`--`44857`) exposed a categorical API mismatch:
+all three arms returned `evidence_quality=high` although the prompt required
+`clear|ambiguous|insufficient`, so every completed initial audit failed closed and
+authorized no action. The run was invalidated and moved out of formal `outputs/`
+to the workspace diagnostics directory.
+
+V11 now normalizes only the observed categorical alias `high -> clear`; all other
+unknown values remain invalid. More importantly, it restores exhaustive global
+screening and persists each batch's exact suspected-error reason into every local
+atomic audit. The local response must explicitly mark the hypothesis
+`confirmed|refuted|uncertain`, and runtime requires that resolution to agree with
+the whole-mask assessment and grounded checklist. Thus a useful global
+over-segmentation observation cannot disappear into an unrelated all-pass response.
+Slurm jobs `44868` and `44869` passed the updated focused suite and all 166 tests.
+
+The next hosted pass confirmed that semantic continuity was restored: global
+screening identified parking lots, bare ground, and vehicles, and local audits
+explicitly confirmed those hypotheses. One response used `mixed` for a component
+whose checklist had only precision failures. Rather than aborting the whole sample,
+v11 now fails only that region closed as `uncertain_region`, preserves its hypothesis
+and validation error, blocks `finish`, and continues auditing independent regions.
+Candidate benefit/harm acceptance remains unchanged. Slurm jobs `44876` and `44877`
+passed the focused suite and all 167 tests, including this continuation case.
+
+CA_0723(5) then completed five samples in all three hosted arms on `gpu46`; all
+stderr files were empty. The common initial aggregate was IoU `0.67629040` and F1
+`0.80688931`. Qwen3.7 non-thinking (`44879`, 36m43s) was best: 9 actions, 7 accepted,
+2 rejected, selected IoU `0.70009134`, and F1 `0.82359262`. Every accepted candidate
+in this arm improved post-rollout IoU and both rejected test20 candidates were worse
+than the retained state. test85 improved `0.30658070 -> 0.33580247` and FP fell
+`2963 -> 2515`; test78 improved `0.75787116 -> 0.78081913`; test20 improved
+`0.84638554 -> 0.84989316`.
+
+Qwen3.7 thinking (`44878`, 59m14s) used 9 actions, accepted 6, rejected 3, and
+reached aggregate IoU `0.69462518`; it correctly rejected all three harmful test20
+candidates. Qwen3-VL-Plus (`44880`, 39m57s) accepted all 8 candidates and reached
+IoU `0.68465376`, but it misaccepted a harmful test20 deletion
+(`0.84638554 -> 0.78786202`). Qwen3.7 non-thinking is therefore the recommended
+Verifier treatment; acceptance count alone is not a useful ranking signal.
+
+Two limitations remain. test50 has no Environment proposal because both predicted
+temporal masks are empty, so none of the three Verifiers can recover its 166 GT
+false-negative pixels. On GT-empty test1, Qwen3-VL-Plus removed 375 of 626 false
+positives, while the two Qwen3.7 treatments produced no selected action. The failed
+CA_0723(3)/(4) attempts and logs were moved out of formal outputs into the workspace
+diagnostics directory.
+
 ## 2026-07-22 — Proposal action-scoped candidate evidence
 
 The completed CA_0722(5) run established a clean safety/utility split. Staged
@@ -83,6 +153,42 @@ the exact delta directly (for example, delta-only original-color T1/T2 crops wit
 a contour marker) instead of relying on a strongly yellow-blended highlight in a
 large action crop. Acceptance thresholds should remain unchanged until that
 evidence presentation is tested.
+
+Schema v9 implements this presentation change. Candidate regional calls now replace
+the large RGB proposal rectangle and yellow fill with delta-only original-color T1/T2
+renders: pixels outside the authoritative delta are black presentation padding, and a
+cyan outer contour marks the delta without changing its RGB values. The runtime
+confidence threshold, transition polarity, and harm gates are unchanged. The focused
+regression covers RGB preservation, contour placement, and removal of the old
+rectangular/yellow candidate inputs; submit the Proposal-only v9 launcher for the
+hosted semantic check.
+
+Proposal-only v9 job `44554` completed on `gpu46` in 2m45s with empty stderr.
+The evidence presentation changed as intended, but selected aggregate IoU stayed
+at `0.69744116`. test85's useful second deletion again removed 349 false-positive
+pixels and no true positives, improving offline IoU to `0.33236925`, yet Qwen
+rejected it as a real `T1 building -> T2 background` transition at confidence
+`0.95`. This is the opposite temporal label from v8's `background -> building`
+for the same useful delta, also at confidence `0.95`. The stable rejection with
+unstable high-confidence semantics is evidence that the next ablation should
+change the candidate-evidence vision model rather than weaken confidence or harm
+gates.
+
+The fixed-snapshot Qwen3.7-Plus comparison was submitted through
+`tools/submit_ca0722_proposal_qwen37_v9.sh`. Slurm job `44562` completed on
+`gpu46` in 1m28s with empty stderr and recorded
+`qwen3.7-plus-2026-05-26` for both Agent and staged Verifier, with thinking
+disabled. It produced zero candidates on all three samples and retained selected
+aggregate IoU `0.69744116`. For test85 the selection stage correctly described
+bare ground/dirt in r0 as over-segmented non-change, but the following evidence
+and diagnosis calls returned `background -> building` and `error_type=none` at
+confidence `0.95`. The contradiction prevented an executable action before the
+v9 candidate evidence could be tested. test20/test78 also remained unchanged,
+so no unsafe commit was introduced. This run does not establish that Qwen3.7 is
+worse at delta semantics; it establishes that a full-model swap confounds the
+candidate comparison with initial staged planning. The next clean comparison
+must isolate the candidate-evidence backend or add a runtime consistency check
+between selection rationale and structured diagnosis.
 
 ## 2026-07-22 — runtime candidate evidence and local negative edits
 
